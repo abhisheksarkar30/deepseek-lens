@@ -1,8 +1,10 @@
-# Bead 2: Non-blocking capture sink
+# Bead br-GI-1-02: Non-blocking capture sink
+
+**Plan Reference**: `docs/planning/GI-1-deepseek-lens-v1.md` §Bead sequence
 
 - **Priority**: P0 (critical)
-- **Dependencies**: 1
-- **Blocks**: 3, 7
+- **Dependencies**: br-GI-1-01
+- **Blocks**: br-GI-1-03, br-GI-1-07
 
 ## Description
 

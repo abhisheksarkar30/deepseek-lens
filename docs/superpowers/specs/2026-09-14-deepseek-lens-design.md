@@ -161,8 +161,9 @@ migrations when a v2 changes a shipped column.
 
 ### Body storage policy
 
-Default **full, with a per-request size cap** (~256KB, configurable). Replay needs the real body,
-and detection of `cache_control` needs the request body. Configurable to `truncated` or `off`.
+Default **full, with a per-body size cap** (~256KB, configurable) applied to **both** the request
+and the response body. Replay needs the real body, and detection of `cache_control` needs the
+request body. Configurable to `truncated` or `off`.
 
 ### Secrets and network posture
 

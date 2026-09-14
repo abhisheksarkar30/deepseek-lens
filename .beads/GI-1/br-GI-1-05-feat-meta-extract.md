@@ -1,8 +1,10 @@
-# Bead 5: Request metadata extraction
+# Bead br-GI-1-05: Request metadata extraction
+
+**Plan Reference**: `docs/planning/GI-1-deepseek-lens-v1.md` §Bead sequence
 
 - **Priority**: P1 (high)
-- **Dependencies**: 1
-- **Blocks**: 7, 10, 11, 12
+- **Dependencies**: br-GI-1-01
+- **Blocks**: br-GI-1-07, br-GI-1-10, br-GI-1-11, br-GI-1-12
 
 ## Description
 
@@ -27,9 +29,13 @@ type Meta struct {
     ToolNames      []string
     ToolChoice     string   // raw, plus DisableParallelToolUse bool
     DisableParallelToolUse bool
+    ServiceTier    string   // raw service_tier value; "" if absent
+    ContainerPresent bool   // a container object is present
+    MCPServersPresent bool  // mcp_servers is present
     UnsupportedBlocks []string // e.g. "document", "mcp_tool_use"
     MetadataUserID string   // metadata.user_id, if present
     SessionHeader  string   // x-lens-session, if present
+    HasAnthropicBeta bool   // anthropic-beta request header present
     BodyBytes      int
     MessageCount   int
     PrefixHash     string   // see below
@@ -43,12 +49,18 @@ where the client asked for caching. Paths are human-readable indices, not JSON p
 `UnsupportedBlocks` scans every content block's `type` against the known-unsupported set:
 `document`, `search_result`, `redacted_thinking`, `mcp_tool_use`, `mcp_tool_result`,
 `container_upload`, `code_execution_tool_result`, `server_tool_use` (flagged only when it is not a
-`web_search_tool_result` pairing). The set is a package-level slice so bead 10's rules and this
+`web_search_tool_result` pairing). The set is a package-level slice so br-GI-1-10's rules and this
 scanner share one source of truth.
+
+`ServiceTier` records the raw `service_tier` value (`""` if absent); `ContainerPresent` and
+`MCPServersPresent` record the presence of `container` / `mcp_servers` in the body; `HasAnthropicBeta`
+records the presence of the `anthropic-beta` request header. All four are accepted-and-ignored by
+DeepSeek, so they are captured here purely so br-GI-1-10 can raise `param_ignored` / `header_ignored`
+on them — extraction for detection, not interpretation.
 
 `PrefixHash` is the session-correlation key: SHA-256 over the concatenated `system` text plus the
 first two `messages` entries, hex-encoded, truncated to 16 chars. It is computed here (cold path)
-rather than in bead 12 so the column is populated from the first request and bead 12 only has to
+rather than in br-GI-1-12 so the column is populated from the first request and br-GI-1-12 only has to
 apply the time-window grouping.
 
 Malformed JSON returns `Meta{BodyBytes: len(reqBody)}` with zero values and no error — a request the
@@ -61,8 +73,8 @@ defensively.
 ## Rationale
 
 This is the extraction layer that feeds three separate features: dropped-parameter detection
-(bead 10) needs `HasCacheControl`, `ThinkingBudget`, `TopP`, `TopK` and `UnsupportedBlocks`;
-cost accounting (bead 11) needs `ModelRequested`; session grouping (bead 12) needs `PrefixHash` and
+(br-GI-1-10) needs `HasCacheControl`, `ThinkingBudget`, `TopP`, `TopK` and `UnsupportedBlocks`;
+cost accounting (br-GI-1-11) needs `ModelRequested`; session grouping (br-GI-1-12) needs `PrefixHash` and
 `SessionHeader`. Building it once, as a pure function over bytes with a full `Meta` return, means
 each feature is a consumer rather than a re-parser.
 
@@ -95,6 +107,10 @@ well-tested file, rather than scattering nil guards across three features.
   - **`tool_choice: {"type":"auto","disable_parallel_tool_use":true}`** → both fields captured.
   - **`metadata.user_id`** → captured; **`metadata: null`** → no panic.
   - **`x-lens-session` header** → `SessionHeader` captured; absent → "".
+  - **`service_tier`** present → `ServiceTier` set to the raw value; absent → "".
+  - **`container`** present → `ContainerPresent` true; absent → false.
+  - **`mcp_servers`** present → `MCPServersPresent` true; absent → false.
+  - **`anthropic-beta` header** → `HasAnthropicBeta` true; absent → false.
   - **Malformed JSON** (`{"messages":`) → zero `Meta`, `BodyBytes` correct, no panic, no error.
   - **Type confusion**: `messages` as a string, `system` as an object, `thinking` as a number,
     `tools` as `null` → no panic, degrades sensibly.

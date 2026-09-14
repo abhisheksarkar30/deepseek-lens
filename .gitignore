@@ -1,0 +1,14 @@
+# Build output
+/lens
+/lens.exe
+dist/
+
+# Local runtime state. The real files live in ~/.deepseek-lens/ (config.toml,
+# lens.db); these guard a repo-local override via --db or a local config file.
+*.db
+*.db-wal
+*.db-shm
+config.toml
+
+# Local cross-review artifacts (should never be committed)
+/**/*review*/

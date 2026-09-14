@@ -1,8 +1,10 @@
-# Bead 1: Repo scaffold, module init, config, `doctor`
+# Bead br-GI-1-01: Repo scaffold, module init, config, `doctor`
+
+**Plan Reference**: `docs/planning/GI-1-deepseek-lens-v1.md` §Bead sequence
 
 - **Priority**: P0 (critical)
 - **Dependencies**: none
-- **Blocks**: 2, 3, 6, 8
+- **Blocks**: br-GI-1-02, br-GI-1-03, br-GI-1-06, br-GI-1-08
 
 ## Description
 
@@ -18,8 +20,10 @@ perturb the module graph.
 Fields: `ProxyAddr` (default `127.0.0.1:8787`), `DashboardAddr` (default `127.0.0.1:8788`),
 `UpstreamURL` (default `https://api.deepseek.com/anthropic`), `DBPath`
 (default `~/.deepseek-lens/lens.db`), `BodyPolicy` (`full` | `truncated` | `off`, default `full`),
-`BodyCapBytes` (default 262144), `AllowRemote` (default false), `Capture` (default true),
-`SessionGapMinutes` (default 30).
+`BodyCapBytes` (default 262144 — the cap applied to **each** captured body, request *and* response),
+`AllowRemote` (default false), `Capture` (default true),
+`SessionGapMinutes` (default 30), `ReplayEnabled` (default false — the replay endpoint, br-GI-1-13,
+stays off until this is explicitly set; see `--replay` on `lens serve`, br-GI-1-08).
 
 Config file: `~/.deepseek-lens/config.toml`. Parse it with a minimal hand-rolled
 `key = value` reader rather than pulling in a TOML library — the schema is flat, scalar, and

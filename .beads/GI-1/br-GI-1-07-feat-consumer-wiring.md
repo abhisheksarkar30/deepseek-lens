@@ -1,8 +1,10 @@
-# Bead 7: Consumer wiring (sink → parse → store)
+# Bead br-GI-1-07: Consumer wiring (sink → parse → store)
+
+**Plan Reference**: `docs/planning/GI-1-deepseek-lens-v1.md` §Bead sequence
 
 - **Priority**: P0 (critical)
-- **Dependencies**: 2, 3, 4, 5, 6
-- **Blocks**: 8, 9, 10, 11, 12
+- **Dependencies**: br-GI-1-02, br-GI-1-03, br-GI-1-04, br-GI-1-05, br-GI-1-06
+- **Blocks**: br-GI-1-08, br-GI-1-09, br-GI-1-10, br-GI-1-11, br-GI-1-12
 
 ## Description
 
@@ -14,15 +16,23 @@ The cold-path bridge that turns captured calls into rows. One goroutine, owned b
 1. `parse.ExtractMeta(call.ReqBody, call.ReqHeaders)` → `Meta`
 2. `parse.ExtractUsage(call.RespBody, call.RespHeaders.Get("Content-Type"))` → `Usage`
 3. `proxy`-provided status/timings + `Meta` + `Usage` → `store.Request`
-4. `store.InsertRequest(ctx, req)` → `id`
-5. If `call.Err != nil`, record it as a warning row with kind `upstream_error`
-6. Analytics hooks (beads 10–12) are invoked through a **plugin interface**, `Analyzer`:
-   `Analyze(meta Meta, usage Usage, req *store.Request) []store.Warning`
-   In this bead the registered set is empty; beads 10 and 11 register into it without touching
-   this file. (`ponytail:` a slice of one-method interfaces, not a registry with priorities —
-   upgrade if ordering between analyzers ever matters.)
-7. `store.InsertWarnings(ctx, id, warnings)`
-8. Session assignment is delegated to an injected `SessionResolver` interface, nil in this bead.
+4. **Resolve session** — delegated to an injected `SessionResolver` interface (nil in this bead),
+   which sets `req.SessionID` **before** insert.
+5. **Compute cost** — the pre-insert cost step (br-GI-1-11) sets `req.CostUSD` / `req.CostSource`
+   **before** insert. Absent in this bead.
+6. `store.InsertRequest(ctx, req)` → `id`
+7. Analytics hooks (br-GI-1-10) are invoked through a **plugin interface**, `Analyzer`:
+   `Analyze(meta parse.Meta, usage parse.Usage, req *store.Request) []store.Warning`
+   In this bead the registered set is empty; br-GI-1-10 adds a registration line in `consumer.go`
+   (the `Analyzer` interface does not change).
+   (`ponytail:` a slice of one-method interfaces, not a registry with priorities — upgrade if
+   ordering between analyzers ever matters.)
+8. If `call.Err != nil`, record it as a warning row with kind `upstream_error`.
+9. `store.InsertWarnings(ctx, id, warnings)`
+
+Order matters: `session_id`, `cost_usd`, and `cost_source` are columns on the row, so session
+resolution and costing run **before** `InsertRequest`; the `Analyzer` rules attach to the row by
+id, so they run **after** insert.
 
 **Error containment is the point of this bead.** Any per-call failure — bad JSON, store error,
 analyzer panic — is logged to stderr once and the loop continues. A panic in an analyzer is
@@ -46,9 +56,12 @@ place a cross-component mismatch can hide. Locating the wiring in one small file
 is debuggable in one screen.
 
 The batching trade is deliberate: per-call writes would be correct but churn SQLite; unbounded
-batching would make the dashboard stale. 50-or-250ms is the cheap middle. The `Analyzer` and
-`SessionResolver` interfaces exist so beads 10–12 are *additive* — they register, they do not
-rewrite the pipeline.
+batching would make the dashboard stale. 50-or-250ms is the cheap middle. The seams exist so beads
+10–12 plug in at fixed points rather than rewriting the pipeline — but they are **not** uniformly
+"additive", because the seams differ in kind and timing. Bead 12 injects a pre-insert
+`SessionResolver` (sets `req.SessionID`), br-GI-1-11 supplies a pre-insert cost step that writes
+`cost_usd`/`cost_source` on the row (it returns no `[]Warning`), and br-GI-1-10 registers a
+post-insert `Analyzer` whose warnings attach to the row by id.
 
 ## Outcome Definition
 

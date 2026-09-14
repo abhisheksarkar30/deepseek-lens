@@ -1,7 +1,9 @@
-# Bead 12: Session and conversation grouping
+# Bead br-GI-1-12: Session and conversation grouping
+
+**Plan Reference**: `docs/planning/GI-1-deepseek-lens-v1.md` §Bead sequence
 
 - **Priority**: P2 (medium)
-- **Dependencies**: 5, 6, 7, 9
+- **Dependencies**: br-GI-1-05, br-GI-1-06, br-GI-1-07, br-GI-1-09
 - **Blocks**: none
 
 ## Description
@@ -9,8 +11,10 @@
 Group individual calls into agentic sessions so the dashboard answers "this Claude Code run cost $X
 across N turns" instead of showing an undifferentiated call log.
 
-`internal/session` implements the `SessionResolver` interface that bead 7 already injects (nil until
-now), so no pipeline surgery is required.
+`internal/session` implements the `SessionResolver` interface that br-GI-1-07 already injects (nil until
+now). It is its **own pre-insert seam**, distinct from the post-insert `Analyzer` seam: resolution
+runs before `InsertRequest` and sets `req.SessionID` on the row (which is why `lens ls --session`
+and the session drill-down can filter on it). No pipeline surgery is required.
 
 **Resolution order**, first match wins:
 
@@ -18,7 +22,7 @@ now), so no pipeline surgery is required.
    the session id verbatim. Always wins. Approximately five lines, and the escape hatch for every
    limitation below.
 2. **Prefix + gap** — otherwise, look up the most recent session with the same `meta.PrefixHash`
-   (bead 5's SHA-256 over system text plus the first two messages). If its `last_seen` is within
+   (br-GI-1-05's SHA-256 over system text plus the first two messages). If its `last_seen` is within
    `SessionGapMinutes` (default 30), attach to it and bump `last_seen`. Otherwise create a new
    session with a fresh id and the same prefix hash.
 3. A call whose body was unparseable (empty `PrefixHash`) gets a session with a null prefix, keyed
@@ -44,12 +48,12 @@ than aggregate-on-read keeps the session list O(1) per call instead of O(rows).
 `lens ls --session <id>` filters; `lens show <id>` prints the session header when the id is a
 session. `lens stats --by session` ranks by cost.
 
-**Dashboard**: session table replacing the bead 9 placeholder, with a drill-down listing every call
+**Dashboard**: session table replacing the br-GI-1-09 placeholder, with a drill-down listing every call
 in the session in order, a running token/cost total, and the union of all warnings raised across the
 session — which is the view that makes the flagship feature legible, since a `cache_control_ignored`
 firing on all forty turns of one run is one story, not forty rows.
 
-Cost totals in a session reuse bead 11's mixed-pricing rule: `$1.23 + N unpriced`.
+Cost totals in a session reuse br-GI-1-11's mixed-pricing rule: `$1.23 + N unpriced`.
 
 ## Rationale
 

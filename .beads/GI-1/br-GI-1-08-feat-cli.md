@@ -1,16 +1,20 @@
-# Bead 8: CLI subcommands
+# Bead br-GI-1-08: CLI subcommands
+
+**Plan Reference**: `docs/planning/GI-1-deepseek-lens-v1.md` §Bead sequence
 
 - **Priority**: P1 (high)
-- **Dependencies**: 1, 6, 7
-- **Blocks**: 11, 13
+- **Dependencies**: br-GI-1-01, br-GI-1-06, br-GI-1-07
+- **Blocks**: br-GI-1-11, br-GI-1-13
 
 ## Description
 
-The command surface, dispatched from the map established in bead 1. Stdlib `flag` only.
+The command surface, dispatched from the map established in br-GI-1-01. Stdlib `flag` only.
 
-**`lens serve`** — starts the proxy listener (bead 3) and the dashboard listener (bead 9) and the
-consumer (bead 7) in one process. Flags: `--proxy-addr`, `--dashboard-addr`, `--no-capture`,
-`--allow-remote`, `--db`. Prints a startup banner with the exact
+**`lens serve`** — starts the proxy listener (br-GI-1-03) and the dashboard listener (br-GI-1-09) and the
+consumer (br-GI-1-07) in one process. Flags: `--proxy-addr`, `--dashboard-addr`, `--no-capture`,
+`--allow-remote`, `--db`, `--replay`. `--replay` sets config `ReplayEnabled` and enables the replay
+endpoint (`POST /api/requests/{id}/replay`, br-GI-1-13), which is **off by default** and guarded by an
+`Origin`/`Host` allowlist. Prints a startup banner with the exact
 `export ANTHROPIC_BASE_URL=http://127.0.0.1:8787` line for the user to copy, plus the dashboard URL.
 Blocks until SIGINT; graceful shutdown with a bounded drain. `--no-capture` prints a standing
 warning that nothing is being recorded.
@@ -39,12 +43,14 @@ flagship feature and the command a user will actually run to answer "what is bei
 **`lens export`** — JSONL to stdout, one request per line, for external analysis. Real JSON
 encoding, not the truncated terminal formatting.
 
-**`lens doctor`** — extended from bead 1: now also reports schema version, row counts, sink
-accepted/dropped, consumer last-write age, WAL mode, and a PASS/WARN line per check. Exits non-zero
-if any check fails.
+**`lens doctor`** — extended from br-GI-1-01: now also reports schema version, row counts, sink
+accepted/dropped, consumer last-write age, WAL mode, the replay posture (off by default; on when
+config `ReplayEnabled` is set — `--replay`, `LENS_REPLAY_ENABLED`, or `replay_enabled` in the config
+file; endpoint guarded by the `Origin`/`Host` allowlist), and a PASS/WARN line per check. Exits
+non-zero if any check fails.
 
 **`lens prices`, `lens replay`** — registered in the map but returning "not implemented" until
-beads 11 and 13.
+br-GI-1-11 and br-GI-1-13.
 
 Shared output helpers in `internal/cli`: `table()` (column-aligned, width-aware), `humanDuration`,
 `humanTokens` (`1.2k`, `3.4M`), `humanCost`, and `relTime`. `--json` on `ls`/`stats`/`warnings`
@@ -69,6 +75,8 @@ reimplemented seven times.
 - `lens tail` with stdout piped emits plain lines, not cursor-movement sequences.
 - `lens doctor` exits non-zero when a check fails.
 - `lens serve --no-capture` prints the standing warning and records nothing.
+- The replay endpoint is enabled when config `ReplayEnabled` is set — via `--replay`,
+  `LENS_REPLAY_ENABLED`, or `replay_enabled` in the config file; it is off by default.
 - Startup banner contains a copy-pasteable `ANTHROPIC_BASE_URL` line with the effective address.
 
 ## Test Specifications
@@ -92,6 +100,9 @@ reimplemented seven times.
   - `warnings` groups by kind with correct counts; `--detail` lists occurrences.
   - `export` emits valid JSONL with one object per request.
   - `doctor` reports PASS on a healthy store and non-zero exit on an injected failure.
+  - `doctor` reports the replay posture (off by default; on when `ReplayEnabled` is set via
+    `--replay`, `LENS_REPLAY_ENABLED`, or `replay_enabled` in the config file; the `Origin`/`Host`
+    guard named).
   - `serve --help` lists all flags.
 - E2E: `lens serve` started as a subprocess, a request sent through it, `lens ls` shows it.
 

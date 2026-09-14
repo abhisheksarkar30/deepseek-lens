@@ -1,8 +1,10 @@
-# Bead 6: SQLite store and schema
+# Bead br-GI-1-06: SQLite store and schema
+
+**Plan Reference**: `docs/planning/GI-1-deepseek-lens-v1.md` §Bead sequence
 
 - **Priority**: P0 (critical)
-- **Dependencies**: 1
-- **Blocks**: 7, 8, 9, 12, 13
+- **Dependencies**: br-GI-1-01
+- **Blocks**: br-GI-1-07, br-GI-1-08, br-GI-1-09, br-GI-1-12, br-GI-1-13
 
 ## Description
 
@@ -10,15 +12,20 @@ Persistence via `modernc.org/sqlite` (pure Go, no CGO — this is why cross-comp
 
 **Connection posture** (latency invariant 5): one **writer** connection and one **read-only reader**
 connection, both opened at startup. The writer is used by exactly one goroutine (the consumer,
-bead 7) — never concurrently — which is what makes SQLite locking a non-issue. The reader is
+br-GI-1-07) — never concurrently — which is what makes SQLite locking a non-issue. The reader is
 independent, so dashboard queries never block capture. Both set `_pragma=journal_mode(WAL)`,
 `_pragma=busy_timeout(5000)`, `_pragma=synchronous(NORMAL)`.
+
+Replay stays inside this discipline rather than breaking it: `lens replay <id>` (br-GI-1-13) does
+**not** open its own writer — it calls the running server's `POST /api/requests/{id}/replay`, and the
+server records the replay row through the same consumer writer. So there is never a second writer
+process on the DB file, and the "locking is a non-issue" claim holds with replay in the picture.
 
 **Schema** (`schema.sql`, applied with `CREATE TABLE IF NOT EXISTS`):
 `requests`, `sessions`, `warnings`, plus indices on `started_at`, `session_id`, and
 `warnings.request_id`.
 
-**All columns for all 13 beads are created here**, including ones only bead 10–13 populate:
+**All columns for all 13 beads are created here**, including ones only br-GI-1-10–br-GI-1-13 populate:
 `session_id`, `cost_usd`, `cost_source`, `stop_reason`, `replay_of`, `replay_edits`, `prefix_hash`.
 This is
 deliberate — it avoids introducing a migration framework in v1.

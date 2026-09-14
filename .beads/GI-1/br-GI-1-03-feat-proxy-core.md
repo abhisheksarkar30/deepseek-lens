@@ -1,8 +1,10 @@
-# Bead 3: Transparent proxy core
+# Bead br-GI-1-03: Transparent proxy core
+
+**Plan Reference**: `docs/planning/GI-1-deepseek-lens-v1.md` §Bead sequence
 
 - **Priority**: P0 (critical)
-- **Dependencies**: 1, 2
-- **Blocks**: 7, 8, 9 (and 13, directly)
+- **Dependencies**: br-GI-1-01, br-GI-1-02
+- **Blocks**: br-GI-1-07, br-GI-1-08, br-GI-1-09 (and br-GI-1-13, directly)
 
 ## Description
 
@@ -24,12 +26,15 @@ Built on `httputil.ReverseProxy` with:
 
 - Request body: wrap `r.Body` in an `io.TeeReader` feeding a `*bytes.Buffer` before proxying, so the
   original stream still flows to the upstream untouched. If the request exceeds `BodyCapBytes`,
-  keep reading (the request must not be truncated) but stop appending past the cap, recording
-  `truncated bool`.
+  keep reading (the request must not be truncated) but stop appending past the cap — the captured
+  copy is exactly `BodyCapBytes` long.
 - Response body: in `ModifyResponse`, replace `res.Body` with a tee reader that writes to an
-  accumulator as the proxy copies it to the client. The accumulator is only inspected in
-  `ModifyResponse`'s returned wrapper's `Close`, i.e. after the stream has finished — so the hot
-  path never seeks or rewinds.
+  accumulator as the proxy copies it to the client. The accumulator is capped by the **same**
+  `BodyCapBytes` as the request: bytes past the cap are dropped, not appended — so when the response
+  exceeds the cap the captured `RespBody` is exactly `BodyCapBytes` long. The cap bounds only what
+  lens *stores* — the client always receives the full stream. The accumulator is only inspected in
+  `ModifyResponse`'s returned wrapper's `Close`, i.e. after the stream has finished — so the hot path
+  never seeks or rewinds.
 - Header redaction: `x-api-key`, `authorization`, and `cookie` are replaced with `[redacted]` on
   **both** request and response copies before the `CapturedCall` is submitted.
 
@@ -60,7 +65,9 @@ the client waiting for it to finish.
 - A `CapturedCall` is submitted with status, timings, and bodies populated.
 - `x-api-key` appears as `[redacted]` in the captured headers.
 - With `Capture: false`, no `CapturedCall` is submitted and the body is still byte-identical.
-- A request body larger than `BodyCapBytes` is forwarded in full but captured truncated.
+- A request body larger than `BodyCapBytes` is forwarded in full but the captured copy is capped.
+- A response body larger than `BodyCapBytes` is delivered to the client in full but the captured
+  copy is capped at exactly `BodyCapBytes`, never accumulated unboundedly.
 
 ## Test Specifications
 
@@ -79,6 +86,8 @@ the client waiting for it to finish.
     verbatim and the capture holds it.
   - **Oversized request body**: POST `BodyCapBytes + 1KB`; assert the upstream received all of it
     and the captured copy is capped.
+  - **Oversized response body**: fake upstream streams `BodyCapBytes + 1KB`; assert the client
+    received all of it byte-identically and the captured `RespBody` is exactly `BodyCapBytes` long.
   - **Redaction**: send a request whose `x-api-key` header carries a known sentinel value; assert
     the captured `ReqHeaders` holds `[redacted]` for that header, and the upstream received the
     sentinel unchanged.
@@ -89,7 +98,7 @@ the client waiting for it to finish.
   - **Capture disabled**: with `Capture: false`, assert zero submissions and byte-identical output.
   - **Full sink does not delay the client**: fill the sink to capacity, issue a request, assert it
     returns within a tight deadline and `dropped` incremented.
-- E2E: deferred to bead 13's opt-in real-endpoint test.
+- E2E: deferred to br-GI-1-13's opt-in real-endpoint test.
 
 ## Files to Touch
 

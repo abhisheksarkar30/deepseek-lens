@@ -1,8 +1,10 @@
-# Bead 9: Dashboard and JSON API
+# Bead br-GI-1-09: Dashboard and JSON API
+
+**Plan Reference**: `docs/planning/GI-1-deepseek-lens-v1.md` §Bead sequence
 
 - **Priority**: P1 (high)
-- **Dependencies**: 6, 7, 8
-- **Blocks**: 10, 11, 12, 13
+- **Dependencies**: br-GI-1-06, br-GI-1-07, br-GI-1-08
+- **Blocks**: br-GI-1-10, br-GI-1-11, br-GI-1-12, br-GI-1-13
 
 ## Description
 
@@ -10,13 +12,13 @@ A `go:embed`'d single-page dashboard plus the JSON API behind it, served on the 
 (`127.0.0.1:8788` by default). **No npm, no build step, no `node_modules`** — vanilla JS and CSS,
 charts drawn as inline SVG.
 
-**JSON API** (`internal/api`), all read-only except replay (bead 13):
+**JSON API** (`internal/api`), all read-only except replay (br-GI-1-13):
 
 - `GET /api/requests?limit&since&session&model&warn&errors` → list
 - `GET /api/requests/{id}` → detail incl. warnings
 - `GET /api/stats?since` → summary totals, percentiles, by-model, by-day
 - `GET /api/warnings?kind&severity&since` → grouped and individual
-- `GET /api/sessions`, `GET /api/sessions/{id}` → placeholders until bead 12 populates them
+- `GET /api/sessions`, `GET /api/sessions/{id}` → placeholders until br-GI-1-12 populates them
 - `GET /api/stream` → **SSE push** of new-request and new-warning events
 - `GET /api/health` → sink/consumer counters, last write age, drop count
 
@@ -39,7 +41,7 @@ non-blocking discipline as the sink, applied to the UI.
 3. **Warning inbox** — grouped by kind with counts and severities; clicking a kind lists affected
    requests. This is the flagship feature's primary surface.
 4. **Stats** — calls/tokens/cost over time as an inline SVG line chart, plus a by-model split.
-5. **Sessions** — table view; the session drill-down lands in bead 12.
+5. **Sessions** — table view; the session drill-down lands in br-GI-1-12.
 
 Live-total in the header: calls, tokens, cost for the current session window, updating on push.
 
@@ -48,10 +50,20 @@ The layout is responsive to ~400px (single column, no horizontal body scroll) an
 scattered literals. Severity is never encoded by colour alone — each warning carries a text or
 symbol label as well.
 
-**Security posture**: dashboard binds loopback; no auth. Combined with full body storage this means
-prompts and code are visible to anything that can reach the port. `doctor` states this plainly, and
-the README documents it. Dashboard auth is explicitly required before any non-local deployment
-(noted in the spec's Deferred section).
+**Security posture**: the read-only dashboard binds loopback and has no auth. Combined with full
+body storage this means prompts and code are visible to anything that can reach the port. `doctor`
+states this plainly, and the README documents it. Dashboard auth is explicitly required before any
+non-local deployment (noted in the spec's Deferred section).
+
+**Replay is the exception** and is *not* covered by the read-only rationale: `POST
+/api/requests/{id}/replay` (br-GI-1-13) is billable and state-changing, so it is gated by **two**
+controls, neither a credential: a strict `Origin`/`Host` allowlist (reject when `Origin` is present
+and is not the dashboard's own origin, and reject when `Host` is not loopback) and an explicit
+opt-in — it stays **disabled unless replay is explicitly enabled** via `--replay`/`ReplayEnabled`
+(off by default). A request failing either control is rejected before it can reach the upstream, so
+a cross-origin page or a DNS-rebinding host cannot trigger replay spend. `doctor` and the README
+surface this replay posture (off by default, enabled via `--replay`, guarded by `Origin`/`Host`).
+"No auth is acceptable" applies only to the read-only observer views.
 
 ## Rationale
 

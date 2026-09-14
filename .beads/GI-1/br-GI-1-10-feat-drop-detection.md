@@ -1,7 +1,9 @@
-# Bead 10: Silently-dropped-parameter detection
+# Bead br-GI-1-10: Silently-dropped-parameter detection
+
+**Plan Reference**: `docs/planning/GI-1-deepseek-lens-v1.md` §Bead sequence
 
 - **Priority**: P0 (critical) — this is the flagship feature
-- **Dependencies**: 5, 7, 9
+- **Dependencies**: br-GI-1-05, br-GI-1-07, br-GI-1-09
 - **Blocks**: none
 
 ## Description
@@ -12,11 +14,14 @@ DeepSeek accepts and then silently ignores, rewrites, or rejects.
 `internal/analyze` exposes exactly one entry point:
 
 ```
-func Analyze(meta parse.Meta, usage parse.Usage, respBody []byte) []store.Warning
+func Analyze(meta parse.Meta, usage parse.Usage, req *store.Request) []store.Warning
 ```
 
-Pure function over already-extracted values — no I/O, no store, no config mutation. Registered into
-the consumer's `Analyzer` slice (bead 7), so no existing pipeline code changes.
+Pure function over already-extracted values — no I/O, no store, no config mutation. `req` carries
+the captured response body (`req.RespBody`) that the `upstream_error` rule needs, and `usage` is the
+upstream-resolved usage (its `Model` confirms the mapping). Registered into the consumer's
+`Analyzer` slice (br-GI-1-07), which runs it **after** `InsertRequest`; the returned warnings attach to
+the row by id. The only change to existing pipeline code is the registration line in `consumer.go`.
 
 ```
 store.Warning{Kind, Severity, Detail string, Path string}
@@ -35,12 +40,15 @@ reading the dashboard, not a log parser):
 | `parallel_tool_use_ignored` | `meta.DisableParallelToolUse` | info | |
 | `model_remapped` | `opus*` | info | "claude-opus-5 → deepseek-v4-pro (billed at V4 Pro rates)" |
 | `model_remapped` | `sonnet*` / `haiku*` | info | "claude-sonnet-5 → deepseek-flash" |
-| `model_unmapped_fallback` | neither pattern | warn | "unrecognized model X falls back to deepseek-flash — quality and cost may differ from expectation" |
+| `model_remapped` | neither pattern | warn | "unrecognized model X falls back to deepseek-flash — quality and cost may differ from expectation" |
 | `unsupported_content_block` | any of `meta.UnsupportedBlocks` | **error** | "content block type 'document' is not supported by DeepSeek's Anthropic endpoint; this request may fail or the block may be dropped" |
-| `param_ignored` | `top_k` set | info | |
+| `param_ignored` | `meta.TopK != nil` (`top_k` set) | info | "top_k=N is accepted and ignored by DeepSeek" |
+| `param_ignored` | `meta.ServiceTier != ""` (`service_tier` present) | info | "service_tier=X is accepted and ignored by DeepSeek" |
+| `param_ignored` | `meta.ContainerPresent` (`container` present) | info | "container is accepted and ignored by DeepSeek" |
+| `param_ignored` | `meta.MCPServersPresent` (`mcp_servers` present) | info | "mcp_servers is accepted and ignored by DeepSeek" |
 | `param_ignored` | `max_tokens` exceeds the model's ceiling, if known from config | info | |
-| `header_ignored` | `anthropic-beta` present in headers | info | "anthropic-beta is ignored for /messages" |
-| `upstream_error` | `respBody` carries an `error` object | error | Surfaces the upstream message; emitted even when the HTTP status was 200 |
+| `header_ignored` | `meta.HasAnthropicBeta` (from the `anthropic-beta` request header) | info | "anthropic-beta is ignored for /messages" |
+| `upstream_error` | `req.RespBody` carries an `error` object | error | Surfaces the upstream message; emitted even when the HTTP status was 200 |
 
 The model-mapping table (`opus`→`deepseek-v4-pro`, `sonnet`/`haiku`→`deepseek-flash`) lives in
 config, not code — plan risk 6 — with the built-in defaults above as a fallback. Matching is
@@ -97,13 +105,16 @@ useful if something notices when the config goes stale.
   - `disable_parallel_tool_use` true → warning; false → none.
   - Model `claude-opus-5` → `model_remapped` to `deepseek-v4-pro`.
   - Model `claude-sonnet-5` and `claude-haiku-4-5` → `deepseek-flash`.
-  - Model `gpt-4o` → `model_unmapped_fallback` at warn.
+  - Model `gpt-4o` → `model_remapped` at warn (distinct `Detail` naming the fallback).
   - Model matching case-insensitively (`CLAUDE-OPUS-5`) → same result.
   - Each unsupported block type → `unsupported_content_block` at error severity.
   - Multiple unsupported blocks → one warning each (not collapsed).
-  - `top_k` set → `param_ignored`.
-  - `anthropic-beta` header present → `header_ignored`.
-  - Response body containing an `error` object → `upstream_error` at error severity.
+  - `top_k` set → `param_ignored`; absent → none.
+  - `service_tier` set → `param_ignored` naming the value; absent → none.
+  - `container` present → `param_ignored`; absent → none.
+  - `mcp_servers` present → `param_ignored`; absent → none.
+  - `anthropic-beta` header present (`meta.HasAnthropicBeta`) → `header_ignored`; absent → none.
+  - Response body (`req.RespBody`) containing an `error` object → `upstream_error` at error severity.
   - `usage.Model` differing from the config-predicted model → `model_mapping_drift`.
   - `usage.Model` matching → no drift warning.
   - **Multi-rule**: a request violating five rules → exactly five warnings, no duplicates.

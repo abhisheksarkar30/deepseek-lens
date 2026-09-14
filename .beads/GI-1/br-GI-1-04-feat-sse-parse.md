@@ -1,8 +1,10 @@
-# Bead 4: SSE and response parsing
+# Bead br-GI-1-04: SSE and response parsing
+
+**Plan Reference**: `docs/planning/GI-1-deepseek-lens-v1.md` §Bead sequence
 
 - **Priority**: P0 (critical)
-- **Dependencies**: 1
-- **Blocks**: 7, 11
+- **Dependencies**: br-GI-1-01
+- **Blocks**: br-GI-1-07, br-GI-1-11
 
 ## Description
 
@@ -25,12 +27,21 @@ these fields, never a full API model, so an unexpected field cannot break parsin
 - `[DONE]` / `message_stop` → clean termination.
 
 **The carry-buffer requirement.** The captured `RespBody` is a contiguous byte slice, so in
-*this* bead events are always whole. But the same parser is fed in bead 7 from the streaming
+*this* bead events are always whole. But the same parser is fed in br-GI-1-07 from the streaming
 accumulator, and the parser is written from the start to accept arbitrary chunk boundaries:
 
-`Parser.Feed(chunk []byte)` appends to an internal buffer, extracts complete `\n\n`-delimited
-events, and **retains the incomplete tail** for the next call. `Parser.Finish()` flushes any
-remainder. This is the API from the first commit, so bead 7 does not have to change it.
+`Parser.Feed(chunk []byte)` appends to an internal buffer, extracts complete events (delimited by a
+**blank line**), and **retains the incomplete tail** for the next call. `Parser.Finish()` flushes any
+remainder. This is the API from the first commit, so br-GI-1-07 does not have to change it.
+
+**Blank-line detection.** An event ends at a blank line, which per the SSE spec may be `\n\n`,
+`\r\n\r\n`, or `\r\r`. The parser scans for **all three** forms rather than a literal `\n\n`
+substring — a literal `\n\n` scan never matches `\r\n\r\n` (no adjacent `\n\n` exists there), so a
+CRLF stream would never yield a complete event and the CRLF test below could not pass. Line endings
+are not rewritten; the three terminator forms are matched directly. A trailing `\r` at the very end
+of a `Feed` chunk is **retained in the carry buffer** (not consumed as a terminator) so a
+`\r\n\r\n` / `\r\r` blank line split across two `Feed` calls is still recognised once the next chunk
+arrives.
 
 `Usage` is the return struct: `InputTokens`, `OutputTokens`, `CacheCreationTokens`,
 `CacheReadTokens`, `StopReason`, `Model string`, `IsStream bool`, `Events int`.
@@ -49,7 +60,7 @@ Token accounting is a headline requirement, and SSE parsing is the single most l
 subtle defect in this codebase — plan risk 1. Two specific traps are designed out rather than
 tested for after the fact: (a) a `message_delta`'s `output_tokens` is cumulative, so summing is
 wrong; (b) events can straddle chunk boundaries once fed incrementally. Fixing the API shape now
-(`Feed`/`Finish` with a carry buffer) means bead 7 wires it without rework.
+(`Feed`/`Finish` with a carry buffer) means br-GI-1-07 wires it without rework.
 
 ## Outcome Definition
 
@@ -71,6 +82,9 @@ wrong; (b) events can straddle chunk boundaries once fed incrementally. Fixing t
   - **Split event across chunks**: the same stream fed one byte at a time → identical `Usage` to the
     whole-body case. (The classic bug; dedicated test.)
   - **Split exactly at `\n\n` boundary** → identical result.
+  - **CRLF terminator split across chunks** → a `\r\n\r\n` blank line split between two `Feed`
+    calls parses identically (the carry buffer retains the partial terminator rather than dropping
+    the `\r`).
   - **Chunk boundary mid-JSON-string containing `}`** → parses, does not truncate early.
   - **`message_start` carries model**: assert the `message.model` field (upstream-resolved) is read.
   - **Cache token fields** on `message_start` → `cache_creation_input_tokens` /

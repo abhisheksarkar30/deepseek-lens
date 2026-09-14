@@ -1,7 +1,9 @@
-# Bead 13: Request replay and re-issue
+# Bead br-GI-1-13: Request replay and re-issue
+
+**Plan Reference**: `docs/planning/GI-1-deepseek-lens-v1.md` §Bead sequence
 
 - **Priority**: P2 (medium)
-- **Dependencies**: 3, 6, 8, 9
+- **Dependencies**: br-GI-1-03, br-GI-1-06, br-GI-1-08, br-GI-1-09
 - **Blocks**: none
 
 ## Description
@@ -9,16 +11,20 @@
 Re-issue any captured request, optionally with edits, and record the result as a first-class
 comparable call.
 
-**`lens replay <id>`** reads the stored request body, POSTs it to the upstream through the same
-proxy transport, and prints the new request id plus a compact diff of the outcome
-(status, model, tokens, cost, duration, warnings). Flags:
+**`lens replay <id>`** requires a running `lens serve` and is a thin client for the send path: it
+calls the server's `POST /api/requests/{id}/replay` rather than opening its own DB writer, so the
+consumer stays the **sole writer** (br-GI-1-06's single-writer discipline). The server reads the stored
+request body, POSTs it to the upstream through the same proxy transport, and records the replay row
+through the same consumer writer; the CLI prints the new request id plus a compact diff of the
+outcome (status, model, tokens, cost, duration, warnings). Flags:
 
 - `--set <jsonpath>=<value>` — repeatable. Path syntax: dot-separated keys with array indices,
   e.g. `messages.0.content`, `temperature`, `thinking.budget_tokens`, `tools.2.name`. Values are
   parsed as JSON when they parse as JSON, otherwise treated as a string — so `--set temperature=0.7`
   and `--set messages.0.content='"hi"'` both work, and `--set stream=true` yields a boolean.
-- `--dump <path>` — write the edited body to a file and exit without sending. This is the safe way
-  to inspect exactly what would be sent.
+- `--dump <path>` — write the edited body to a file and exit without sending. This is the safe,
+  purely local path: no upstream send, and no running server required. It is how you inspect exactly
+  what would be sent.
 - `--no-capture` — send without recording.
 - `--diff <other-id>` — compare this replay against another request id instead of its original.
 
@@ -28,17 +34,44 @@ re-runs tools. A captured body may *describe* tool calls that the original clien
 re-sends the description to the model and stores the reply. It does not act on `tool_use` blocks.
 This is worth stating in `--help` and the README so nobody assumes replay re-runs an agent.
 
+**Endpoint guard** (settled posture; also noted in br-GI-1-09, since the endpoint lives on the otherwise
+unauthenticated loopback dashboard). Because `POST /api/requests/{id}/replay` is the project's only
+billable, state-changing route, it is **not** covered by the read-only dashboard's "no auth on
+loopback" rationale. It is gated by **two** controls, neither a credential:
+
+1. **Explicit opt-in** — the endpoint is **disabled unless replay is explicitly enabled**: config
+   `ReplayEnabled` (default false), set by `lens serve --replay`. Off by default.
+2. **Strict `Origin`/`Host` allowlist** — reject when `Origin` is present and is not the dashboard's
+   own origin, and reject when `Host` is not loopback. A cross-origin page or a DNS-rebinding host
+   therefore cannot trigger replay spend.
+
+A request failing either control is rejected (403) before any upstream send.
+
+**Why no secret (deliberate).** An earlier draft required a per-process secret printed in the
+`serve` banner. That is dropped: the `Origin`/`Host` guard already kills the threat that mattered —
+DNS rebinding and cross-origin POST — with no credential to distribute. A CLI request sends no
+`Origin` at all, so `lens replay` needs nothing extra and the "how does the CLI obtain the secret"
+question disappears rather than needing an answer. Any local process able to forge past this guard
+can already read the SQLite file directly, so the endpoint grants no privilege beyond what is
+already on disk. If defense against local (non-browser) processes is ever wanted, add a shared
+secret then — that is the documented upgrade path.
+
+`doctor` and the README surface this replay posture (off by default, enabled via `--replay`,
+guarded by `Origin`/`Host`).
+
 **Cost warning**: `lens replay` prints the estimated cost of the original call before sending and
 requires `--yes` when the original's `cost_usd` exceeds a configurable threshold, or when the price
 table is unpriced (so the cost is unknown). Replaying is billable and should never be a surprise.
 
 **Storage linkage**: the replay is captured as a normal request with `replay_of = <original id>`
-(column exists from bead 6) and `--set` edits recorded in a `replay_edits` column (JSON array of
+(column exists from br-GI-1-06) and `--set` edits recorded in a `replay_edits` column (JSON array of
 `{path, old, new}`), so an edited replay is self-documenting rather than an unexplained variant.
 
 **Dashboard**: the request detail view gains a **Replay** button opening a small editor seeded with
 the original body, a JSON-path editor for the same `--set` operations, a clear cost confirmation,
-and a side-by-side result comparison against the original.
+and a side-by-side result comparison against the original. The embedded page issues a same-origin
+request to the guarded replay endpoint (the `Origin`/`Host` guard passes for the dashboard's own
+origin); the button is inert when replay is not enabled.
 
 `internal/replay` holds the body-editing logic as a pure function —
 `ApplyEdits(body []byte, edits []Edit) ([]byte, error)` — with no I/O, so the JSON-path walker is
@@ -62,7 +95,10 @@ nested JSON) is isolated from I/O so it can be tested exhaustively without a net
 ## Outcome Definition
 
 - `go test ./internal/replay/...` passes.
-- `lens replay <id>` re-sends and prints the new id with an outcome diff.
+- `lens replay <id>` (with `lens serve` running) re-sends via the server's replay API and prints the
+  new id with an outcome diff; the CLI opens no DB writer of its own.
+- The replay endpoint rejects a request with a disallowed `Origin`/`Host`, or when replay is
+  disabled — before any upstream send.
 - `--set temperature=0.7` changes the value in the sent body (asserted against a capture).
 - `--set` into a nested array path works; a path into a missing key errors clearly without sending.
 - `--set` with a JSON value and with a plain string both behave as documented.
@@ -95,6 +131,13 @@ nested JSON) is isolated from I/O so it can be tested exhaustively without a net
     sends.
   - `--no-capture` → sends but writes no row.
   - `--diff` produces a comparison of the two requests' tokens/status/warnings.
+  - **Endpoint guard**: `POST /api/requests/{id}/replay` with a disallowed `Origin` (or `Host`) →
+    403; when replay is disabled → rejected. In every rejected case a recording fake upstream sees
+    **zero** hits.
+  - **Enabled → accepted (happy path)**: with replay enabled (`--replay`), a same-origin/loopback
+    request is accepted and reaches the recording fake upstream exactly once.
+  - **CLI needs the server**: `lens replay` against no running server fails clearly (no send, no
+    row) rather than opening its own DB writer.
 - E2E (opt-in, needs a key): replay a real captured request with `--set max_tokens=1` (a cheap edit
   that cannot alter behaviour) → new row with `replay_of` set.
 
@@ -106,5 +149,5 @@ nested JSON) is isolated from I/O so it can be tested exhaustively without a net
 - `internal/replay/replay_test.go` (create)
 - `internal/cli/replay.go` (create)
 - `internal/api/api.go` (modify — `POST /api/requests/{id}/replay`)
-- `internal/store/store.go` (modify — `replay_edits` column handling; column already exists from bead 6)
+- `internal/store/store.go` (modify — `replay_edits` column handling; column already exists from br-GI-1-06)
 - `internal/web/app.js`, `index.html` (modify — replay editor and comparison)
