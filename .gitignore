@@ -1,7 +1,35 @@
-# Build output
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
 /lens
 /lens.exe
 dist/
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+
+# Editor/IDE
+# .idea/
+# .vscode/
 
 # Local runtime state. The real files live in ~/.deepseek-lens/ (config.toml,
 # lens.db); these guard a repo-local override via --db or a local config file.
