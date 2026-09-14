@@ -37,6 +37,7 @@ go.work.sum
 *.db-wal
 *.db-shm
 config.toml
+~/.deepseek-lens/
 
 # Local cross-review artifacts (should never be committed)
 /**/*review*/
