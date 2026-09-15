@@ -37,6 +37,16 @@ function costBadge(source) {
   return ` <span class="badge warn" title="${reason}" aria-label="${reason}">?</span>`;
 }
 
+// warnBadge is the "⚠" a row carries when an analyzer raised something on it,
+// with the count when the caller has one. Same rule as costBadge: the glyph
+// alone is decoration, so the title says what it counts and where to read the
+// detail — on hover and to a screen reader.
+function warnBadge(count, hint) {
+  const what = count ? `${count} warning${count === 1 ? "" : "s"}` : "Warnings";
+  const label = `${what} — ${hint}`;
+  return `<span class="badge warn" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">&#9888;${count ? " " + count : ""}</span>`;
+}
+
 function costCell(costUSD, source) {
   return fmtCost(costUSD) + costBadge(source);
 }
@@ -171,7 +181,7 @@ function feedRowHTML(req) {
     <td>${fmtTokens(req.InputTokens)}/${fmtTokens(req.OutputTokens)}</td>
     <td>${costCell(req.CostUSD, req.CostSource)}</td>
     <td>${req.Status}</td>
-    <td>${warned ? '<span class="badge warn">&#9888;</span>' : ""}</td>
+    <td>${warned ? warnBadge(0, "click the call for detail") : ""}</td>
   </tr>`;
 }
 
@@ -190,7 +200,7 @@ function markFeedRowWarned(id) {
   const row = document.querySelector(`#feed-body tr[data-id="${id}"]`);
   if (row) {
     const cell = row.cells[row.cells.length - 1];
-    cell.innerHTML = '<span class="badge warn">&#9888;</span>';
+    cell.innerHTML = warnBadge(0, "click the call for detail");
   }
 }
 
@@ -389,7 +399,7 @@ async function loadSessions() {
       <td>${s.RequestCount}</td>
       <td>${fmtTokens((s.TotalInputTokens || 0) + (s.TotalOutputTokens || 0))}</td>
       <td>${fmtCostTotal(s.TotalCostUSD, s.UnpricedCount || 0)}</td>
-      <td>${s.WarningCount ? `<span class="badge warn">&#9888; ${s.WarningCount}</span>` : ""}</td>
+      <td>${s.WarningCount ? warnBadge(s.WarningCount, "click the session to list them") : ""}</td>
     </tr>`).join("") || `<tr><td colspan="7" class="hint">No sessions recorded yet.</td></tr>`;
     body.querySelectorAll("tr[data-id]").forEach((row) => {
       row.addEventListener("click", () => openSession(row.dataset.id));
@@ -467,7 +477,7 @@ async function openSession(id) {
         <td>${fmtTokens(c.InputTokens)}/${fmtTokens(c.OutputTokens)}</td>
         <td>${costCell(c.CostUSD, c.CostSource)}</td>
         <td>${fmtTokens(runTokens)} · ${fmtCostTotal(runCost, runUnpriced)}</td>
-        <td>${n ? `<span class="badge warn">&#9888; ${n}</span>` : ""}</td>
+        <td>${n ? warnBadge(n, "click the turn for detail") : ""}</td>
       </tr>`;
     }).join("");
     const callsBody = document.getElementById("session-calls");
@@ -476,7 +486,12 @@ async function openSession(id) {
       row.addEventListener("click", () => openDetail(Number(row.dataset.id)));
     });
 
-    document.getElementById("session-detail").hidden = false;
+    // The panel lives below the sessions table, which is routinely taller than
+    // the viewport — unhiding it alone is invisible from the row that was
+    // clicked, so the drill-down looked like a dead click.
+    const panel = document.getElementById("session-detail");
+    panel.hidden = false;
+    panel.scrollIntoView({ block: "start" });
   } catch (e) {
     console.error("openSession", e);
   }
