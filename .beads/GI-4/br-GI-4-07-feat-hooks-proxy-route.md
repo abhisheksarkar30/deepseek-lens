@@ -94,11 +94,49 @@ shared resolver the JS also calls (which would also retire the shape-drift risk 
 Its failure direction is "not recognized", i.e. today's behaviour, so a miss is never a regression
 — see the plan's risk §8.4.
 
-### Both files
+### Both files: the drift comment
 
 Each gains a comment naming the other, because **drift between these two copies is the bug being
 fixed**. That coupling is the top risk in the plan (§8.1) and the comment is the cheapest thing
 that makes the next editor aware of it.
+
+### Both files: resolve Claude Code's config directory
+
+Both hooks build `~/.claude` from whatever home helper their host language happens to offer —
+`os.homedir()` in the JS (`:27`), `${HOME:-$USERPROFILE}` in the bash (`:19`) — and neither honors
+`CLAUDE_CONFIG_DIR`, which relocates Claude Code's entire config directory: settings, session
+history and plugins together. For a user who sets it, the toggle edits a `settings.json` Claude
+Code never reads. It reports success, and nothing happens. Silent, and the same shape of failure
+as the substring bug this bead exists to fix.
+
+Resolve it first, in both files, in one line each:
+
+- **JS** — replace the path construction at `:27-30` with
+  `const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");`
+  and build `settingsPath`, `overridePath` and `deepseekEnvPath` from it. Drop the `home` binding
+  if nothing else reads it.
+- **bash** — `config_dir="${CLAUDE_CONFIG_DIR:-${HOME:-$USERPROFILE}/.claude}"`, replacing the
+  prefix in the existing `override_file=` assignment at `:19` and used for the overlay read this
+  bead adds below.
+
+`CLAUDE_CONFIG_DIR` first, then today's expression unchanged. That ordering *is* the change: when
+the variable is unset — the default, and every existing user — the resolved path is
+byte-identical to what each file computes today, so neither hook can regress for anyone who has
+not relocated their config directory.
+
+It rides in this bead rather than a sibling one for two reasons. **The bead already puts both
+files on this question**: the toggle's predicate is defined against the overlay, and the guard
+gains an overlay read that resolves through the same directory as the override file it already
+reads, so a sibling bead would put two beads on the same three lines of the same two files and the
+same test harness. **And the hook sees the variable whenever it matters**: Claude Code reads
+`CLAUDE_CONFIG_DIR` from its own startup environment and spawns hooks as children, so a hook
+inherits it exactly when Claude Code itself is honoring it. The case that does not work is a
+wrapper that sets the variable for Claude Code and unsets it for children — a limit, noted rather
+than defended against.
+
+Not in scope: the plugin README's manual setup steps — `deepseek-key.ps1`'s destination, the
+absolute `apiKeyHelper` path inside the overlay — stay user-declared literals. Bead 08 says so
+where it documents the setup (plan §8.6).
 
 ## Rationale
 
@@ -114,6 +152,14 @@ route. The "lens is dropped" outcome belongs to the **inverse** configuration �
 declaring the *direct* DeepSeek URL while `settings.json` points at lens — and this bead does
 **not** repair that one; it is a setup change bead 08 documents (plan §1, §8.2).
 
+The config-directory fold-in (Description) is the same defect in a different variable: the hooks
+assume where `~/.claude` is, and that assumption is wrong for exactly the user who has moved it
+deliberately. It belongs here because the predicate this bead adds is *defined in terms of that
+directory* — "the base URL the overlay declares" is only well-formed once both files agree on
+which overlay — so fixing the predicate while leaving the path hardcoded would leave the two
+clause lookups resolving against different files for a relocated user. One line per file,
+no new surface, and byte-identical behaviour for everyone who has not set the variable.
+
 ## Outcome Definition
 
 - `bash hooks/test-deepseek-auto-toggle.sh` passes, including the new lens-URL cases.
@@ -126,6 +172,8 @@ declaring the *direct* DeepSeek URL while `settings.json` points at lens — and
 - With a lens base URL and the clock off-peak, the guard emits nothing.
 - Existing cases are unaffected: a direct `api.deepseek.com` URL behaves exactly as before, in
   both hooks, on both sides of the peak window.
+- Both hooks find `settings.json` and the overlay through `CLAUDE_CONFIG_DIR` when it is set, and
+  through the platform home helper when it is not.
 
 ## Test Specifications
 
@@ -154,6 +202,19 @@ declaring the *direct* DeepSeek URL while `settings.json` points at lens — and
   the whole overlay contents as its argument, so it needs no change — pass the lens URL through
   its argument. `guard_check` reaches the overlay through `fixture`, so parameterizing `fixture`
   covers the guard cases too.) This is a harness edit, not just new cases.
+- **Harness prerequisite: pin the config directory.** Every invocation currently redirects through
+  `USERPROFILE="$tmp" HOME="$tmp"` (`:41`, `:47`, `:63-64`, `:93`, `:102`, `:112`, `:125`, `:150`,
+  `:216`, `:242`). That stops being sufficient the moment the hooks honor `CLAUDE_CONFIG_DIR`: a
+  developer who has it set would send every case at their real config directory, so the suite
+  would read and rewrite their actual `settings.json`. Add one exported assignment next to
+  `tmp="$(mktemp -d)"` — the inline `VAR=…` prefixes set only the variables they name, so every
+  child, including the `bash "$guard"` calls, inherits it. One `export CLAUDE_CONFIG_DIR="$tmp/.claude"`
+  there covers every site.
+- **Relocated config directory**: point `CLAUDE_CONFIG_DIR` at the fixture while the platform home
+  variables name a directory that does *not* exist, and assert both hooks still find the overlay
+  and `settings.json` — the toggle leaves the lens URL in place off-peak, and the guard blocks at
+  peak. Plus the mirror case: `CLAUDE_CONFIG_DIR` unset, home variables pointed at the fixture, so
+  the fallback is pinned as well. These two cases fail against either hook's pre-change code.
 - Integration Tests (`deepseek-peak-guard.sh` — new cases in the same script, or a sibling):
   - Lens URL, peak → the block JSON is emitted with `"continue": false`.
   - Lens URL, off-peak → no output.
@@ -168,10 +229,11 @@ declaring the *direct* DeepSeek URL while `settings.json` points at lens — and
 
 ## Files to Touch
 
-- `hooks/deepseek-auto-toggle.js` (modify — reorder the overlay read, add the shared predicate,
-  cross-reference comment)
-- `hooks/deepseek-peak-guard.sh` (modify — replace the substring guard with the shared predicate,
-  cross-reference comment)
-- `hooks/test-deepseek-auto-toggle.sh` (modify — first parameterize `fixture`/`seed` with the
-  overlay's `ANTHROPIC_BASE_URL` so a lens-URL overlay can be seeded; then lens-URL cases for both
-  hooks, both window sides, both overlay shapes, plus the `${VAR}` case)
+- `hooks/deepseek-auto-toggle.js` (modify — resolve the config directory, reorder the overlay read,
+  add the shared predicate, cross-reference comment)
+- `hooks/deepseek-peak-guard.sh` (modify — resolve the config directory, replace the substring
+  guard with the shared predicate, cross-reference comment)
+- `hooks/test-deepseek-auto-toggle.sh` (modify — first pin `CLAUDE_CONFIG_DIR` and parameterize
+  `fixture`/`seed` with the overlay's `ANTHROPIC_BASE_URL` so a lens-URL overlay can be seeded;
+  then lens-URL cases for both hooks, both window sides, both overlay shapes, the `${VAR}` case,
+  and the relocated-config-directory cases)

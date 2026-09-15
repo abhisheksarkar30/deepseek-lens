@@ -37,6 +37,14 @@ Add a short subsection to the plugin README's "DeepSeek / Claude Pro auto-toggle
    declared value), so a proxy-fronted setup whose **present** overlay declares the wrong address
    warns.
 
+5. **If Claude Code's config directory is relocated.** `CLAUDE_CONFIG_DIR` moves `settings.json`,
+   the overlay and `.provider-override` together, and br-GI-4-07 makes both hooks honor it — so the
+   hooks follow the user. The *manual* steps this README documents do not: where to copy
+   `deepseek-key.ps1`, and the absolute `apiKeyHelper` path inside the overlay, are literals the
+   user writes and must rewrite when the directory moves. One sentence, placed with those steps
+   rather than in the proxy subsection, so it lands where someone following them will read it
+   (plan §8.6).
+
 Also fold in the operational note that already exists in the README but is easy to miss when
 someone is editing these files — hook changes ship in the plugin bundle, so `hooks/` needs
 `/plugin marketplace update agentic-ai-artifacts` followed by uninstall + install (there is no
@@ -61,6 +69,8 @@ that was never reinstalled looks exactly like a hook that does not work.
 - The statement that the overlay's URL is what the hooks recognize is explicit — a reader must not
   have to infer it from the code.
 - The `.provider-override` behaviour is stated as unchanged.
+- The relocated-config-directory caveat is present, and says which steps follow `CLAUDE_CONFIG_DIR`
+  (the hooks) and which do not (the manual copy and the absolute `apiKeyHelper` path).
 - The hook-reinstall requirement is restated in or beside the new subsection.
 - No claim contradicts `hooks/deepseek-auto-toggle.js` or `hooks/deepseek-peak-guard.sh` as they
   stand after br-GI-4-07.
