@@ -10,8 +10,8 @@ import (
 )
 
 // commands dispatches subcommand names to their internal/cli implementation
-// (br-GI-1-08). "prices" and "replay" are registered but stubbed until
-// br-GI-1-11 and br-GI-1-13 land.
+// (br-GI-1-08). Every name here is implemented: br-GI-1-11 landed "prices" and
+// br-GI-1-13 landed "replay", which was the last stub.
 var commands = map[string]func([]string) error{
 	"doctor":   cli.Doctor,
 	"serve":    cli.Serve,

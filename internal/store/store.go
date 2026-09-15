@@ -279,6 +279,10 @@ func (s *Store) ListRequests(ctx context.Context, f Filter) ([]*Request, error) 
 	if f.OnlyWarned {
 		where = append(where, "id IN (SELECT DISTINCT request_id FROM warnings)")
 	}
+	if f.ReplayOf != nil {
+		where = append(where, "replay_of = ?")
+		args = append(args, *f.ReplayOf)
+	}
 
 	query := "SELECT " + requestColumns + " FROM requests"
 	if len(where) > 0 {

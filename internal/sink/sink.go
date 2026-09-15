@@ -34,6 +34,15 @@ type CapturedCall struct {
 	ReqBody     []byte      // body policy already applied by the caller
 	RespBody    []byte      // nil when streaming; filled by a separate accumulator
 
+	// ReplayOf and ReplayEdits link a re-issued call to the capture it came
+	// from (br-GI-1-13): the original request's row id, and the serialized
+	// [{path, old, new}] array of the edits applied to its body. Both are nil
+	// for every ordinary proxied call, which is every call but a replay. Only
+	// already-produced values are carried here — the serialized edits text is
+	// built by the sender, so the capture path still does no I/O.
+	ReplayOf    *int64
+	ReplayEdits *string
+
 	Err error
 }
 

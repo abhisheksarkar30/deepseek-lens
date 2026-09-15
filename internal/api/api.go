@@ -1,17 +1,23 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/proxy"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/replay"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
@@ -37,6 +43,12 @@ type api struct {
 	sink     *sink.Sink
 	consumer *consumer.Consumer
 	broker   *Broker
+
+	// proxyHandler is the live proxy's own Handler. The replay endpoint sends
+	// through it rather than through a transport of its own, and replayEnabled
+	// is config.ReplayEnabled — the endpoint's opt-in control (br-GI-1-13).
+	proxyHandler  http.Handler
+	replayEnabled bool
 }
 
 // New builds the dashboard's http.Handler: the read-only JSON API under
@@ -45,12 +57,19 @@ type api struct {
 // thin per the bead: parse query params into a store.Filter, call st, encode
 // JSON — no business logic here (grouping, e.g. for the warning inbox, is
 // the dashboard JS's job).
-func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, assets fs.FS) http.Handler {
-	a := &api{store: st, sink: sk, consumer: cons, broker: broker}
+//
+// proxyHandler is the one write path this package owns: POST
+// /api/requests/{id}/replay re-issues a captured request through it, so the
+// replay is proxied, teed and recorded by exactly the code that handles live
+// traffic. Passing nil disables the route entirely, which is what the read-only
+// tests of beads before this one do.
+func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, assets fs.FS, proxyHandler http.Handler, replayEnabled bool) http.Handler {
+	a := &api{store: st, sink: sk, consumer: cons, broker: broker, proxyHandler: proxyHandler, replayEnabled: replayEnabled}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/requests", methodGet(a.listRequests))
 	mux.HandleFunc("/api/requests/{id}", methodGet(a.getRequest))
+	mux.HandleFunc("POST /api/requests/{id}/replay", a.replay)
 	mux.HandleFunc("/api/stats", methodGet(a.stats))
 	mux.HandleFunc("/api/warnings", methodGet(a.listWarnings))
 	mux.HandleFunc("/api/sessions", methodGet(a.listSessions))
@@ -61,9 +80,10 @@ func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, asset
 	return mux
 }
 
-// methodGet rejects every method but GET with a JSON 405 before h runs —
-// the dashboard is entirely read-only (replay, POST /api/requests/{id}/replay,
-// is br-GI-1-13's job and is not implemented here at all).
+// methodGet rejects every method but GET with a JSON 405 before h runs. The
+// dashboard's read endpoints are otherwise unauthenticated on the strength of
+// being read-only and loopback-bound; the one route that is neither is
+// registered separately, with its own guard and its own method — see replay.
 func methodGet(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -192,14 +212,24 @@ func (a *api) getRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// store.Filter has no per-request lookup (ListWarnings only filters by
-	// Kind/Severity/Since) — same one-query-then-filter-in-Go trade
-	// internal/cli's show/ls commands already take, at the same DefaultLimit
-	// cap, rather than adding a store.go method outside this bead's scope.
-	all, err := a.store.ListWarnings(r.Context(), store.Filter{Limit: store.DefaultLimit})
+	warnings, err := a.warningsFor(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	writeJSON(w, http.StatusOK, requestDetail{Request: req, Warnings: warnings})
+}
+
+// warningsFor returns the warnings attached to one request. store.Filter has no
+// per-request warning lookup (ListWarnings filters by Kind/Severity/Since only)
+// — the same one-query-then-filter-in-Go trade internal/cli's show/ls commands
+// already take, at the same DefaultLimit cap, rather than adding a store.go
+// method for it.
+func (a *api) warningsFor(ctx context.Context, id int64) ([]*store.Warning, error) {
+	all, err := a.store.ListWarnings(ctx, store.Filter{Limit: store.DefaultLimit})
+	if err != nil {
+		return nil, err
 	}
 	var warnings []*store.Warning
 	for _, wn := range all {
@@ -207,8 +237,320 @@ func (a *api) getRequest(w http.ResponseWriter, r *http.Request) {
 			warnings = append(warnings, wn)
 		}
 	}
+	return warnings, nil
+}
 
-	writeJSON(w, http.StatusOK, requestDetail{Request: req, Warnings: warnings})
+// replayWait bounds how long the replay endpoint waits for the consumer to
+// commit the row for the call it just sent, and replayPollInterval is how often
+// it looks. The wait is inherent to the design: the send goes through the sink
+// to the consumer's single writer, and the consumer batches — a lone call lands
+// within one batchQuietWait (~250ms), so this is a very generous ceiling for
+// the "did the row land yet" question rather than a timeout anyone should hit.
+const (
+	replayWait         = 2 * time.Second
+	replayPollInterval = 25 * time.Millisecond
+)
+
+// replay is POST /api/requests/{id}/replay: the project's only billable,
+// state-changing route, and therefore the only one not covered by the read-only
+// dashboard's "no auth on loopback" rationale (br-GI-1-13, plan §security
+// self-review).
+//
+// Its guard is two controls, neither a credential, and both are applied before
+// anything is sent — a rejected request is rejected without a single byte
+// reaching the upstream API. That ordering is the whole point of the guard, so
+// it is the first thing this function does and it does not depend on reading
+// anything:
+//
+//  1. replayEnabled (config.ReplayEnabled, `lens serve --replay`): off by
+//     default, and when off this route does nothing at all.
+//  2. Origin/Host allowlist (replayOriginReject): an accidental or malicious
+//     browser page cannot make this endpoint spend money. See that function for
+//     what "the dashboard's own origin" means and why a request with no Origin
+//     at all passes — that is the CLI's path, deliberately, not a hole.
+//
+// On success the stored body is edited, re-sent through the proxy's own Handler
+// (so it is teed, capped and recorded by the live path, and reaches SQLite
+// through the consumer's single writer), and the row the consumer just wrote is
+// returned along with the compact Outcome `lens replay` diffs.
+func (a *api) replay(w http.ResponseWriter, r *http.Request) {
+	if !a.replayEnabled {
+		writeError(w, http.StatusForbidden, "replay is disabled: start `lens serve --replay` to enable it")
+		return
+	}
+	if reason := replayOriginReject(r); reason != "" {
+		writeError(w, http.StatusForbidden, reason)
+		return
+	}
+	if a.proxyHandler == nil {
+		writeError(w, http.StatusServiceUnavailable, "replay is unavailable: no proxy handler is wired")
+		return
+	}
+
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request id")
+		return
+	}
+	orig, err := a.store.GetRequest(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "request not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(orig.ReqBody) == 0 {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("request %d has no stored body to replay", id))
+		return
+	}
+
+	edits, err := replay.ParseSets(r.URL.Query()["set"])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	edited, err := replay.ApplyEdits(orig.ReqBody, edits)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	editsJSON, err := replay.MarshalEdits(edits)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	noCapture, err := parseBoolParam(r, "no_capture")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Snapshot the newest existing replay of this capture before sending, so
+	// the row this request produces can be told apart from one a concurrent
+	// replay of the same id may already have written.
+	before, err := a.newestReplay(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	status, err := a.sendReplay(r, orig, edited, proxy.ReplayMeta{Of: id, Edits: editsJSON, NoCapture: noCapture})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if noCapture {
+		// Sent, deliberately not recorded: there is no row and no id to report.
+		writeJSON(w, http.StatusOK, replay.Result{Captured: false, Status: status})
+		return
+	}
+
+	row, err := a.awaitReplayRow(r.Context(), id, before)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	warnings, err := a.warningsFor(r.Context(), row.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	outcome := replay.OutcomeOf(row, warnings)
+	writeJSON(w, http.StatusOK, replay.Result{ID: row.ID, Captured: true, Status: row.Status, Outcome: &outcome})
+}
+
+// sendReplay re-issues orig's stored body through the proxy's own Handler and
+// returns the upstream status.
+//
+// Routing the replay through proxy.Handler rather than through an HTTP client
+// of its own is the design: the request picks up the same transport, the same
+// streaming rewrite, the same tee, the same body cap and the same header
+// redaction as live traffic, and the call it produces reaches SQLite through
+// the consumer's single writer, which CLAUDE.md requires ("SQLite has exactly
+// one writer: the consumer goroutine"). proxy.WithReplay is what carries the
+// replay_of/replay_edits linkage across, since the Handler sees only the
+// request.
+//
+// The response is written to a statusRecorder, which records the status and
+// discards the body — the proxy's own tee already captured it, so keeping a
+// second copy here would only duplicate a stream that can be large.
+//
+// Header note: the stored request headers are what the capture saved, which
+// means the credential in them is the redaction placeholder, not a key. Lens
+// neither persists nor injects one (design spec §Secrets: "Lens never persists
+// a key and never injects one"), so a replay against an upstream that requires
+// the captured credential is answered 401 and that 401 is recorded faithfully.
+func (a *api) sendReplay(parent *http.Request, orig *store.Request, body []byte, meta proxy.ReplayMeta) (int, error) {
+	req, err := http.NewRequestWithContext(parent.Context(), orig.Method, orig.Path, bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("replay: build outbound request: %w", err)
+	}
+	if orig.ReqHeaders != "" {
+		// Copied so a malformed header blob degrades to "no headers" rather
+		// than failing the send: replay must still be able to try.
+		headers := http.Header{}
+		if err := json.Unmarshal([]byte(orig.ReqHeaders), &headers); err == nil {
+			req.Header = headers
+		}
+	}
+	// The row's remote_addr says where the call came from; a replayed call did
+	// not come from the original client, and naming that plainly keeps a
+	// replay distinguishable from the traffic it was re-issued from.
+	req.RemoteAddr = "replay"
+
+	rec := &statusRecorder{}
+	a.proxyHandler.ServeHTTP(rec, proxy.WithReplay(req, meta))
+	return rec.status(), nil
+}
+
+// statusRecorder is the http.ResponseWriter a replay's upstream response is
+// written to. It records the status code and drops the body (see sendReplay).
+// Flush is a no-op that keeps the proxy's FlushInterval: -1 path from
+// degrading — the proxy flushes after every write so an SSE response reaches
+// the client immediately, and there is no client here to reach.
+type statusRecorder struct {
+	code   int
+	header http.Header
+}
+
+func (s *statusRecorder) Header() http.Header {
+	if s.header == nil {
+		s.header = http.Header{}
+	}
+	return s.header
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.code == 0 {
+		s.code = code
+	}
+}
+
+func (s *statusRecorder) Write(p []byte) (int, error) {
+	s.WriteHeader(http.StatusOK)
+	return len(p), nil
+}
+
+func (s *statusRecorder) Flush() {}
+
+func (s *statusRecorder) status() int {
+	if s.code == 0 {
+		return http.StatusOK // an empty body still means the upstream answered
+	}
+	return s.code
+}
+
+// newestReplay returns the id of the newest recorded replay of origID, or 0
+// when that capture has never been replayed.
+func (a *api) newestReplay(ctx context.Context, origID int64) (int64, error) {
+	rows, err := a.store.ListRequests(ctx, store.Filter{ReplayOf: &origID, Limit: 1})
+	if err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	return rows[0].ID, nil
+}
+
+// awaitReplayRow waits for the consumer to commit the row for the replay that
+// was just sent and returns it.
+//
+// Polling is how this endpoint can name that row at all: its id is assigned by
+// the writer, asynchronously, so the sender has no other handle on it. The
+// retry is what makes that a non-issue rather than a race — see replayWait.
+//
+// ponytail: a bounded poll, not a completion hook on the consumer. Giving
+// br-GI-1-07's write path a signalling channel for this one caller would be more
+// machinery than a 2s deadline, and the deadline is already ~8× the consumer's
+// own batch quiet window. Revisit if the write path ever gains a queue depth
+// that makes a flat wait wrong.
+func (a *api) awaitReplayRow(ctx context.Context, origID, afterID int64) (*store.Request, error) {
+	deadline := time.Now().Add(replayWait)
+	for {
+		rows, err := a.store.ListRequests(ctx, store.Filter{ReplayOf: &origID, Limit: 1})
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) > 0 && rows[0].ID > afterID {
+			return rows[0], nil
+		}
+		if !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("replay was sent but its row did not appear within %s; check `lens ls`", replayWait)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(replayPollInterval):
+		}
+	}
+}
+
+// replayOriginReject applies the Origin/Host allowlist half of the replay
+// guard. It returns "" when the request may proceed, or the reason to report as
+// a 403. It reads only headers — it never touches the store, the upstream, or
+// the body — so a rejection costs nothing and can send nothing.
+//
+// Two rejections, both about who can reach this route from a browser:
+//
+//   - Host must be loopback. A DNS-rebinding page resolves its own hostname to
+//     127.0.0.1 and then POSTs with its own Host header, so a non-loopback Host
+//     is the rebinding case even though the connection itself arrived over
+//     loopback. r.Host (not RemoteAddr) is what a browser cannot forge into
+//     loopback while still being a foreign origin.
+//
+//   - Origin, when present, must be this request's own origin. A browser sets
+//     Origin on every cross-origin request and on same-origin POSTs, so
+//     Origin == our own origin is the same-origin case and anything else is
+//     another page driving this endpoint. "The dashboard's own origin" is
+//     compared as the Origin's host:port against the request's own Host rather
+//     than against the configured DashboardAddr, because the dashboard answers
+//     on whichever loopback alias the user browsed to (localhost, 127.0.0.1,
+//     [::1]) and the browser's same-origin rule is exactly this comparison. A
+//     page served from a *different* loopback port is a different origin and is
+//     rejected — correct, and the reason the comparison is not merely "is
+//     Origin loopback too".
+//
+// A missing Origin passes. Browsers always send it, so its absence means a
+// non-browser client, which for this endpoint means `lens replay` — the
+// deliberate credentialless design in the bead's "Why no secret" (a local
+// process that could forge past this could already read the SQLite file).
+func replayOriginReject(r *http.Request) string {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if !loopbackHost(host) {
+		return fmt.Sprintf("replay requires a loopback Host, got %q", r.Host)
+	}
+
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return ""
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return fmt.Sprintf("replay rejected origin %q: not a usable origin", origin)
+	}
+	if !strings.EqualFold(u.Host, r.Host) {
+		return fmt.Sprintf("replay rejected cross-origin request: origin %q is not this dashboard's own origin %q", origin, r.Host)
+	}
+	return ""
+}
+
+// loopbackHost reports whether host — any port already stripped — is a loopback
+// name or address. "localhost" is accepted by name because that is what a
+// browser's Origin carries when the user browsed to localhost; the address
+// forms (127.0.0.0/8, ::1) are accepted by net.IP.IsLoopback.
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 type statsResponse struct {
@@ -402,6 +744,11 @@ type healthResponse struct {
 	ConsumerFlushes   uint64     `json:"consumer_flushes"`
 	LastWriteAt       *time.Time `json:"last_write_at,omitempty"`
 	LastWriteAgeMs    int64      `json:"last_write_age_ms,omitempty"`
+	// ReplayEnabled is how the dashboard learns whether to offer the replay
+	// editor at all: the button must be inert when the endpoint it would call
+	// answers 403 (br-GI-1-13). It rides on /api/health, which is already the
+	// dashboard's one view of server state.
+	ReplayEnabled bool `json:"replay_enabled"`
 }
 
 func (a *api) health(w http.ResponseWriter, r *http.Request) {
@@ -414,6 +761,7 @@ func (a *api) health(w http.ResponseWriter, r *http.Request) {
 		ConsumerProcessed: cs.Processed,
 		ConsumerFailed:    cs.Failed,
 		ConsumerFlushes:   cs.Flushes,
+		ReplayEnabled:     a.replayEnabled,
 	}
 	if !cs.LastWriteAt.IsZero() {
 		t := cs.LastWriteAt

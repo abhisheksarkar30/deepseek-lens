@@ -59,6 +59,7 @@ func runDoctor(args []string, w io.Writer) error {
 		{"capture", fmt.Sprintf("%t", cfg.Capture)},
 		{"session_gap_minutes", fmt.Sprintf("%d", cfg.SessionGapMinutes)},
 		{"replay_enabled", fmt.Sprintf("%t", cfg.ReplayEnabled)},
+		{"replay_cost_threshold_usd", fmt.Sprintf("%.4f", cfg.ReplayCostThresholdUSD)},
 	}
 	fmt.Fprint(w, table([]string{"FIELD", "VALUE"}, cfgRows, 0))
 
@@ -119,7 +120,9 @@ func runChecks(cfg *config.Config) []doctorCheck {
 
 	replayDetail := "off (default; enable with --replay, LENS_REPLAY_ENABLED, or replay_enabled in the config file)"
 	if cfg.ReplayEnabled {
-		replayDetail = "on — replay endpoint guarded by an Origin/Host allowlist, no shared secret"
+		replayDetail = fmt.Sprintf(
+			"on — POST /api/requests/{id}/replay guarded by an Origin/Host allowlist, no shared secret; `lens replay` needs --yes above %s",
+			costCell(cfg.ReplayCostThresholdUSD, 1, 0))
 	}
 	checks = append(checks, doctorCheck{"replay_posture", statusPass, replayDetail})
 

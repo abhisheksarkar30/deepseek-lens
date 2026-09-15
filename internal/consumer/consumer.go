@@ -296,6 +296,12 @@ func (c *Consumer) doProcessCall(ctx context.Context, call *sink.CapturedCall) {
 		ModelRequested: meta.ModelRequested,
 		ModelResolved:  usage.Model,
 		PrefixHash:     meta.PrefixHash,
+
+		// Replay linkage (br-GI-1-13) rides on the CapturedCall: nil for
+		// every ordinary call, set for a request re-issued through the replay
+		// endpoint. The consumer's job here is only to carry it onto the row.
+		ReplayOf:    call.ReplayOf,
+		ReplayEdits: call.ReplayEdits,
 	}
 	if usage.StopReason != "" {
 		sr := usage.StopReason

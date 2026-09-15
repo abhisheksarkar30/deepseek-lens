@@ -86,7 +86,17 @@ func Serve(args []string) error {
 	}
 	// The dashboard's read endpoints use the bare *store.Store (not
 	// pubStore) so a read can never itself trigger a broker publish.
-	dashSrv := &http.Server{Addr: cfg.DashboardAddr, Handler: api.New(st, sk, cons, broker, web.Files)}
+	//
+	// proxySrv.Handler is handed to the API as well: POST
+	// /api/requests/{id}/replay re-issues a captured request through the live
+	// proxy Handler, which is what makes a replay use the same transport, the
+	// same tee and the same consumer writer as every other call (br-GI-1-13).
+	// cfg.ReplayEnabled is the endpoint's opt-in control — the dashboard route
+	// exists but answers 403 until `lens serve --replay` is passed.
+	dashSrv := &http.Server{
+		Addr:    cfg.DashboardAddr,
+		Handler: api.New(st, sk, cons, broker, web.Files, proxySrv.Handler, cfg.ReplayEnabled),
+	}
 
 	printBanner(os.Stdout, cfg)
 

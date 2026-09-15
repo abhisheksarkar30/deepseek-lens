@@ -80,7 +80,10 @@ func newTestAPI(t *testing.T, st Store) (http.Handler, *sink.Sink, *consumer.Con
 	sk := sink.New(16)
 	cons := consumer.New(sk, nil, nil) // Run is never called in most tests; Stats() is fine on a fresh Consumer.
 	broker := NewBroker()
-	return New(st, sk, cons, broker, testAssets), sk, cons, broker
+	// No proxy handler and replay off: these tests cover the read-only API, and
+	// the replay route (br-GI-1-13) is exercised in internal/replay, where a
+	// real proxy and a recording upstream can be wired up.
+	return New(st, sk, cons, broker, testAssets, nil, false), sk, cons, broker
 }
 
 func decodeJSON[T any](t *testing.T, body io.Reader) T {
@@ -408,7 +411,7 @@ func TestHealthReportsCounters(t *testing.T) {
 	sk := sink.New(16)
 	cons := consumer.New(sk, st, nil)
 	broker := NewBroker()
-	handler := New(st, sk, cons, broker, testAssets)
+	handler := New(st, sk, cons, broker, testAssets, nil, false)
 
 	sk.Submit(&sink.CapturedCall{StartedAt: time.Now(), Method: "POST", Path: "/v1/messages", Status: 200})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -47,8 +47,13 @@ type Config struct {
 	Capture           bool
 	SessionGapMinutes int
 	ReplayEnabled     bool
-	ModelMap          string // client-model → DeepSeek-model table; see DefaultModelMap
-	ModelMaxTokens    string // DeepSeek-model → max_tokens ceiling; see DefaultModelMaxTokens
+	// ReplayCostThresholdUSD is the spend `lens replay` will send without
+	// confirmation: a replay whose original call cost more than this (or whose
+	// original has no price at all, so the cost is unknown) needs --yes. Zero
+	// is legitimate — it means every replay needs --yes.
+	ReplayCostThresholdUSD float64
+	ModelMap               string // client-model → DeepSeek-model table; see DefaultModelMap
+	ModelMaxTokens         string // DeepSeek-model → max_tokens ceiling; see DefaultModelMaxTokens
 }
 
 // Default returns the built-in defaults.
@@ -64,8 +69,12 @@ func Default() *Config {
 		Capture:           true,
 		SessionGapMinutes: 30,
 		ReplayEnabled:     false,
-		ModelMap:          DefaultModelMap,
-		ModelMaxTokens:    DefaultModelMaxTokens,
+		// ponytail: 25 cents — a round number well above an ordinary single
+		// call and well below a mistake. The point of the gate is that a replay
+		// is never a surprise, not that the figure is right for every user.
+		ReplayCostThresholdUSD: 0.25,
+		ModelMap:               DefaultModelMap,
+		ModelMaxTokens:         DefaultModelMaxTokens,
 	}
 }
 
@@ -99,18 +108,19 @@ func configFilePath() string {
 
 // fieldsByEnv maps LENS_* environment variable names to Config field names.
 var fieldsByEnv = map[string]string{
-	"LENS_PROXY_ADDR":          "ProxyAddr",
-	"LENS_DASHBOARD_ADDR":      "DashboardAddr",
-	"LENS_UPSTREAM_URL":        "UpstreamURL",
-	"LENS_DB_PATH":             "DBPath",
-	"LENS_BODY_POLICY":         "BodyPolicy",
-	"LENS_BODY_CAP_BYTES":      "BodyCapBytes",
-	"LENS_ALLOW_REMOTE":        "AllowRemote",
-	"LENS_CAPTURE":             "Capture",
-	"LENS_SESSION_GAP_MINUTES": "SessionGapMinutes",
-	"LENS_REPLAY_ENABLED":      "ReplayEnabled",
-	"LENS_MODEL_MAP":           "ModelMap",
-	"LENS_MODEL_MAX_TOKENS":    "ModelMaxTokens",
+	"LENS_PROXY_ADDR":                "ProxyAddr",
+	"LENS_DASHBOARD_ADDR":            "DashboardAddr",
+	"LENS_UPSTREAM_URL":              "UpstreamURL",
+	"LENS_DB_PATH":                   "DBPath",
+	"LENS_BODY_POLICY":               "BodyPolicy",
+	"LENS_BODY_CAP_BYTES":            "BodyCapBytes",
+	"LENS_ALLOW_REMOTE":              "AllowRemote",
+	"LENS_CAPTURE":                   "Capture",
+	"LENS_SESSION_GAP_MINUTES":       "SessionGapMinutes",
+	"LENS_REPLAY_ENABLED":            "ReplayEnabled",
+	"LENS_REPLAY_COST_THRESHOLD_USD": "ReplayCostThresholdUSD",
+	"LENS_MODEL_MAP":                 "ModelMap",
+	"LENS_MODEL_MAX_TOKENS":          "ModelMaxTokens",
 }
 
 func envKV() map[string]string {
@@ -182,6 +192,8 @@ func applyKV(cfg *Config, kv map[string]string) error {
 			cfg.SessionGapMinutes, err = strconv.Atoi(val)
 		case "ReplayEnabled":
 			cfg.ReplayEnabled, err = strconv.ParseBool(val)
+		case "ReplayCostThresholdUSD":
+			cfg.ReplayCostThresholdUSD, err = strconv.ParseFloat(val, 64)
 		case "ModelMap":
 			cfg.ModelMap = val
 		case "ModelMaxTokens":
@@ -211,6 +223,8 @@ func applyFlags(cfg *Config, args []string) error {
 	fs.BoolVar(&cfg.Capture, "capture", cfg.Capture, "enable capture")
 	fs.IntVar(&cfg.SessionGapMinutes, "session-gap-minutes", cfg.SessionGapMinutes, "minutes of inactivity before a new session")
 	fs.BoolVar(&cfg.ReplayEnabled, "replay", cfg.ReplayEnabled, "enable the replay endpoint")
+	fs.Float64Var(&cfg.ReplayCostThresholdUSD, "replay-cost-threshold-usd", cfg.ReplayCostThresholdUSD,
+		"replay needs --yes above this original-call cost in US dollars")
 	fs.StringVar(&cfg.ModelMap, "model-map", cfg.ModelMap, "client-model to DeepSeek-model map, e.g. \"opus:deepseek-v4-pro,*:deepseek-flash\"")
 	fs.StringVar(&cfg.ModelMaxTokens, "model-max-tokens", cfg.ModelMaxTokens, "per-DeepSeek-model max_tokens ceiling, e.g. \"deepseek-v4-pro:64000\"")
 	return fs.Parse(args)
@@ -278,6 +292,14 @@ func (c *Config) Validate() error {
 	}
 	if c.SessionGapMinutes <= 0 {
 		return fmt.Errorf("SessionGapMinutes: must be positive, got %d", c.SessionGapMinutes)
+	}
+	// A negative threshold is nonsense and a NaN one is worse: every
+	// comparison against NaN is false, so the cost gate would silently never
+	// fire rather than fire always. `!(x >= 0)` is the one predicate that
+	// rejects both, since NaN fails it too. Zero is allowed — it means "every
+	// replay needs --yes", a legitimate strict setting.
+	if !(c.ReplayCostThresholdUSD >= 0) {
+		return fmt.Errorf("ReplayCostThresholdUSD: must be a non-negative number, got %v", c.ReplayCostThresholdUSD)
 	}
 	return nil
 }

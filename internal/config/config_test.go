@@ -113,6 +113,7 @@ AllowRemote = true
 Capture = false
 SessionGapMinutes = 15
 ReplayEnabled = true
+ReplayCostThresholdUSD = 1.5
 ModelMap = "opus:deepseek-v4-pro,*:deepseek-flash"
 ModelMaxTokens = "deepseek-v4-pro:1"
 `)
@@ -132,8 +133,10 @@ ModelMaxTokens = "deepseek-v4-pro:1"
 		Capture:           false,
 		SessionGapMinutes: 15,
 		ReplayEnabled:     true,
-		ModelMap:          "opus:deepseek-v4-pro,*:deepseek-flash",
-		ModelMaxTokens:    "deepseek-v4-pro:1",
+		// Parsed by strconv.ParseFloat — the one float key in the file.
+		ReplayCostThresholdUSD: 1.5,
+		ModelMap:               "opus:deepseek-v4-pro,*:deepseek-flash",
+		ModelMaxTokens:         "deepseek-v4-pro:1",
 	}
 	if *cfg != *want {
 		t.Errorf("Load() = %+v, want %+v", *cfg, *want)

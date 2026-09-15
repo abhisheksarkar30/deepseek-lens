@@ -112,6 +112,13 @@ type Filter struct {
 
 	Kind     string
 	Severity string
+
+	// ReplayOf selects a capture's replays: the requests that were re-issued
+	// from the given request id (br-GI-1-13). It is how the replay endpoint
+	// finds the row its own send produced — the id it must report is assigned
+	// by the writer, asynchronously, so replay_of is the only name for that row
+	// that the sender can know in advance.
+	ReplayOf *int64
 }
 
 // Summary is StatsSummary's result: totals over a time window.

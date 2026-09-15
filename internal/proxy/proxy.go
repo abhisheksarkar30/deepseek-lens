@@ -95,9 +95,51 @@ func New(cfg *config.Config, sk *sink.Sink) (http.Handler, error) {
 			reqBody:    reqBuf,
 			sk:         sk,
 		}
+		if rm, ok := r.Context().Value(replayKey{}).(ReplayMeta); ok {
+			of := rm.Of
+			st.replayOf = &of
+			if rm.Edits != "" {
+				edits := rm.Edits
+				st.replayEdits = &edits
+			}
+			st.noCapture = rm.NoCapture
+		}
 		r = r.WithContext(context.WithValue(r.Context(), stateKey{}, st))
 		rp.ServeHTTP(w, r)
 	}), nil
+}
+
+// ReplayMeta carries a replay's linkage from the handler that re-issues a
+// captured request (internal/api's replay endpoint) to the capture path that
+// records it. It exists so a replay produces the *same kind* of row an ordinary
+// proxied call does — same transport, same tee, same single writer — with
+// replay_of and replay_edits filled in, instead of a second send path that
+// would have to reproduce all of it.
+type ReplayMeta struct {
+	// Of is the original request's row id. Requests ids start at 1, so it is
+	// always a real row when WithReplay is used at all.
+	Of int64
+	// Edits is the serialized [{path, old, new}] array of edits applied to the
+	// replayed body, or "" when the replay has no edits.
+	Edits string
+	// NoCapture is --no-capture: the request is still sent, but the capture
+	// path skips the sink entirely, so no row is written at all. That is
+	// deliberately not "submit a call flagged as uncaptured" — a submitted
+	// call is a row whatever flags it carries.
+	NoCapture bool
+}
+
+// replayKey is the context key a replay's metadata is stashed under, for the
+// same reason stateKey{} exists: New's outer closure sets the captureState, but
+// the metadata arrives on the request the *caller* constructed.
+type replayKey struct{}
+
+// WithReplay returns r with meta attached for the proxy's capture path to pick
+// up. It is how the replay endpoint hands a re-issued request to the very
+// Handler that serves live traffic, so the replay is rewritten, streamed,
+// teed, size-capped and redacted by the code that already does all of that.
+func WithReplay(r *http.Request, meta ReplayMeta) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), replayKey{}, meta))
 }
 
 // NewServer builds the http.Server that fronts New's handler, with the
@@ -134,15 +176,28 @@ type captureState struct {
 	reqHeaders http.Header
 	reqBody    *boundedBuffer
 	sk         *sink.Sink
+
+	// Replay linkage, copied off the request's ReplayMeta (see WithReplay).
+	// All three are zero for ordinary traffic.
+	replayOf    *int64
+	replayEdits *string
+	noCapture   bool
 }
 
-// submit assembles and submits the CapturedCall. It is called exactly once
-// per request, from whichever of ModifyResponse's response-body Close or
+// submit assembles and submits the CapturedCall. It is called at most once per
+// request, from whichever of ModifyResponse's response-body Close or
 // ErrorHandler fires — the two are mutually exclusive. Submit itself never
-// blocks, so this never delays anything: by the time it runs, either the
-// last byte has already reached the client or the request has already
-// failed.
+// blocks, so this never delays anything: by the time it runs, either the last
+// byte has already reached the client or the request has already failed.
+//
+// A --no-capture replay returns before submitting (see ReplayMeta.NoCapture):
+// the send still happens, but nothing reaches the sink, so the consumer writes
+// no row. Skipping the submit is the only honest way to express that — a
+// submitted call becomes a row regardless of any flag on it.
 func (st *captureState) submit(status int, respHeaders http.Header, respBody []byte, callErr error) {
+	if st.noCapture {
+		return
+	}
 	st.sk.Submit(&sink.CapturedCall{
 		StartedAt:   st.start,
 		TTFB:        st.ttfb,
@@ -155,6 +210,8 @@ func (st *captureState) submit(status int, respHeaders http.Header, respBody []b
 		RespHeaders: respHeaders,
 		ReqBody:     st.reqBody.Bytes(),
 		RespBody:    respBody,
+		ReplayOf:    st.replayOf,
+		ReplayEdits: st.replayEdits,
 		Err:         callErr,
 	})
 }
