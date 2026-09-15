@@ -274,3 +274,24 @@ Two invariants are worth stating because they are easy to break and hard to noti
 hot path never buffers the stream to count tokens (a buffered stream still returns the right bytes,
 just late, so only a timing test catches it), and `internal/proxy` depends on nothing but `sink` and
 `config` — if it ever imports `analyze` or `store`, the design has eroded.
+
+## How v1 was reviewed
+
+v1 was landed through a multi-persona review rather than a single read: eight independent specialist
+passes over the diff, each with fresh context and its own slice — Security (OWASP), Encoding &
+Hygiene, Clean-Code, and Testing/Coverage on every file, plus Database/Migrations, Performance,
+Documentation, and Frontend matched by what the change touched. Findings were merged, then each one
+was adversarially re-verified against the repo before it reached the report, because a reviewer
+working from a diff hunk can mistake absent evidence for evidence of absence.
+
+The panel raised **1 blocker, 6 major, 24 minor, and 10 nits**, and the verdict was *block* — the
+blocker being a redaction bypass in `internal/proxy/redact.go`: it gated on `Header.Get`, which
+returns only a header's *first* value, so `X-Api-Key: ` followed by a real key slipped a live
+credential into the database unredacted. That is fixed, with a regression test that sets both values.
+
+The rest is fixed too, in the same commit: **1/1 blocker, 6/6 major, 23/24 minor, 8/10 nits.** Three
+were left open deliberately and are listed rather than papered over — two would mean introducing a
+JavaScript test harness for `internal/web`, which this repo has no convention for, and the third
+changes an on-disk encoding, which is a migration decision and not a review fix. The full report and
+its resolution are comments on the v1 pull request; the panel's per-persona diff slices live under
+`planning/GI-1/review/`, which is gitignored.
