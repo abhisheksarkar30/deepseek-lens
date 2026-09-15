@@ -23,7 +23,7 @@ HTML/CSS/JS with no `package.json`), no infra-as-code, no mobile app.
 | File | When to open it | Why it's here (core / trigger) |
 |---|---|---|
 | [architecture.md](architecture.md) | Understanding the system's shape: components, data flow, the hot-path/cold-path split | core |
-| [conventions.md](conventions.md) | Before writing code: naming, error handling, DI style, testing, and commit/branch/PR governance actually used here | core |
+| [conventions.md](conventions.md) | Before writing code: naming, error handling, DI style, dashboard/UI rules, testing, and commit/branch/PR governance actually used here | core |
 | [build-and-run.md](build-and-run.md) | Building, testing, or running `lens` locally; env vars and config precedence | core |
 | [glossary.md](glossary.md) | Decoding project-specific terms (session, sink, prefix hash, bead, fail open, ...) | core |
 | [data-model.md](data-model.md) | Working with the SQLite schema (`requests`/`sessions`/`warnings`) or the Go types that mirror it | conditional: `internal/store/schema.sql` + Go structs found |
@@ -57,6 +57,13 @@ ADR).
 
 ## Last generated / refreshed
 
-2026-09-15, REFRESH mode, scoped to the GI-4 peak-pricing/hook-integration story (peak-aware
+2026-09-16, REFRESH mode, scoped to the GI-9 dashboard-affordance fix in
+[PR #10](https://github.com/abhisheksarkar30/deepseek-lens/pull/10) — the accessible-name rule for
+warning badges and how a web change is verified without a harness (`conventions.md`,
+`testing-and-quality.md`). Documentation was written against the `GI-9-fix-warning-badge-affordance`
+branch, which was unmerged at refresh time: on `develop` the `⚠` spans are still inlined and
+`warnBadge` does not exist.
+
+Previously: 2026-09-15, scoped to the GI-4 peak-pricing/hook-integration story (peak-aware
 `pricing.Compute`, the `peak_pricing` warning kind, and doctor's `provider_hooks` check).
 Originally generated 2026-09-15, FRESH mode, whole-repository scope.

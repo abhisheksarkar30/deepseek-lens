@@ -17,6 +17,31 @@
   ([internal/config/config.go:140-142](../../internal/config/config.go)), and the replay row-poll
   ([internal/api/api.go:465-469](../../internal/api/api.go)).
 
+## Dashboard (`internal/web`) conventions
+
+The dashboard is vanilla HTML/CSS/JS inlined into the binary by `go:embed` (no framework, no build
+step — see [architecture.md](architecture.md)), so its rules are held in the three asset files
+rather than by a framework's idiom:
+
+- **A glyph is never the only carrier of meaning.** Every badge carries both a `title` and an
+  `aria-label` naming what it means, so it still reads in monochrome and to a screen reader:
+  `costBadge` ([internal/web/app.js:34](../../internal/web/app.js)) for the unpriced-call `?`, and
+  `warnBadge(count, hint)` ([internal/web/app.js:44](../../internal/web/app.js)) for the analyzer
+  warning `⚠`. All four `⚠` render sites route through `warnBadge` instead of inlining the span
+  ([internal/web/app.js:184,203,402,480](../../internal/web/app.js)), and the matching column
+  headers carry a `title` too ([internal/web/index.html:36,85,108](../../internal/web/index.html)).
+  Both reuse `.badge.warn` rather than adding a class — to the reader they mean the same thing: this
+  row needs attention.
+- **Interpolated text is HTML-escaped** with `escapeHtml`
+  ([internal/web/app.js:5](../../internal/web/app.js)) before it reaches a `title`/`aria-label`,
+  since model names and analyzer reasons land in those attributes.
+- **A panel revealed by a click scrolls itself into view.** The sessions table is routinely taller
+  than the viewport, so unhiding `#session-detail` alone reads as a dead click: `openSession` calls
+  `scrollIntoView` ([internal/web/app.js:494](../../internal/web/app.js)), and `.detail-panel`'s
+  `scroll-margin-top: 72px` ([internal/web/style.css:135-142](../../internal/web/style.css)) clears
+  the `position: sticky` header ([internal/web/style.css:57](../../internal/web/style.css)) that
+  would otherwise cover the panel's own title.
+
 ## Error handling
 
 - **"Fail open" is the project-wide rule** ([CLAUDE.md](../../CLAUDE.md)): the observer must never
@@ -70,8 +95,10 @@
 
 ## Testing conventions
 
-- Every `internal/*` package (except `web`, which has no logic) has a `_test.go` sibling; see
-  [testing-and-quality.md](testing-and-quality.md) for the full inventory and the hard-gate TTFB test.
+- Every `internal/*` package has a `_test.go` sibling except `internal/web`. That package has no Go
+  logic (`embed.go` is a `go:embed` directive only), but `app.js` does carry real logic with no JS
+  test runner — see [testing-and-quality.md](testing-and-quality.md) for the full inventory, the
+  hard-gate TTFB test, and how a web change is verified without a harness.
 - Tests assert against real behavior, not mocks, where practical: `internal/store` tests run against
   a real temp-file SQLite database; `internal/api` tests spin up real `httptest` servers.
 - A few tests enforce **documentation stays true to code**: `internal/analyze/readme_test.go` asserts
