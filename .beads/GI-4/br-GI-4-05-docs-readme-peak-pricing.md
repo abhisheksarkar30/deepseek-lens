@@ -29,6 +29,15 @@ no way to know the tool is right and they are reading it wrong. Two surfaces say
 Wording must be careful about what is and is not configurable: the *rates* are the user's, the
 *window* and the *ratio* are DeepSeek's and are compiled in. Do not invite the reader to set them.
 
+**Neither surface may imply the plugin is required.** lens works with no plugin at all: the peak
+window is DeepSeek's schedule rather than something the hooks configure, and both the doubled
+`cost_usd` and the `peak_pricing` warning are computed inside lens from the request's own
+timestamp. What the plugin adds is *prevention* — a guard that refuses a peak session before it
+bills — not measurement. So the README should say that in one sentence: if you run no plugin, or
+no Claude Code at all, everything above still applies to you, and the warning is your only notice
+that a peak window was billed (plan §4.3). A reader who concludes the feature needs the plugin
+would be misreading a story whose whole point is that lens stands alone.
+
 ## Rationale
 
 The peak window is an invisible multiplier on every number in this tool for 21% of the week. That
@@ -42,6 +51,8 @@ header is read every time someone opens the file to change a rate.
 
 - `README.md` names the peak window (01:00-04:00 and 06:00-10:00 UTC, Mon-Fri) and the 2x
   multiplier, and states that both are DeepSeek's schedule rather than a lens setting.
+- `README.md` states that the plugin is optional: the multiplier and the `peak_pricing` warning are
+  computed by lens from the request timestamp, and neither depends on the hooks being installed.
 - The README's warning table already carries the `peak_pricing` row (br-GI-4-03); this bead's
   cost-section prose links the two — a doubled cost and the warning that explains it.
 - A freshly written `prices.toml` (via `lens prices --set`) carries the off-peak note in its

@@ -2,7 +2,7 @@
 
 **Plan Reference**: `docs/planning/GI-4-peak-cost-and-hook-integration.md` §4.3, §4.4
 
-- **Priority**: P1 (high)
+- **Priority**: P0 (critical)
 - **Dependencies**: br-GI-4-01
 - **Blocks**: br-GI-4-05, br-GI-4-06
 
@@ -51,8 +51,15 @@ category error there.
 
 br-GI-4-02 alone leaves a hole: a user who sees a session cost twice what they expected has no way
 to learn from the tool *why*. The peak window is a scheduling fact the user can act on, and lens
-is the only component that can tell them after the fact that they worked through it. The plugin
-prevents; lens accounts.
+is the only component that can tell them after the fact that they worked through it.
+
+**P0, because for half this story's audience this bead is the feature rather than an explanation
+of one.** A user running the plugin gets a guard that refuses the session *before* it bills, so
+for them the warning is a retrospective note about a call the guard did not stop. A user running
+no plugin has no guard and no toggle, and nothing else in lens knows that 02:00 UTC costs double:
+for them the warning is the only peak signal that exists, and it is what makes the doubled
+`cost_usd` mean anything. Where the plugin is present it prevents and lens accounts; where it is
+absent, lens accounting *is* the whole of the protection (plan §4.3).
 
 ## Outcome Definition
 

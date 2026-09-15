@@ -10,8 +10,8 @@
 ## Description
 
 After br-GI-4-07, the plugin hooks decide "is this session DeepSeek-backed?" with a two-clause
-predicate evaluated against the session's **effective** `ANTHROPIC_BASE_URL` — the value in
-`~/.claude/settings.json`:
+predicate evaluated against the session's **effective** `ANTHROPIC_BASE_URL` — the value in Claude
+Code's `settings.json`:
 
 > recognized when the effective `ANTHROPIC_BASE_URL` contains `deepseek`, **or** equals the base
 > URL that `~/.claude/.deepseek-env.json` declares.
@@ -36,16 +36,17 @@ provider_hooks   warn   peak guard will NOT fire: ~/.claude/settings.json points
 
 The four combinations of overlay presence and effective URL resolve as:
 
-| Overlay (`~/.claude/.deepseek-env.json`) | Effective `ANTHROPIC_BASE_URL` | Result |
+| Overlay (`.deepseek-env.json`, in Claude Code's config dir) | Effective `ANTHROPIC_BASE_URL` | Result |
 |---|---|---|
 | absent | any | `pass` + note — plugin not managing this machine; nothing to warn about |
 | present | contains `deepseek` | `pass` — guard fires by substring |
 | present | the lens address, overlay declares the **same** address | `pass` |
 | present | the lens address, overlay declares a **different** address | `warn` — the genuine blind spot, detail names both |
 
-The check reads the same two files the hooks read — `~/.claude/settings.json` for the **effective**
-`ANTHROPIC_BASE_URL`, `~/.claude/.deepseek-env.json` for the declared value — and evaluates that
-predicate. It is the **third copy of the predicate** (the guard and the toggle are the other two;
+The check reads the same two files the hooks read — `settings.json` for the **effective**
+`ANTHROPIC_BASE_URL`, `.deepseek-env.json` for the declared value, both under Claude Code's config
+directory, which the next section resolves — and evaluates that predicate. It is the **third copy
+of the predicate** (the guard and the toggle are the other two;
 see the plan's §8.1), so it must be the predicate itself, written once, in the same clause order
 the hooks apply it: substring on `deepseek` first, then equality with the declared URL. A check
 that merely *approximates* the thing it checks — comparing the overlay's value against
@@ -57,36 +58,61 @@ declared value are both full URLs (`http://127.0.0.1:8787`), so they compare dir
 deciding whether the effective URL is *the address lens serves* (the warn branch), compare it
 against `"http://" + cfg.ProxyAddr` (scheme-normalized), never the raw `ProxyAddr`.
 
-**Resolve the home directory the way the rest of the codebase does.** `providerHookCheck` must
-read `os.Getenv("HOME")` **before** falling back to `os.UserHomeDir()`, the same precedence as
-`config.userHomeDir` (`internal/config/config.go:83`) and `pricing`'s copy
-(`internal/pricing/table.go:21`). On Windows — this repo's platform — `os.UserHomeDir()` returns
-`USERPROFILE` and ignores `HOME`, so a check that called it directly would read the developer's
-real `~/.claude/` (the exact leak the "throwaway `HOME`" test forbids) and would pass or fail on
-machine state rather than on the fixture. Reuse the existing helper: promote `config.userHomeDir`
-to an exported `config.UserHomeDir()` (updating its two internal callers in `config.go`) and call
-it from `cli`, rather than adding a third inline copy. Why reuse beats a local copy here: `pricing`
-duplicates the helper precisely so `pricing` stays a leaf package that never imports `config`
+**Resolve Claude Code's config directory by Claude Code's rules, not lens's.** This is a
+*different question* from "where is the user's home", and the two have different correct answers.
+
+Claude Code stores its files under a directory that `CLAUDE_CONFIG_DIR` relocates wholesale —
+settings, session history and plugins together — and its documented Windows rule is that
+`~/.claude` means `%USERPROFILE%\.claude`, **not** `$HOME/.claude`. `config.userHomeDir`
+(`internal/config/config.go:83`) resolves `$HOME` **first**, deliberately, so that tests and users
+can redirect *lens's own* files (`config.toml`, `prices.toml`, the database) uniformly across
+platforms. That precedence is right for those files and wrong here: on Windows, whenever `$HOME`
+differs from `%USERPROFILE%` — the ordinary state of a Git Bash session, on this repo's target
+platform — it resolves a directory Claude Code never reads, and the check would then answer
+confidently about a file the hooks never touch.
+
+So `providerHookCheck` resolves through a small `claudeConfigDir()` beside it, in this precedence:
+
+1. `CLAUDE_CONFIG_DIR`, if set — Claude Code's own relocation variable, and the highest-priority
+   answer when a user has deliberately moved their config.
+2. `%USERPROFILE%\.claude`, if `USERPROFILE` is set — the documented Windows rule, and the first
+   thing Node's `os.homedir()` resolves in the hooks.
+3. `$HOME/.claude`, if `HOME` is set.
+4. `os.UserHomeDir()` + `/.claude` — last resort.
+
+Steps 2 to 4 are exactly what Node's `os.homedir()` resolves, so the check finally reads the same
+file the hooks read. `config.UserHomeDir` is therefore **not** exported and
+`internal/config/config.go` is **not** touched by this bead. The `pricing` leaf-package reasoning
 (`internal/pricing/table.go:19` — "rather than exported out of internal/config so **this** stays a
-leaf package", where "this" is `pricing`) — but that reasoning does not transfer to `cli`, which
-**already** imports `internal/config` (`runChecks(cfg *config.Config)` in `doctor.go`), and `doctor.go`
-resolves no home directory today (`grep` over `internal/cli` for `UserHomeDir` / `os.Getenv("HOME")` /
-`userHomeDir` / `.claude` returns no matches). So an inline copy in `doctor.go` would be the *third*
-copy **and** the only one with no leaf-package justification; exporting `config.UserHomeDir` grows
-`config`'s API by one small resolver and prevents the unjustified copy.
+leaf package") is not what decides this; the deciding fact is that a helper built to relocate
+lens's own files is the wrong tool for locating Claude Code's.
+
+Keep it small, unexported, and next to its only caller — it has one call site and no reason to be
+an API.
 
 Behaviour that matters:
 
-- **WARN, never FAIL.** A user who does not use the plugin hooks at all, or who deliberately runs
+- **The check is incapable of returning `FAIL`.** `runDoctor` returns a non-zero exit the moment
+  any check FAILs (`internal/cli/doctor.go:41-45`), so a `FAIL` from `provider_hooks` would break
+  `doctor` for a user with no plugin — the one way this bead, which exists to make the integration
+  *visible*, could make lens *fail* because of it. `WARN` is the ceiling, reserved for the single
+  genuinely actionable state. A user who does not use the plugin at all, or who deliberately runs
   direct, must still get a successful `doctor` — the same reasoning `liveStatsCheck` already
-  documents for a missing `serve`. Reporting a missing integration is not a reason to fail the
-  command.
-- **Absent files are not an error, and a missing overlay is never a `warn`.** A missing
-  `~/.claude/.deepseek-env.json` is the plugin-presence signal read as absent — the plugin is not
+  documents for a missing `serve`.
+- **Every no-plugin condition resolves to `pass` with a note, whatever the effective URL.** These
+  are the states a user with no plugin — or no Claude Code, or a Cline-only setup — actually
+  presents, and each is a case the tests must pin:
+  - no config directory at all (the client is not Claude Code, or the directory was never created);
+  - a config directory with no `settings.json` in it;
+  - `settings.json` present but unreadable (permissions, a lock, an ACL);
+  - `settings.json` present but not a regular file (a directory, a broken symlink);
+  - `settings.json` with no `env` block, or an `env` block with no `ANTHROPIC_BASE_URL`;
+  - an overlay that is absent, unreadable, or not valid JSON.
+
+  A missing overlay is also the plugin-**presence** signal read as absent: the plugin is not
   managing this machine, so there is no guard to be broken and nothing to warn about (Rationale).
-  It short-circuits to `pass` with a note, whatever the effective URL. A missing `settings.json`,
-  or an `env` block with no `ANTHROPIC_BASE_URL`, likewise gives nothing to evaluate: a pass-through
-  note, exit 0. No missing file makes `doctor` exit non-zero.
+  It short-circuits to `pass` whatever the effective URL. Nothing in this list makes `doctor` exit
+  non-zero, and none may surface a raw file error to the user.
 - **Accept both overlay shapes**, the legacy flat one and the `env`/`settings` one — the same two
   shapes br-GI-4-07's JS predicate handles.
 
@@ -101,6 +127,14 @@ Every other bead in this story either fixes a silent failure or creates a new on
 only one that makes the integration *verifiable* by the person relying on it, and it is the
 answer to "how would I know it stopped working?" — the question the hooks' silence otherwise
 leaves unanswerable.
+
+**It is also the bead that carries the no-plugin guarantee, because it is the only bead that can
+break it.** Every other lens bead in this story touches nothing the plugin owns, so lens works
+without a plugin for free. This one reads a foreign file, and `runDoctor` turns a single `FAIL`
+into a non-zero exit — so for a user with no plugin, a careless implementation of a check *about*
+the plugin is the one way this story could break `doctor`. That is why the Description enumerates
+the no-plugin conditions exhaustively and the tests pin each one, rather than leaving them to be
+discovered by the first user who has no Claude Code installed.
 
 **The check is the predicate's third copy, so it must be the predicate — not a proxy for it.** The
 guard and the toggle already carry the rule, and the plan's §8.1 names drift between the copies as
@@ -124,7 +158,7 @@ means `pass`, not `warn`.
 - `lens doctor` prints a `provider_hooks` row.
 - The four combinations of overlay presence and effective URL resolve as:
 
-| Overlay (`~/.claude/.deepseek-env.json`) | Effective `ANTHROPIC_BASE_URL` | Result |
+| Overlay (`.deepseek-env.json`, in Claude Code's config dir) | Effective `ANTHROPIC_BASE_URL` | Result |
 |---|---|---|
 | absent | any | `pass` + note — plugin not managing this machine; nothing to warn about |
 | present | contains `deepseek` | `pass` — guard fires by substring |
@@ -133,7 +167,10 @@ means `pass`, not `warn`.
 
 - No `settings.json`, or no effective `ANTHROPIC_BASE_URL` to read → status `pass` with a note, and
   `doctor` exits 0.
-- The check never causes `doctor` to exit non-zero.
+- With **no config directory at all** — no Claude Code on the machine, or a client that never had
+  one — `provider_hooks` reads `pass` with a note and `doctor` exits 0.
+- The check never causes `doctor` to exit non-zero, under any of the conditions enumerated in the
+  Description.
 
 ## Test Specifications
 
@@ -153,21 +190,44 @@ means `pass`, not `warn`.
   - **Effective URL is the address lens serves, overlay declares a different URL** → `warn`; the
     detail names both. Use `http://127.0.0.1:8787` for the effective URL with `cfg.ProxyAddr`
     `127.0.0.1:8787`, so this case also exercises the scheme normalization.
-  - **No `settings.json`** (no effective URL to read) → `pass`, exit 0.
+- **The no-plugin cases** — one test each, all asserting `pass` **and** that the enclosing
+  `runDoctor` returns a nil error, since a `pass` that still produced a non-zero exit would defeat
+  the point:
+  - **No config directory at all**: point `CLAUDE_CONFIG_DIR` at a path that does not exist. This
+    is the Cline-only user and the plain `curl` user, and it is the case that must not become a
+    file-read error.
+  - **Config directory present, no `settings.json`** → `pass`, exit 0.
+  - **`settings.json` unreadable** → `pass`: the check swallows the permission error rather than
+    propagating it.
+  - **`settings.json` is a directory** → `pass`: the same discipline for a non-regular file.
+  - **`settings.json` with no `env` block**, and **an `env` block holding no
+    `ANTHROPIC_BASE_URL`** → `pass` (two cases: nothing to evaluate).
   - **Malformed overlay JSON** → `pass` (not a crash, not a warn): an unreadable overlay is a
     plugin problem, and this check must not turn it into a doctor failure.
+  - **Unreadable overlay** → `pass`: the same, for the read-error path rather than the parse path.
   - **Sectioned overlay shape** → `pass`: the same URL found under `env` rather than at the top
     level.
-  - Point the check at a throwaway `HOME` (`t.Setenv("HOME", tmp)`) so the developer's real
-    `~/.claude/` is never read. This only isolates on Windows if the check resolves `HOME` before
-    `os.UserHomeDir()` — see the Description.
+- **Isolate through `CLAUDE_CONFIG_DIR`, not `HOME`.** `t.Setenv("CLAUDE_CONFIG_DIR", tmp)` points
+  the check at a throwaway directory on every platform in one line, and it outranks every other
+  step in the resolver. A test that set only `HOME` would be a real leak on Windows: the resolver's
+  second step reads `USERPROFILE`, which is set for real on the developer's machine, so the check
+  would read the developer's actual `~/.claude/` and pass or fail on machine state rather than on
+  the fixture.
+- **Resolver precedence** — one case per step, with the higher steps unset to reach the lower ones:
+  `CLAUDE_CONFIG_DIR` wins when set; `USERPROFILE` is used when it is not; `HOME` is used when both
+  are unset. These are what pin the Windows rule the Description argues for — without them the
+  precedence is prose, and the divergence that motivated it can silently return.
 - Integration Tests: none — the check is a pure read of two files.
 - E2E: deferred to `/develop-tests`.
 
 ## Files to Touch
 
-- `internal/cli/doctor.go` (modify — `providerHookCheck` and its registration in `runChecks`; the
-  URL comparison normalizes the scheme and the home dir resolves via `config.UserHomeDir()`)
-- `internal/cli/cli_test.go` (modify — the eight cases above, against a throwaway `HOME`)
-- `internal/config/config.go` (modify — export `userHomeDir` as `UserHomeDir`, update its two
-  internal callers; no behaviour change)
+- `internal/cli/doctor.go` (modify — `providerHookCheck`, the `claudeConfigDir()` resolver it reads
+  through, and the registration in `runChecks`; the URL comparison normalizes the scheme)
+- `internal/cli/cli_test.go` (modify — the cases above, isolated via a throwaway
+  `CLAUDE_CONFIG_DIR`)
+
+`internal/config/config.go` is **not** touched. An earlier draft asked for `userHomeDir` to be
+exported as `config.UserHomeDir` and called from here; once the config directory is resolved by
+Claude Code's precedence rather than lens's (Description), that export has no caller and the local
+resolver is the smaller, more correct change.

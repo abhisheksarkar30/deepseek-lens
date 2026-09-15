@@ -20,7 +20,14 @@ Known-stale claims, verified against source during planning:
 | `docs/context/glossary.md` | Defines **Kind** and gives an example set; check whether the example list is meant to be exhaustive | `:18` |
 | `docs/context/architecture.md` | Describes `internal/analyze` as detecting "silent parameter drops/rewrites"; peak pricing is a billing fact rather than a divergence, so the one-line description may need widening | `:44` |
 | `docs/context/testing-and-quality.md` | Describes what is tested; the pricing tests gain a time dimension | check |
+| `docs/context/build-and-run.md` | The env-var table lists `HOME` as the only non-`LENS_*` variable lens reads. This story adds a second — `CLAUDE_CONFIG_DIR`, read by the `provider_hooks` check to locate **Claude Code's** config directory | `:43-44` |
 | `docs/context/INDEX.md` | "Last generated/refreshed" line | check |
+
+The `build-and-run.md` row is the one that needs a sentence rather than a cell: the table's `HOME`
+row resolves *lens's own* files (`~/.deepseek-lens/*`), and `CLAUDE_CONFIG_DIR` locates *Claude
+Code's* — a different question with a different precedence (plan §4.5, and this is the distinction
+bead 04 turns on). Writing it as a second path variable without that contrast would put two
+unrelated things in one column and invite the next reader to conflate them.
 
 `docs/context/data-model.md:72` documents `cost_source` as one of four values — that stays
 **correct** and must not be touched. This story deliberately adds no fifth value (see br-GI-4-03).
@@ -29,6 +36,13 @@ Also verify that no context doc claims `pricing.Compute` is a pure function of a
 mentioning the time input* — the package's own doc comment says "no I/O, no config", which remains
 true (the time is an argument, not a read), but a doc paraphrasing the signature would now be
 stale.
+
+Also confirm the **reverse** claim is absent: no context doc may imply lens requires the plugin,
+the hooks, or Claude Code itself. Planning checked this and none does today — `architecture.md:8`
+already describes the client as "Anthropic-shaped (Claude Code, Cline, etc.)", and no file under
+`docs/context/` mentions the plugin at all — so this is a check to keep passing, not a rewrite to
+make. If the refresh does end up naming the integration anywhere, it must say in the same breath
+that it is optional (plan §2).
 
 ## Rationale
 
