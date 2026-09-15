@@ -1,12 +1,12 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
 # Binaries for programs and plugins
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+/lens
+/lens.exe
+dist/
 
 # Test binary, built with `go test -c`
 *.test
@@ -30,3 +30,17 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local runtime state. The real files live in ~/.deepseek-lens/ (config.toml,
+# prices.toml, lens.db) — outside this repo, so gitignore has nothing to do
+# there (a literal "~/..." pattern doesn't expand to $HOME and would never
+# match it anyway). These guard only a repo-local override via --db-path,
+# --config, or the equivalent prices path.
+*.db
+*.db-wal
+*.db-shm
+config.toml
+prices.toml
+
+# Local cross-review artifacts (should never be committed)
+/**/*review*/

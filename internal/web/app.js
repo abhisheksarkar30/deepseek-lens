@@ -1,0 +1,714 @@
+"use strict";
+
+// ---- small formatting helpers -------------------------------------------
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function fmtTokens(n) {
+  n = n || 0;
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+}
+
+function fmtCost(v) {
+  if (v === null || v === undefined) return "-";
+  return "$" + v.toFixed(4);
+}
+
+// isUnpriced is the one place "this call has no cost" is decided — a null
+// CostUSD, not a zero one, since a free/zero-cost call is still priced.
+function isUnpriced(costUSD) {
+  return costUSD === null || costUSD === undefined;
+}
+
+// costBadge is the "?" an unpriced call carries, with the reason in the
+// tooltip. Meaning is never colour-only: the glyph is a literal "?" and the
+// title names the source, so the badge still reads in monochrome and to a
+// screen reader. It reuses .badge.warn rather than adding a class, since both
+// badges mean the same thing to the reader — this row needs attention.
+function costBadge(source) {
+  if (!source || source === "configured") return "";
+  const reason = `cost ${escapeHtml(source)} — no configured price for this call (lens prices --set)`;
+  return ` <span class="badge warn" title="${reason}" aria-label="${reason}">?</span>`;
+}
+
+function costCell(costUSD, source) {
+  return fmtCost(costUSD) + costBadge(source);
+}
+
+// fmtCostTotal is the mixed-pricing rule: a sum that covers only some of the
+// calls says so. Presenting a partial total as the whole bill is the one
+// failure mode this feature exists to prevent.
+function fmtCostTotal(v, unpriced) {
+  if (unpriced > 0) return fmtCost(v) + " + " + unpriced + " unpriced";
+  return fmtCost(v);
+}
+
+function fmtDurationNs(ns) {
+  if (!ns) return "0ms";
+  const ms = ns / 1e6;
+  if (ms < 1000) return ms.toFixed(0) + "ms";
+  return (ms / 1000).toFixed(2) + "s";
+}
+
+// fmtSpanMs formats a span of wall-clock time (a session's length), which
+// runs to minutes and hours where a single call's duration runs to
+// milliseconds — hence its own helper rather than fmtDurationNs.
+function fmtSpanMs(ms) {
+  if (!ms || ms < 0) return "0ms";
+  if (ms < 1000) return ms.toFixed(0) + "ms";
+  if (ms < 60000) return (ms / 1000).toFixed(1) + "s";
+  if (ms < 3600000) return Math.floor(ms / 60000) + "m";
+  return (ms / 3600000).toFixed(1) + "h";
+}
+
+function fmtTime(iso) {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleTimeString();
+}
+
+function relTime(iso) {
+  if (!iso) return "-";
+  const d = new Date(iso).getTime();
+  if (isNaN(d)) return iso;
+  const s = Math.max(0, Math.floor((Date.now() - d) / 1000));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+function sevBadge(sev) {
+  const s = (sev || "info").toLowerCase();
+  const cls = s.indexOf("err") >= 0 ? "sev-error" : s.indexOf("warn") >= 0 ? "sev-warn" : "sev-info";
+  return `<span class="sev ${cls}">${escapeHtml(sev || "info")}</span>`;
+}
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { msg = (await res.json()).error || msg; } catch (e) { /* ignore */ }
+    throw new Error(`${url}: ${res.status} ${msg}`);
+  }
+  return res.json();
+}
+
+// ---- app state ------------------------------------------------------------
+
+const state = {
+  paused: false,
+  totals: { calls: 0, tokens: 0, cost: 0, unpriced: 0 },
+  warnedIds: new Set(),
+  warningsCache: [],
+  feedRowLimit: 200,
+  // replayEnabled mirrors /api/health's replay_enabled. The detail view offers
+  // the replay editor only when it is true: the endpoint answers 403 when
+  // replay is off, so the button is inert rather than offered and broken.
+  replayEnabled: false,
+};
+
+function bumpTotals(req) {
+  state.totals.calls += 1;
+  state.totals.tokens += (req.InputTokens || 0) + (req.OutputTokens || 0);
+  addCost(req);
+  renderTotals();
+}
+
+// addCost folds one request into the running total. An unpriced call is
+// counted, not added as zero: `cost += req.CostUSD || 0` is how a header
+// total quietly claims to cover calls it never priced.
+function addCost(req) {
+  if (isUnpriced(req.CostUSD)) {
+    state.totals.unpriced += 1;
+  } else {
+    state.totals.cost += req.CostUSD;
+  }
+}
+
+function renderTotals() {
+  document.getElementById("total-calls").textContent = state.totals.calls;
+  document.getElementById("total-tokens").textContent = fmtTokens(state.totals.tokens);
+  document.getElementById("total-cost").textContent = fmtCostTotal(state.totals.cost, state.totals.unpriced);
+}
+
+// ---- tab navigation ---------------------------------------------------
+
+const views = ["feed", "warnings", "stats", "sessions"];
+function showView(name) {
+  for (const v of views) {
+    document.getElementById("view-" + v).hidden = v !== name;
+  }
+  for (const btn of document.querySelectorAll(".tab")) {
+    btn.classList.toggle("active", btn.dataset.view === name);
+  }
+  if (name === "warnings") loadWarnings();
+  if (name === "stats") loadStats();
+  if (name === "sessions") loadSessions();
+}
+
+document.getElementById("tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest(".tab");
+  if (btn) showView(btn.dataset.view);
+});
+
+// ---- live feed ----------------------------------------------------------
+
+function feedRowHTML(req) {
+  const warned = state.warnedIds.has(req.ID);
+  const model = req.ModelResolved || req.ModelRequested || "-";
+  return `<tr data-id="${req.ID}">
+    <td>${fmtTime(req.StartedAt)}</td>
+    <td>${fmtDurationNs(req.Duration)}</td>
+    <td>${escapeHtml(model)}</td>
+    <td>${fmtTokens(req.InputTokens)}/${fmtTokens(req.OutputTokens)}</td>
+    <td>${costCell(req.CostUSD, req.CostSource)}</td>
+    <td>${req.Status}</td>
+    <td>${warned ? '<span class="badge warn">&#9888;</span>' : ""}</td>
+  </tr>`;
+}
+
+function prependFeedRow(req) {
+  const body = document.getElementById("feed-body");
+  body.insertAdjacentHTML("afterbegin", feedRowHTML(req));
+  while (body.rows.length > state.feedRowLimit) {
+    const last = body.rows[body.rows.length - 1];
+    state.warnedIds.delete(Number(last.dataset.id));
+    body.deleteRow(body.rows.length - 1);
+  }
+}
+
+function markFeedRowWarned(id) {
+  state.warnedIds.add(id);
+  const row = document.querySelector(`#feed-body tr[data-id="${id}"]`);
+  if (row) {
+    const cell = row.cells[row.cells.length - 1];
+    cell.innerHTML = '<span class="badge warn">&#9888;</span>';
+  }
+}
+
+document.getElementById("feed-body").addEventListener("click", (e) => {
+  const row = e.target.closest("tr[data-id]");
+  if (row) openDetail(Number(row.dataset.id));
+});
+
+document.getElementById("pause-btn").addEventListener("click", () => {
+  state.paused = !state.paused;
+  const btn = document.getElementById("pause-btn");
+  const status = document.getElementById("feed-status");
+  btn.textContent = state.paused ? "Resume" : "Pause";
+  status.textContent = state.paused ? "paused" : "live";
+  status.classList.toggle("paused", state.paused);
+});
+
+async function loadInitialFeed() {
+  try {
+    const reqs = await fetchJSON("/api/requests?limit=50");
+    const body = document.getElementById("feed-body");
+    body.innerHTML = reqs.map(feedRowHTML).join("");
+    state.totals = { calls: 0, tokens: 0, cost: 0, unpriced: 0 };
+    for (const r of reqs) {
+      state.totals.calls += 1;
+      state.totals.tokens += (r.InputTokens || 0) + (r.OutputTokens || 0);
+      addCost(r);
+    }
+    renderTotals();
+  } catch (e) {
+    console.error("loadInitialFeed", e);
+  }
+}
+
+// ---- warnings inbox -------------------------------------------------------
+
+function groupWarnings(list) {
+  const groups = new Map();
+  for (const w of list) {
+    const key = w.Kind + "\x00" + w.Severity;
+    let g = groups.get(key);
+    if (!g) {
+      g = { kind: w.Kind, severity: w.Severity, count: 0, lastSeen: w.CreatedAt };
+      groups.set(key, g);
+    }
+    g.count++;
+    if (new Date(w.CreatedAt) > new Date(g.lastSeen)) g.lastSeen = w.CreatedAt;
+  }
+  return [...groups.values()].sort((a, b) => b.count - a.count);
+}
+
+async function loadWarnings() {
+  try {
+    const list = await fetchJSON("/api/warnings?limit=1000");
+    state.warningsCache = list;
+    for (const w of list) state.warnedIds.add(w.RequestID);
+    renderWarningGroups(list);
+  } catch (e) {
+    console.error("loadWarnings", e);
+  }
+}
+
+function renderWarningGroups(list) {
+  const groups = groupWarnings(list);
+  const body = document.getElementById("warnings-groups");
+  body.innerHTML = groups.map((g) => `<tr data-kind="${escapeHtml(g.kind)}" data-severity="${escapeHtml(g.severity)}">
+    <td>${escapeHtml(g.kind)}</td>
+    <td>${sevBadge(g.severity)}</td>
+    <td>${g.count}</td>
+    <td>${relTime(g.lastSeen)}</td>
+  </tr>`).join("") || `<tr><td colspan="4" class="hint">No warnings yet.</td></tr>`;
+
+  body.querySelectorAll("tr[data-kind]").forEach((row) => {
+    row.addEventListener("click", () => showWarningDetail(row.dataset.kind, row.dataset.severity));
+  });
+}
+
+function showWarningDetail(kind, severity) {
+  const panel = document.getElementById("warnings-detail");
+  const title = document.getElementById("warnings-detail-title");
+  const body = document.getElementById("warnings-detail-body");
+  const matches = state.warningsCache.filter((w) => w.Kind === kind && w.Severity === severity);
+
+  title.textContent = `${kind} (${severity}) — ${matches.length} occurrence(s)`;
+  body.innerHTML = matches.map((w) => `<tr data-id="${w.RequestID}">
+    <td>${w.RequestID}</td>
+    <td>${sevBadge(w.Severity)}</td>
+    <td>${relTime(w.CreatedAt)}</td>
+    <td>${w.Path ? `<code>${escapeHtml(w.Path)}</code>` : ""}</td>
+    <td>${escapeHtml(w.Detail)}</td>
+  </tr>`).join("");
+  body.querySelectorAll("tr[data-id]").forEach((row) => {
+    row.addEventListener("click", () => openDetail(Number(row.dataset.id)));
+  });
+  panel.hidden = false;
+}
+
+// ---- stats ----------------------------------------------------------------
+
+async function loadStats() {
+  try {
+    const data = await fetchJSON("/api/stats");
+    renderStatsSummary(data.summary, data.cost_sources || []);
+    renderStatsChart(data.by_day || []);
+    renderStatsByModel(data.by_model || []);
+  } catch (e) {
+    console.error("loadStats", e);
+  }
+}
+
+function renderStatsSummary(s, costSources) {
+  const body = document.querySelector("#stats-summary tbody");
+  if (!s) { body.innerHTML = ""; return; }
+  const rows = [
+    ["Calls", s.RequestCount],
+    ["Errors", s.ErrorCount],
+    ["Warnings", s.WarningCount],
+    ["Input tokens", fmtTokens(s.InputTokens)],
+    ["Output tokens", fmtTokens(s.OutputTokens)],
+    ["Cost", fmtCostTotal(s.CostUSDTotal, s.UnpricedCount || 0)],
+    ["Duration p50", s.DurationP50Ms.toFixed(0) + "ms"],
+    ["Duration p95", s.DurationP95Ms.toFixed(0) + "ms"],
+  ];
+  // The cost-source breakdown is what says *why* a total is partial: a
+  // configured/priced window and one full of unpriced calls can report the
+  // same number.
+  if (costSources.length) {
+    rows.push(["Cost by source", costSources
+      .map((c) => `${escapeHtml(c.Source)} ${c.RequestCount}`)
+      .join(" · ")]);
+  }
+  body.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+}
+
+function renderStatsChart(byDay) {
+  const svg = document.getElementById("stats-chart");
+  const W = 600, H = 200, padL = 34, padB = 20, padT = 10, padR = 10;
+  if (byDay.length === 0) {
+    svg.innerHTML = `<text x="16" y="100">no data yet</text>`;
+    return;
+  }
+  const maxCount = Math.max(1, ...byDay.map((d) => d.RequestCount));
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const step = byDay.length > 1 ? plotW / (byDay.length - 1) : 0;
+
+  const points = byDay.map((d, i) => {
+    const x = padL + i * step;
+    const y = padT + plotH - (d.RequestCount / maxCount) * plotH;
+    return [x, y];
+  });
+
+  const linePath = points.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
+  const dots = points.map((p) => `<circle class="point" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.5"></circle>`).join("");
+
+  const everyN = Math.ceil(byDay.length / 6) || 1;
+  const labels = byDay.map((d, i) => (i % everyN === 0
+    ? `<text x="${points[i][0].toFixed(1)}" y="${H - 4}" text-anchor="middle">${escapeHtml(d.Day.slice(5))}</text>`
+    : "")).join("");
+
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = `
+    <line class="axis" x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}"></line>
+    <line class="axis" x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}"></line>
+    <text x="4" y="${padT + 8}">${maxCount}</text>
+    <text x="4" y="${padT + plotH}">0</text>
+    <path class="line" d="${linePath}"></path>
+    ${dots}
+    ${labels}
+  `;
+}
+
+function renderStatsByModel(byModel) {
+  const body = document.getElementById("stats-by-model");
+  const max = Math.max(1, ...byModel.map((m) => m.RequestCount));
+  body.innerHTML = byModel.map((m) => `<tr>
+    <td>${escapeHtml(m.Model || "(unknown)")}</td>
+    <td><div class="model-bar-row"><span>${m.RequestCount}</span>
+      <span class="model-bar" style="width:${Math.round((m.RequestCount / max) * 120)}px"></span></div></td>
+    <td>${fmtTokens(m.InputTokens)}/${fmtTokens(m.OutputTokens)}</td>
+    <td>${fmtCostTotal(m.CostUSDTotal, m.UnpricedCount || 0)}</td>
+  </tr>`).join("") || `<tr><td colspan="4" class="hint">No data yet.</td></tr>`;
+}
+
+// ---- sessions ---------------------------------------------------------
+
+async function loadSessions() {
+  try {
+    document.getElementById("session-detail").hidden = true; // a reload invalidates any open drill-down
+    const sessions = await fetchJSON("/api/sessions");
+    const body = document.getElementById("sessions-body");
+    body.innerHTML = (sessions || []).map((s) => `<tr data-id="${escapeHtml(s.ID)}">
+      <td>${escapeHtml(s.ID)}</td>
+      <td>${relTime(s.FirstSeen)}</td>
+      <td>${fmtSpanMs(new Date(s.LastSeen) - new Date(s.FirstSeen))}</td>
+      <td>${s.RequestCount}</td>
+      <td>${fmtTokens((s.TotalInputTokens || 0) + (s.TotalOutputTokens || 0))}</td>
+      <td>${fmtCostTotal(s.TotalCostUSD, s.UnpricedCount || 0)}</td>
+      <td>${s.WarningCount ? `<span class="badge warn">&#9888; ${s.WarningCount}</span>` : ""}</td>
+    </tr>`).join("") || `<tr><td colspan="7" class="hint">No sessions recorded yet.</td></tr>`;
+    body.querySelectorAll("tr[data-id]").forEach((row) => {
+      row.addEventListener("click", () => openSession(row.dataset.id));
+    });
+  } catch (e) {
+    console.error("loadSessions", e);
+  }
+}
+
+// groupSessionWarnings collapses a session's warnings to one line per
+// (kind, site). This is the view the whole feature exists for: a
+// cache_control_ignored firing on all forty turns of one run is one story
+// with a count on it, not forty rows to scroll past. Grouping by kind and
+// site rather than by detail is deliberate — the detail of a dropped
+// parameter varies per turn, the site it was dropped at does not.
+function groupSessionWarnings(warnings) {
+  const groups = new Map();
+  for (const w of warnings) {
+    const key = w.Kind + "|" + w.Path;
+    let g = groups.get(key);
+    if (!g) {
+      g = { kind: w.Kind, severity: w.Severity, path: w.Path, detail: w.Detail, count: 0 };
+      groups.set(key, g);
+    }
+    g.count++;
+  }
+  return [...groups.values()].sort((a, b) => b.count - a.count);
+}
+
+async function openSession(id) {
+  try {
+    const s = await fetchJSON(`/api/sessions/${encodeURIComponent(id)}`);
+    const calls = s.calls || [];
+    const warnings = s.warnings || [];
+    const groups = groupSessionWarnings(warnings);
+
+    const perCall = new Map();
+    for (const w of warnings) perCall.set(w.RequestID, (perCall.get(w.RequestID) || 0) + 1);
+
+    document.getElementById("session-detail-title").textContent =
+      `${s.ID} — ${s.RequestCount} turn(s)`;
+    document.getElementById("session-detail-summary").innerHTML = [
+      ["Started", escapeHtml(s.FirstSeen)],
+      ["Last active", escapeHtml(s.LastSeen)],
+      ["Duration", fmtSpanMs(new Date(s.LastSeen) - new Date(s.FirstSeen))],
+      ["Turns", s.RequestCount],
+      ["Tokens", `in ${fmtTokens(s.TotalInputTokens)} / out ${fmtTokens(s.TotalOutputTokens)}`],
+      ["Cost", fmtCostTotal(s.TotalCostUSD, s.UnpricedCount || 0)],
+      ["Models", escapeHtml(s.ModelSet || "-")],
+      ["Prefix hash", escapeHtml(s.PrefixHash || "(none)")],
+    ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+
+    document.getElementById("session-warnings").innerHTML = groups.map((g) => `<tr>
+      <td>${escapeHtml(g.kind)}</td>
+      <td>${sevBadge(g.severity)}</td>
+      <td>${g.count}</td>
+      <td>${g.path ? `<code>${escapeHtml(g.path)}</code>` : ""}</td>
+      <td>${escapeHtml(g.detail)}</td>
+    </tr>`).join("") || `<tr><td colspan="5" class="hint">No warnings in this session.</td></tr>`;
+
+    // The running total is the point of the chronological order: it answers
+    // "what had this run cost by turn 12". Unpriced calls are counted and
+    // named, never folded in as zero.
+    let runTokens = 0, runCost = 0, runUnpriced = 0;
+    const callRows = calls.map((c, i) => {
+      runTokens += (c.InputTokens || 0) + (c.OutputTokens || 0);
+      if (isUnpriced(c.CostUSD)) runUnpriced += 1;
+      else runCost += c.CostUSD;
+      const n = perCall.get(c.ID) || 0;
+      return `<tr data-id="${c.ID}">
+        <td>${i + 1}</td>
+        <td>${fmtTime(c.StartedAt)}</td>
+        <td>${fmtDurationNs(c.Duration)}</td>
+        <td>${escapeHtml(c.ModelResolved || c.ModelRequested || "-")}</td>
+        <td>${fmtTokens(c.InputTokens)}/${fmtTokens(c.OutputTokens)}</td>
+        <td>${costCell(c.CostUSD, c.CostSource)}</td>
+        <td>${fmtTokens(runTokens)} · ${fmtCostTotal(runCost, runUnpriced)}</td>
+        <td>${n ? `<span class="badge warn">&#9888; ${n}</span>` : ""}</td>
+      </tr>`;
+    }).join("");
+    const callsBody = document.getElementById("session-calls");
+    callsBody.innerHTML = callRows || `<tr><td colspan="8" class="hint">No calls in this session.</td></tr>`;
+    callsBody.querySelectorAll("tr[data-id]").forEach((row) => {
+      row.addEventListener("click", () => openDetail(Number(row.dataset.id)));
+    });
+
+    document.getElementById("session-detail").hidden = false;
+  } catch (e) {
+    console.error("openSession", e);
+  }
+}
+
+document.getElementById("session-detail-close").addEventListener("click", () => {
+  document.getElementById("session-detail").hidden = true;
+});
+
+// ---- request detail modal ----------------------------------------------
+
+function decodeBody(b64) {
+  if (!b64) return "";
+  try {
+    const bin = atob(b64);
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    try { return JSON.stringify(JSON.parse(text), null, 2); } catch (e) { return text; }
+  } catch (e) {
+    return "(binary or undecodable body)";
+  }
+}
+
+function prettyHeaders(json) {
+  if (!json) return "(none)";
+  try { return JSON.stringify(JSON.parse(json), null, 2); } catch (e) { return json; }
+}
+
+function bodySection(label, b64) {
+  const text = decodeBody(b64);
+  return `<details class="collapsible"><summary>${label}</summary>
+    <pre class="body-block">${escapeHtml(text || "(empty)")}</pre></details>`;
+}
+
+async function openDetail(id) {
+  try {
+    const r = await fetchJSON(`/api/requests/${id}`);
+    const warnings = r.warnings || [];
+    const model = r.ModelResolved || r.ModelRequested || "-";
+
+    const warningsHTML = warnings.length
+      ? `<div class="detail-panel"><h3>Warnings (${warnings.length})</h3>` +
+        warnings.map((w) => `<div>${sevBadge(w.Severity)} <strong>${escapeHtml(w.Kind)}</strong>${w.Path ? ` <code>${escapeHtml(w.Path)}</code>` : ""}: ${escapeHtml(w.Detail)}</div>`).join("") +
+        `</div>`
+      : "";
+
+    document.getElementById("detail-body").innerHTML = `
+      <h2>Request #${r.ID}</h2>
+      <dl class="detail-grid">
+        <dt>Started</dt><dd>${escapeHtml(r.StartedAt)}</dd>
+        <dt>TTFB / Duration</dt><dd>${fmtDurationNs(r.TTFB)} / ${fmtDurationNs(r.Duration)}</dd>
+        <dt>Method / Path</dt><dd>${escapeHtml(r.Method)} ${escapeHtml(r.Path)}</dd>
+        <dt>Status</dt><dd>${r.Status}</dd>
+        <dt>Model requested</dt><dd>${escapeHtml(r.ModelRequested || "-")}</dd>
+        <dt>Model resolved</dt><dd>${escapeHtml(model)}</dd>
+        <dt>Tokens</dt><dd>in=${r.InputTokens} out=${r.OutputTokens} cache_creation=${r.CacheCreationTokens} cache_read=${r.CacheReadTokens}</dd>
+        <dt>Cost</dt><dd>${fmtCost(r.CostUSD)}${r.CostSource ? " (" + escapeHtml(r.CostSource) + ")" : ""}</dd>
+        <dt>Stop reason</dt><dd>${escapeHtml(r.StopReason || "-")}</dd>
+        ${r.ErrorText ? `<dt>Error</dt><dd>${escapeHtml(r.ErrorText)}</dd>` : ""}
+      </dl>
+      ${warningsHTML}
+      <details class="collapsible" open><summary>Request headers (redacted)</summary>
+        <pre class="body-block">${escapeHtml(prettyHeaders(r.ReqHeaders))}</pre></details>
+      ${bodySection("Request body", r.ReqBody)}
+      <details class="collapsible"><summary>Response headers (redacted)</summary>
+        <pre class="body-block">${escapeHtml(prettyHeaders(r.RespHeaders))}</pre></details>
+      ${bodySection("Response body", r.RespBody)}
+      ${replayPanelHTML(r)}
+    `;
+    wireReplayPanel(r);
+    document.getElementById("detail-modal").hidden = false;
+  } catch (e) {
+    console.error("openDetail", e);
+  }
+}
+
+// ---- replay -------------------------------------------------------------
+
+// replayPanelHTML is the request detail's replay editor. When replay is
+// disabled the panel says so and offers nothing — the guarded endpoint would
+// answer 403, and a button that cannot work is worse than no button.
+function replayPanelHTML(r) {
+  if (!state.replayEnabled) {
+    return `<div class="detail-panel"><h3>Replay</h3>
+      <p class="hint">Replay is disabled. Start <code>lens serve --replay</code> to enable it.</p>
+    </div>`;
+  }
+  const cost = isUnpriced(r.CostUSD)
+    ? "unknown — this call has no configured price"
+    : fmtCost(r.CostUSD);
+  return `<div class="detail-panel">
+    <h3>Replay</h3>
+    <p class="hint">Replay re-sends this request to the LLM API. It never executes anything,
+      never touches your repository, and never re-runs tools: a captured body may describe tool
+      calls the original client ran, and replay re-sends that description and stores the reply.</p>
+    <p class="hint"><strong>This is a billable API call.</strong> The original cost ${escapeHtml(cost)};
+      the replay will be similar.</p>
+    <label for="replay-edits">Edits — one <code>path=value</code> per line, e.g.
+      <code>temperature=0.7</code> (optional)</label>
+    <textarea id="replay-edits" rows="3" spellcheck="false"
+      placeholder="temperature=0.7&#10;messages.0.content=&quot;hi&quot;"></textarea>
+    <label class="replay-confirm"><input type="checkbox" id="replay-confirm">
+      I understand this makes a billable API call</label>
+    <button id="replay-send" type="button" disabled>Send replay</button>
+    <div id="replay-result" aria-live="polite"></div>
+  </div>`;
+}
+
+// wireReplayPanel arms the editor: the send button stays disabled until the
+// cost confirmation is ticked, so a stray click cannot spend anything.
+function wireReplayPanel(original) {
+  const send = document.getElementById("replay-send");
+  if (!send) return;
+  const confirm = document.getElementById("replay-confirm");
+  confirm.addEventListener("change", () => { send.disabled = !confirm.checked; });
+  send.addEventListener("click", () => sendReplay(original, send));
+}
+
+async function sendReplay(original, button) {
+  const out = document.getElementById("replay-result");
+  const sets = document.getElementById("replay-edits").value
+    .split("\n").map((line) => line.trim()).filter((line) => line !== "");
+
+  const query = new URLSearchParams();
+  for (const s of sets) query.append("set", s);
+
+  button.disabled = true;
+  out.textContent = "sending…";
+  try {
+    // Same-origin, so the endpoint's Origin/Host guard passes — that guard is
+    // exactly why this page can call it and another page cannot.
+    const res = await fetch(`/api/requests/${original.ID}/replay?${query.toString()}`, { method: "POST" });
+    let body = {};
+    try { body = await res.json(); } catch (e) { /* keep the default below */ }
+    if (!res.ok) throw new Error(body.error || res.statusText);
+
+    if (!body.captured) {
+      out.innerHTML = `<p class="hint">Sent, not recorded. Upstream status ${body.status}.</p>`;
+      return;
+    }
+    const replayed = await fetchJSON(`/api/requests/${body.id}`);
+    out.innerHTML = replayComparisonHTML(original, replayed);
+  } catch (e) {
+    out.innerHTML = `<p><span class="sev sev-error">replay failed</span> ${escapeHtml(String(e.message || e))}</p>`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// replayComparisonHTML puts the original and the replay side by side. The "≠"
+// marker carries the difference, so it still reads on a monochrome screen and
+// to a screen reader instead of living only in a colour.
+function replayComparisonHTML(original, replayed) {
+  const model = (r) => r.ModelResolved || r.ModelRequested || "-";
+  const tokens = (r) => `${fmtTokens(r.InputTokens)}/${fmtTokens(r.OutputTokens)}`;
+  const warns = (r) => String((r.warnings || []).length);
+  const row = (field, a, b) =>
+    `<tr><td>${a === b ? "" : "≠"}</td><td>${field}</td><td>${a}</td><td>${b}</td></tr>`;
+
+  return `<h4>Replay #${replayed.ID} compared with #${original.ID}</h4>
+    <div class="table-wrap"><table>
+      <thead><tr><th></th><th>Field</th><th>#${original.ID}</th><th>#${replayed.ID}</th></tr></thead>
+      <tbody>
+        ${row("status", String(original.Status), String(replayed.Status))}
+        ${row("model", escapeHtml(model(original)), escapeHtml(model(replayed)))}
+        ${row("tokens", tokens(original), tokens(replayed))}
+        ${row("cost", fmtCost(original.CostUSD), fmtCost(replayed.CostUSD))}
+        ${row("duration", fmtDurationNs(original.Duration), fmtDurationNs(replayed.Duration))}
+        ${row("warnings", warns(original), warns(replayed))}
+      </tbody>
+    </table></div>`;
+}
+
+document.getElementById("detail-close").addEventListener("click", () => {
+  document.getElementById("detail-modal").hidden = true;
+});
+document.getElementById("detail-modal").addEventListener("click", (e) => {
+  if (e.target.id === "detail-modal") document.getElementById("detail-modal").hidden = true;
+});
+
+// ---- SSE live push ----------------------------------------------------
+
+function connectStream() {
+  const es = new EventSource("/api/stream");
+  // Events are handled one at a time, in arrival order: onmessage fires
+  // synchronously per event, but its body is async, so without this chain
+  // two events' fetchJSON calls could resolve out of order and prepend feed
+  // rows in the wrong sequence.
+  let queue = Promise.resolve();
+  es.onmessage = (ev) => {
+    queue = queue.then(() => handleStreamEvent(ev));
+  };
+  es.onerror = () => {
+    // EventSource retries on its own; nothing else to do here.
+  };
+}
+
+async function handleStreamEvent(ev) {
+  let evt;
+  try { evt = JSON.parse(ev.data); } catch (e) { return; }
+
+  if (evt.type === "request") {
+    try {
+      const req = await fetchJSON(`/api/requests/${evt.id}`);
+      bumpTotals(req);
+      if (!state.paused) prependFeedRow(req);
+    } catch (e) { console.error("stream request fetch", e); }
+  } else if (evt.type === "warnings") {
+    markFeedRowWarned(evt.id);
+    if (Array.isArray(evt.warnings)) {
+      state.warningsCache = state.warningsCache.concat(evt.warnings).slice(-state.feedRowLimit);
+      if (!document.getElementById("view-warnings").hidden) {
+        renderWarningGroups(state.warningsCache);
+      }
+    }
+  }
+}
+
+// ---- boot ---------------------------------------------------------------
+
+// loadHealth reads the one piece of server state the dashboard needs to render
+// correctly: whether the replay endpoint is enabled. Everything else about the
+// page is derived from the data endpoints.
+async function loadHealth() {
+  try {
+    const h = await fetchJSON("/api/health");
+    state.replayEnabled = !!h.replay_enabled;
+  } catch (e) {
+    console.error("loadHealth", e);
+  }
+}
+
+loadHealth();
+loadInitialFeed();
+connectStream();

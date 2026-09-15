@@ -1,0 +1,232 @@
+:root {
+  --bg: #ffffff;
+  --bg-alt: #f4f5f7;
+  --fg: #1a1d23;
+  --fg-muted: #5b6270;
+  --border: #dde1e6;
+  --accent: #2f6feb;
+  --accent-fg: #ffffff;
+  --row-hover: #eef2fb;
+  --sev-error-bg: #fbeaea;
+  --sev-error-fg: #a12622;
+  --sev-warn-bg: #fdf3e0;
+  --sev-warn-fg: #8a5a00;
+  --sev-info-bg: #e8f0fe;
+  --sev-info-fg: #1a4faa;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14161a;
+    --bg-alt: #1c1f26;
+    --fg: #e7e9ee;
+    --fg-muted: #9aa1ad;
+    --border: #2c313b;
+    --accent: #6c9bff;
+    --accent-fg: #0c1220;
+    --row-hover: #1f2534;
+    --sev-error-bg: #3a1a1a;
+    --sev-error-fg: #ff9d97;
+    --sev-warn-bg: #3a2f10;
+    --sev-warn-fg: #ffce7a;
+    --sev-info-bg: #16243f;
+    --sev-info-fg: #9dc0ff;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
+  padding: 0 16px 24px;
+}
+
+h1 { font-size: 1.15rem; margin: 12px 0; }
+h3 { font-size: 0.95rem; color: var(--fg-muted); margin: 20px 0 8px; }
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 5;
+}
+
+.totals {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  color: var(--fg-muted);
+  font-size: 0.85rem;
+}
+.totals strong { color: var(--fg); font-size: 0.95rem; }
+
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.tab {
+  background: var(--bg-alt);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.tab.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+
+.view { padding-top: 14px; }
+
+.feed-controls { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+#pause-btn {
+  background: var(--bg-alt);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.feed-status { color: var(--fg-muted); font-size: 0.8rem; }
+.feed-status.paused { color: var(--sev-warn-fg); }
+
+.table-wrap { overflow-x: auto; max-width: 100%; }
+
+table { border-collapse: collapse; width: 100%; min-width: 480px; }
+th, td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+th { color: var(--fg-muted); font-weight: 600; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--row-hover); }
+
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.badge.warn { background: var(--sev-warn-bg); color: var(--sev-warn-fg); }
+
+.sev {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.sev-error { background: var(--sev-error-bg); color: var(--sev-error-fg); }
+.sev-warn { background: var(--sev-warn-bg); color: var(--sev-warn-fg); }
+.sev-info { background: var(--sev-info-bg); color: var(--sev-info-fg); }
+
+.hint { color: var(--fg-muted); font-size: 0.85rem; }
+
+.detail-panel { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px 12px;
+  overflow-y: auto;
+  z-index: 20;
+}
+.modal-content {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 18px;
+  max-width: 760px;
+  width: 100%;
+  position: relative;
+}
+.modal-close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font-size: 1.4rem;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.detail-grid { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 0.85rem; }
+.detail-grid dt { color: var(--fg-muted); }
+.detail-grid dd { margin: 0; word-break: break-word; }
+
+.collapsible summary { cursor: pointer; color: var(--accent); margin: 10px 0 4px; font-size: 0.85rem; }
+pre.body-block {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  overflow-x: auto;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Replay editor: the request detail's one write path. The send button is
+   disabled until the cost confirmation is ticked, so the colour of the button
+   is never the only thing saying whether it will spend money. */
+label[for="replay-edits"] { display: block; margin: 10px 0 4px; font-size: 0.85rem; color: var(--fg-muted); }
+#replay-edits {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-alt);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+}
+.replay-confirm { display: block; margin: 8px 0; font-size: 0.85rem; }
+#replay-send {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+#replay-send:disabled { opacity: 0.5; cursor: not-allowed; }
+#replay-result { margin-top: 10px; font-size: 0.85rem; }
+#replay-result h4 { margin: 8px 0; font-size: 0.9rem; color: var(--fg-muted); }
+
+.model-bar-row { display: flex; align-items: center; gap: 8px; }
+.model-bar { height: 10px; background: var(--accent); border-radius: 3px; }
+
+svg#stats-chart {
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-alt);
+}
+svg#stats-chart .axis { stroke: var(--border); stroke-width: 1; }
+svg#stats-chart .line { fill: none; stroke: var(--accent); stroke-width: 2; }
+svg#stats-chart .point { fill: var(--accent); }
+svg#stats-chart text { fill: var(--fg-muted); font-size: 9px; }
+
+@media (max-width: 480px) {
+  body { padding: 0 10px 20px; }
+  .app-header { flex-direction: column; align-items: stretch; }
+  .tabs { margin-left: 0; }
+  .detail-grid { grid-template-columns: 1fr; }
+}

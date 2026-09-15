@@ -1,0 +1,49 @@
+name: Main Guard
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: read
+# main is the repo's default branch again, so GitHub natively links/auto-closes
+# issues referenced via "Closes #N" in develop -> main PRs — no manual step needed here.
+
+jobs:
+  verify-source:
+    runs-on: ubuntu-latest
+    if: github.event.before != '0000000000000000000000000000000000000000'
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Verify this commit landed via an approved develop -> main PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -e
+          RESPONSE=$(gh api "repos/${{ github.repository }}/commits/$SHA/pulls")
+          COUNT=$(echo "$RESPONSE" | jq '[.[] | select(.base.ref=="main" and .head.ref=="develop" and .merged_at != null)] | length')
+
+          if [ "$COUNT" -ge 1 ]; then
+            echo "OK: $SHA came from an approved develop -> main pull request."
+            exit 0
+          fi
+
+          echo "::error::Commit $SHA landed on main outside the develop -> main PR flow. Reverting main to $BEFORE."
+          git reset --hard "$BEFORE"
+          git push --force origin HEAD:main
+
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "main was pushed to outside the develop -> PR flow and was auto-reverted" \
+            --body "Commit \`$SHA\` (pushed by @${{ github.actor }}) landed on \`main\` without going through a merged \`develop\` -> \`main\` pull request. It has been automatically reverted back to \`$BEFORE\`. Please make changes on \`develop\` and open a PR into \`main\` instead."
+
+          exit 1
