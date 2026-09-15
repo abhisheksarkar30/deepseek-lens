@@ -100,6 +100,7 @@ request that caused it (`Path`), and a sentence naming what happened.
 | `param_ignored` | info | A parameter DeepSeek accepts and then does nothing with. `Path` names which: `top_k`, `service_tier`, `container`, `mcp_servers`, or a `max_tokens` above the resolved model's known ceiling. |
 | `header_ignored` | info | The `anthropic-beta` request header is ignored for `/messages`. |
 | `upstream_error` | error | The upstream returned an error. Raised here when the error object arrives inside a 200 body (how the Anthropic wire reports overload and invalid requests once a stream has begun), and by the capture pipeline for a transport-level failure — the same kind, because it means the same thing to the reader. |
+| `peak_pricing` | warn | The call landed inside DeepSeek's 01:00-04:00 or 06:00-10:00 UTC (Mon-Fri) peak-pricing window, so `cost_usd` reflects DeepSeek's 2x peak rate rather than the configured off-peak one. |
 | `analyzer_panic` | error | A warning rule itself panicked. The call is still recorded; this row is the rule failing, not the request. It is the only kind raised by the pipeline rather than by a rule. |
 <!-- END warning kinds -->
 
