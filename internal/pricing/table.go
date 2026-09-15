@@ -161,6 +161,10 @@ func Save(path string, t Table) error {
 	b.WriteString("# deepseek-lens price table — US dollars per 1,000,000 tokens.\n")
 	b.WriteString("# Written by `lens prices --set model.field=rate`; a model with no\n")
 	b.WriteString("# rates listed below is known but unpriced. Re-read on change.\n")
+	b.WriteString("#\n")
+	b.WriteString("# These are OFF-PEAK rates. DeepSeek bills 2x during its peak-pricing\n")
+	b.WriteString("# window (01:00-04:00 and 06:00-10:00 UTC, Mon-Fri) — lens detects and\n")
+	b.WriteString("# applies that multiplier itself; it is not configurable here.\n")
 	for _, model := range sortedModels(t) {
 		r := t[model]
 		wrote := false

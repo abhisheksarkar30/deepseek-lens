@@ -140,6 +140,19 @@ rather than folding it in as zero.
 
 `lens prices --edit` opens the file in `$EDITOR` if you would rather edit it directly.
 
+**Peak pricing.** DeepSeek bills 2x during its peak-pricing window — 01:00–04:00 and 06:00–10:00
+UTC, Monday through Friday. That window and the 2x multiplier are DeepSeek's, not lens's: the
+rates you configure above are the *off-peak* rates, and lens applies the multiplier itself for any
+call whose timestamp falls inside the window. A call priced at peak shows a `cost_usd` that is 2x
+what the same call would cost off-peak, and carries a [`peak_pricing`](#what-was-silently-dropped)
+warning naming the window so the doubled number has an explanation attached.
+
+This needs no plugin. The multiplier and the warning are computed by lens itself from the request's
+own timestamp, so they apply whether or not the
+[optional DeepSeek/Claude Pro plugin hooks](https://github.com/abhisheksarkar30/agentic-ai-artifacts)
+are installed — if you run no plugin at all, the `peak_pricing` warning is your only notice that
+part of a session's spend landed inside the peak window.
+
 ## Sessions
 
 A session groups calls into the run they belong to, so `lens sessions` answers "this run cost $X
