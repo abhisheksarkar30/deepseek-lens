@@ -1,7 +1,7 @@
 # GI-4 — Peak-aware costing, and hook integration for a proxy-fronted DeepSeek route
 
 **Status**: converged
-**Version**: 4
+**Version**: 5
 **Issue**: [`GI#4`](https://github.com/abhisheksarkar30/deepseek-lens/issues/4)
 **Branch**: `GI-4-peak-cost-and-hook-integration`, cut from `develop`.
 **Repos touched**: `deepseek-lens` (this repo) and `agentic-ai-artifacts`
@@ -71,6 +71,8 @@ In scope:
    integration's failure mode is silence, so it needs a surface that says so out loud), and
    degrades to a passing note when there is no plugin to report on.
 4. User-facing docs on both sides, including that the plugin integration is optional.
+5. Both hooks locate Claude Code's config directory the way Claude Code does — honoring
+   `CLAUDE_CONFIG_DIR` rather than assuming `~/.claude`.
 
 Explicitly out of scope:
 
@@ -84,8 +86,9 @@ Explicitly out of scope:
   blocks; lens measures.
 - No attempt to share the peak window as code between the Go and JS/bash implementations — the
   repos cannot import from each other. See risk §8.1.
-- No fix to the plugin hooks' own config-directory handling. §8.6 records that gap and its
-  upgrade path; it is a pre-existing plugin defect, not one this story introduces.
+- No rewrite of the plugin's documented setup around a relocated config directory: the manual
+  steps in its README (copying `deepseek-key.ps1`, the absolute `apiKeyHelper` path inside the
+  overlay) stay user-declared absolute paths. See §8.6.
 
 ## 3. Verified current state
 
@@ -95,6 +98,7 @@ would now be stale, it is listed in §7 for the Phase 6.5 refresh.
 | Claim | Evidence |
 |---|---|
 | Both hooks key off `ANTHROPIC_BASE_URL` containing `deepseek` | `deepseek-peak-guard.sh:14-17`, `deepseek-auto-toggle.js:72-76` |
+| Neither hook honors `CLAUDE_CONFIG_DIR`; each builds `~/.claude` from its host language's home helper — Node's `os.homedir()` (which resolves `USERPROFILE` first on Windows), bash's `${HOME:-$USERPROFILE}` | `deepseek-auto-toggle.js:27-30`, `deepseek-peak-guard.sh:19` |
 | The overlay `~/.claude/.deepseek-env.json` declares the route the toggle owns, in either a legacy flat shape or an `env`/`settings` two-section shape | `deepseek-auto-toggle.js:87-100`; both shapes exercised by `hooks/test-deepseek-auto-toggle.sh` |
 | `pricing.Compute` takes no time input | `internal/pricing/pricing.go:105` |
 | `Compute` has exactly one production caller | `internal/consumer/consumer.go:382` |
@@ -322,10 +326,10 @@ the SQLite write beside it.
 
 | File | Change |
 |---|---|
-| `hooks/deepseek-auto-toggle.js` | read the overlay before computing `current`; add the shared predicate; cross-reference comment |
-| `hooks/deepseek-peak-guard.sh` | replace the substring guard with the shared predicate; cross-reference comment |
-| `hooks/test-deepseek-auto-toggle.sh` | add lens-URL fixtures on both sides of the peak window |
-| `README.md` | document the proxy-fronted overlay, and the hook-reinstall requirement |
+| `hooks/deepseek-auto-toggle.js` | resolve the config directory (`CLAUDE_CONFIG_DIR` first); read the overlay before computing `current`; add the shared predicate; cross-reference comment |
+| `hooks/deepseek-peak-guard.sh` | resolve the config directory the same way; replace the substring guard with the shared predicate; cross-reference comment |
+| `hooks/test-deepseek-auto-toggle.sh` | pin the fixture's config directory through `CLAUDE_CONFIG_DIR`; add lens-URL fixtures on both sides of the peak window |
+| `README.md` | document the proxy-fronted overlay, the hook-reinstall requirement, and the relocated-config-directory caveat (§8.6) |
 
 ## 7. Test strategy
 
@@ -377,6 +381,15 @@ against a throwaway `HOME` with a pinned clock (this is the pattern to follow, n
 - lens URL in the overlay, peak → the overlay is removed (today: nothing happens).
 - A new guard case covering a lens URL during peak, asserting the block, and one off-peak
   asserting silence.
+- **The harness pins `CLAUDE_CONFIG_DIR` to the throwaway dir.** It currently redirects through
+  `USERPROFILE="$tmp" HOME="$tmp"` on every invocation, which stops working the moment the hooks
+  honor `CLAUDE_CONFIG_DIR`: a developer who has that variable set would have every case read and
+  write their real config directory. One exported assignment next to `tmp="$(mktemp -d)"` covers
+  every child process, including the `bash "$guard"` calls.
+- **A relocated-config-directory case**: with the fixture reachable only through
+  `CLAUDE_CONFIG_DIR` and the platform home variables pointing elsewhere, both hooks still find
+  the overlay and the settings file. This is the case that pins the fold-in, and it fails against
+  either hook's pre-bead-07 code.
 
 **Integration / E2E**: deferred to `/develop-tests`. The natural one is the end-to-end claim this
 plan makes — a session routed through lens during a pinned peak window records a `cost_usd`
@@ -437,20 +450,22 @@ documented escape hatch and is untouched.
 
 **8.6 Claude Code's config directory is not always `~/.claude`.** `CLAUDE_CONFIG_DIR` relocates
 Claude Code's config directory — settings, session history and plugins together — and on Windows
-`~/.claude` is documented as meaning `%USERPROFILE%\.claude` rather than `$HOME/.claude`. Bead 04
-corrects lens's side of this with a `claudeConfigDir()` resolver (§4.5), so `provider_hooks` reads
-the file the hooks read rather than the one the Go helper happened to prefer. **The plugin's
-toggle keeps the bug**: `deepseek-auto-toggle.js:28` hardcodes
+`~/.claude` is documented as meaning `%USERPROFILE%\.claude` rather than `$HOME/.claude`. Both
+sides of this story had the same defect, and both are fixed in it.
+
+**lens's side** (bead 04): `provider_hooks` resolves through a `claudeConfigDir()` (§4.5), so it
+reads the file the hooks read rather than the one the Go helper happened to prefer.
+
+**The plugin's side** (bead 07): `deepseek-auto-toggle.js:28` hardcoded
 `path.join(home, ".claude", "settings.json")`, so for a user with a relocated config directory the
-hook edits a file Claude Code does not read — it appears to act, and has no effect. The peak guard
-is affected far less: it takes its effective `ANTHROPIC_BASE_URL` from the hook's own environment,
-which Claude Code populates from the effective settings, and its declared value from the plugin's
-own overlay path convention, so its two inputs stay consistent with each other. *Mitigation*:
-recorded here rather than fixed — it is a pre-existing plugin defect affecting a population the
-plugin already fails to serve, and repairing the toggle would widen bead 07's scope and test
-matrix beyond this story's. *Upgrade path*: `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` in the toggle —
-one line, in a file bead 07 already edits. *Not a regression*: lens's behaviour and both hooks' are
-unchanged for every user who does not set `CLAUDE_CONFIG_DIR`, which is the default.
+hook edited a file Claude Code does not read — it appeared to act, and had no effect. The guard is
+the same class of defect once bead 07 gives it an overlay to read. Both now resolve
+`CLAUDE_CONFIG_DIR` first, falling back to the existing platform idiom. *Not a regression*: for
+every user who does not set `CLAUDE_CONFIG_DIR` — the default — both hooks' behaviour is
+byte-identical to today's. *Residual boundary*: the plugin's README documents manual setup steps
+(copying `deepseek-key.ps1` to `~/.claude/`, an absolute `apiKeyHelper` path inside the overlay)
+that remain user-declared literals; a user who relocates their config directory must adjust those
+themselves, and bead 08 says so where it documents the setup.
 
 **8.7 Self-review lens** (required by the flywheel): *security* — no auth, secret, or permission
 surface is touched; the hooks read a local config file that already holds no credential (the key
@@ -504,6 +519,11 @@ Bead 07 is independent of every lens bead and is the actual bug fix — it shoul
 the piece that stops the 2x billing, but only once the overlay `~/.claude/.deepseek-env.json`
 declares the proxy URL: with the overlay still naming `api.deepseek.com`, the predicate does not
 recognize the route and the peak session proceeds (bead 08 supplies that setup; see §8.2 and §1).
+It also carries the config-directory fold-in (§8.6): both hooks resolve `CLAUDE_CONFIG_DIR` before
+falling back to the platform home helper. That is one line per file, in two files bead 07 already
+edits, fixing the same class of defect as the predicate — an assumption about where `~/.claude`
+is — so it rides along rather than becoming a bead that would touch the same files and the same
+test harness.
 
 Suggested order: `07 → 08 → 01 → 02 → 03 → 05 → 04 → 06`. Bead 04 is last among the code because
 it verifies 07's behaviour from the lens side, and it is the one bead that can be dropped. It
@@ -519,6 +539,14 @@ with a note saying the plugin is not managing this machine.
 
 ## Change History
 
+- **v5 (config-directory fold-in)** — the plugin's matching `CLAUDE_CONFIG_DIR` defect moves from
+  *recorded* to *fixed*: §8.6 no longer leaves the toggle hardcoding `~/.claude` with an upgrade
+  path, and bead 07 resolves the config directory in both hooks (`CLAUDE_CONFIG_DIR` first, then
+  the existing platform idiom). §2 gains the scope item and drops the out-of-scope bullet that
+  said the gap was not fixed; §3 records the evidence; §6 and §7 carry the file and test changes,
+  including pinning the hook harness's config directory so it cannot read the developer's real
+  one. Deliberately still out of scope: the plugin README's manual setup steps, which stay
+  user-declared absolute paths.
 - **v4 (standalone-usability pass)** — §2 states the no-plugin guarantee as a requirement rather
   than leaving it implicit, with the corresponding non-goal. §4.5 rewritten: the `provider_hooks`
   check is the only lens code that reads a plugin-owned file, and therefore the only place that
