@@ -84,6 +84,13 @@ func Serve(args []string) error {
 	// construct Consumers without one. The Loader re-reads prices.toml when
 	// it changes, so `lens prices --set` takes effect without a restart.
 	cons.SetPriceTable(pricing.NewLoader(pricing.DefaultPath()))
+	// Undoing transport Content-Encoding (internal/decode) is installed here for
+	// the third time for the same reason: it is another separate pre-insert step,
+	// and a Consumer built without it — every test that predates this — must keep
+	// storing bodies exactly as captured. The limit is cfg.BodyCapBytes, the same
+	// cap the proxy tees with: without a second cap on the decoded form, a small
+	// compressed body would expand past the configured per-body cap.
+	cons.SetBodyDecoding(cfg.BodyCapBytes)
 
 	proxySrv, err := proxy.NewServer(cfg, sk)
 	if err != nil {

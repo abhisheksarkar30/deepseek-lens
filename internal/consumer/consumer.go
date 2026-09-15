@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/analyze"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/decode"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/parse"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
@@ -100,6 +101,11 @@ type Consumer struct {
 	analyzers  []Analyzer
 	prices     PriceTable
 
+	// bodyDecodeLimit caps the decoded form of each captured body. Zero means
+	// the decode step is not installed, so bodies are parsed and stored exactly
+	// as captured.
+	bodyDecodeLimit int
+
 	processed     atomic.Uint64
 	failed        atomic.Uint64
 	flushes       atomic.Uint64
@@ -130,6 +136,31 @@ func (c *Consumer) SetPriceTable(pt PriceTable) { c.prices = pt }
 // is what every pre-bead test does. One *session.Resolver satisfies both
 // this and SessionResolver, so `lens serve` installs the same object twice.
 func (c *Consumer) SetSessionAggregator(sa SessionAggregator) { c.aggregator = sa }
+
+// SetBodyDecoding installs the pre-parse step that undoes a captured body's
+// transport Content-Encoding (internal/decode), capping the decoded form of each
+// body at limit bytes. Leaving it unset is legal and stores every body exactly
+// as captured, which is what every test written before it expects — the same
+// reason the price table and the session aggregator are installed separately
+// rather than baked into New.
+//
+// limit is the same per-body cap internal/proxy applies, and it has to be
+// applied a second time here: the proxy's cap is on the *encoded* bytes it
+// tees, so a small compressed body can decode to an unbounded amount of work and
+// storage if the decoded form is not bounded in turn.
+func (c *Consumer) SetBodyDecoding(limit int) { c.bodyDecodeLimit = limit }
+
+// decodeBody runs one captured body through internal/decode. A body whose
+// encoding cannot be undone comes back exactly as captured, with the reason
+// logged once — "fail open" as CLAUDE.md means it: a call lens cannot decode is
+// still a faithful row, and the row still says what was on the wire.
+func (c *Consumer) decodeBody(which string, call *sink.CapturedCall, h http.Header, body []byte) ([]byte, http.Header) {
+	decoded, headers, err := decode.Body(h, body, c.bodyDecodeLimit)
+	if err != nil {
+		log.Printf("consumer: decoding %s body for call %s: %v (stored as captured)", which, call.ID, err)
+	}
+	return decoded, headers
+}
 
 // Stats returns a snapshot of the consumer's counters.
 func (c *Consumer) Stats() Stats {
@@ -306,8 +337,22 @@ func (c *Consumer) prepareCall(call *sink.CapturedCall, seen map[string]string) 
 		}
 	}()
 
-	meta := parse.ExtractMeta(call.ReqBody, call.ReqHeaders)
-	usage, _ := parse.ExtractUsage(call.RespBody, call.RespHeaders.Get("Content-Type"))
+	// Transport Content-Encoding comes off before anything reads these bytes —
+	// see internal/decode for why this belongs in the cold path and not in the
+	// proxy's tee. Both directions are decoded: a compressed *response* body
+	// yields no usage event at all, and a compressed *request* body yields no
+	// prefix hash, which is what session resolution keys on. Every downstream
+	// consumer of these bytes (parse, the analyzers, the stored row) sees the
+	// decoded form, which is the only form any of them can read.
+	reqBody, reqHeaders := call.ReqBody, call.ReqHeaders
+	respBody, respHeaders := call.RespBody, call.RespHeaders
+	if c.bodyDecodeLimit > 0 {
+		reqBody, reqHeaders = c.decodeBody("request", call, call.ReqHeaders, call.ReqBody)
+		respBody, respHeaders = c.decodeBody("response", call, call.RespHeaders, call.RespBody)
+	}
+
+	meta := parse.ExtractMeta(reqBody, reqHeaders)
+	usage, _ := parse.ExtractUsage(respBody, respHeaders.Get("Content-Type"))
 	// ExtractUsage's error only ever reports a parsed SSE "error" event —
 	// the Usage returned alongside it is still whatever was accumulated so
 	// far, and per parse's own contract a shape mismatch degrades rather
@@ -322,10 +367,13 @@ func (c *Consumer) prepareCall(call *sink.CapturedCall, seen map[string]string) 
 		RemoteAddr: call.RemoteAddr,
 		Status:     call.Status,
 
-		ReqHeaders:  headerJSON(call.ReqHeaders),
-		RespHeaders: headerJSON(call.RespHeaders),
-		ReqBody:     call.ReqBody,
-		RespBody:    call.RespBody,
+		// store.Request carries the decoded pair, headers included: the stored
+		// headers have to describe the stored body, because a replay re-sends
+		// one with the other (internal/api's sendReplay).
+		ReqHeaders:  headerJSON(reqHeaders),
+		RespHeaders: headerJSON(respHeaders),
+		ReqBody:     reqBody,
+		RespBody:    respBody,
 
 		InputTokens:         usage.InputTokens,
 		OutputTokens:        usage.OutputTokens,

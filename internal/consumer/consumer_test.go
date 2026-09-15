@@ -1,6 +1,7 @@
 package consumer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/andybalholm/brotli"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/analyze"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/parse"
@@ -1092,5 +1095,98 @@ func TestConcurrentProducerRace(t *testing.T) {
 	}
 	if len(reqs) != n {
 		t.Fatalf("got %d rows, want %d", len(reqs), n)
+	}
+}
+
+// brotliBody returns data as a brotli stream. brotli is the coding the DeepSeek
+// endpoint actually answers with for a client that offers it, so it is the one
+// whose absence from the pipeline made every such call report zero tokens.
+func brotliBody(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := brotli.NewWriter(&buf)
+	if _, err := w.Write(data); err != nil {
+		t.Fatalf("brotli write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("brotli close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestBodyDecodingRecoversCompressedUsage is the regression the decode step
+// exists for, asserted the way the defect showed up: a response carrying
+// "Content-Encoding: br" must still land its usage on the row, and the row must
+// store the body in the form every reader of it expects.
+func TestBodyDecodingRecoversCompressedUsage(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, nil)
+	c.SetBodyDecoding(1 << 20)
+
+	call := simpleCall()
+	plain := append([]byte(nil), call.RespBody...)
+	call.RespHeaders.Set("Content-Encoding", "br")
+	call.RespBody = brotliBody(t, plain)
+
+	runClosed(t, c, sk, []*sink.CapturedCall{call})
+
+	rows, err := st.ListRequests(context.Background(), store.Filter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	r := rows[0]
+	if r.InputTokens != 10 || r.OutputTokens != 20 {
+		t.Errorf("tokens = in %d / out %d, want 10 / 20 — the decoded usage has to reach the row",
+			r.InputTokens, r.OutputTokens)
+	}
+	if r.ModelResolved != "claude-sonnet-5" {
+		t.Errorf("model_resolved = %q, want claude-sonnet-5", r.ModelResolved)
+	}
+	if !bytes.Equal(r.RespBody, plain) {
+		t.Error("stored response body is not the decoded form the client received")
+	}
+	// The stored pair has to agree with itself: internal/api's replay re-sends
+	// this body with these headers, so a surviving Content-Encoding would make a
+	// replay declare an encoding its body no longer has.
+	if strings.Contains(r.RespHeaders, "Content-Encoding") {
+		t.Errorf("stored headers still declare an encoding: %s", r.RespHeaders)
+	}
+	if strings.Contains(r.RespHeaders, "Content-Length") {
+		t.Errorf("stored headers still carry the encoded length: %s", r.RespHeaders)
+	}
+}
+
+// TestBodyDecodingIsOptIn pins the default every test written before this step
+// depends on: a Consumer that was never given SetBodyDecoding stores exactly the
+// bytes that were captured, undecoded.
+func TestBodyDecodingIsOptIn(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, nil) // no SetBodyDecoding
+
+	call := simpleCall()
+	compressed := brotliBody(t, call.RespBody)
+	call.RespHeaders.Set("Content-Encoding", "br")
+	call.RespBody = compressed
+
+	runClosed(t, c, sk, []*sink.CapturedCall{call})
+
+	rows, err := st.ListRequests(context.Background(), store.Filter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if !bytes.Equal(rows[0].RespBody, compressed) {
+		t.Error("stored response body was decoded without SetBodyDecoding")
+	}
+	if rows[0].InputTokens != 0 || rows[0].OutputTokens != 0 {
+		t.Errorf("tokens = in %d / out %d, want 0 / 0 with decoding off",
+			rows[0].InputTokens, rows[0].OutputTokens)
 	}
 }
