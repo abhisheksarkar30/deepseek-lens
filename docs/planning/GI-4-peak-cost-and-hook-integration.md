@@ -1,7 +1,7 @@
 # GI-4 — Peak-aware costing, and hook integration for a proxy-fronted DeepSeek route
 
 **Status**: converged
-**Version**: 3
+**Version**: 4
 **Issue**: [`GI#4`](https://github.com/abhisheksarkar30/deepseek-lens/issues/4)
 **Branch**: `GI-4-peak-cost-and-hook-integration`, cut from `develop`.
 **Repos touched**: `deepseek-lens` (this repo) and `agentic-ai-artifacts`
@@ -55,23 +55,37 @@ would misreport the spend even if it did.
 
 ## 2. Scope
 
+**lens works, and is verified to work, with no plugin at all.** That is a requirement of this
+story, not an assumption resting on the reader: the two hooks are an *optional* integration, and
+a user who runs no plugin — a Cline user, a plain `curl` user, or anyone whose config directory
+holds no Claude Code files — must get a fully working lens and a successful `lens doctor`. Every
+lens path except the `provider_hooks` check in §4.5 reads nothing the plugin owns (§3); the check
+itself must therefore be incapable of failing, and is specified that way.
+
 In scope:
 
 1. Both plugin hooks recognize a DeepSeek route that is fronted by a local proxy.
 2. lens knows the peak window, prices peak calls correctly, and names the calls it priced at
    peak.
 3. `lens doctor` reports whether the plugin hooks will recognize the current route (the
-   integration's failure mode is silence, so it needs a surface that says so out loud).
-4. User-facing docs on both sides.
+   integration's failure mode is silence, so it needs a surface that says so out loud), and
+   degrades to a passing note when there is no plugin to report on.
+4. User-facing docs on both sides, including that the plugin integration is optional.
 
 Explicitly out of scope:
 
+- **Nothing in this story may make lens's correctness, its ability to start, or its `doctor` exit
+  code depend on a plugin-owned file.** This is the constraint the rest of the design is written
+  against, and it is the reason §4.5 is specified case-by-case rather than left to the
+  implementer's judgement.
 - No new `CostSource` value. See §4.3 for why.
 - No new lens configuration knob. See §4.2.
 - No change to lens's blocking behaviour: lens observes, it never refuses a request. The guard
   blocks; lens measures.
 - No attempt to share the peak window as code between the Go and JS/bash implementations — the
   repos cannot import from each other. See risk §8.1.
+- No fix to the plugin hooks' own config-directory handling. §8.6 records that gap and its
+  upgrade path; it is a pre-existing plugin defect, not one this story introduces.
 
 ## 3. Verified current state
 
@@ -201,6 +215,15 @@ a configured model with zero tokens prices to a real `0` — non-nil, but no spe
 claiming either was "billed at peak" would assert something lens does not know, the same
 discipline as `SourceUnpriced` existing rather than a zero.
 
+**For a lens user with no plugin, this warning is not a supplement — it is the only peak signal
+they will ever get.** A plugin user has a guard that refuses the session *before* it bills, so for
+them the warning is a retrospective explanation of a call the guard did not stop. A user running
+no plugin has no guard and no toggle, and nothing else in lens knows that 02:00 UTC costs double:
+the warning is the entire mechanism by which they learn that part of their spend was avoidable,
+and the doubled `cost_usd` is only interpretable once they can see it. That asymmetry is why bead
+03 is P0 rather than P1 — for the half of this story's audience that runs no plugin, the warning
+*is* the feature.
+
 `cost_source` stays `configured` on a peak-priced call, and that is correct rather than a
 compromise: the arithmetic was performed with the user's own rates. `CostSource` describes the
 provenance of the number, not the calendar.
@@ -216,18 +239,45 @@ This is why `internal/analyze` importing `internal/pricing` is acceptable: `pric
 `parse`, so no cycle forms, and CLAUDE.md's dependency invariant (which pins `proxy`, and only
 `proxy`) is untouched.
 
-### 4.5 `lens doctor`: make the silence visible
+### 4.5 `lens doctor`: make the silence visible, and never fail without the plugin
 
 The hooks' failure mode is silence — the guard simply does not fire and nothing says so. A doctor
 check that evaluates the **hook predicate** against the effective `ANTHROPIC_BASE_URL` read from
-`~/.claude/settings.json` — substring on `deepseek` first, else equality with the URL
-`~/.claude/.deepseek-env.json` declares — reports whether the peak guard will recognize this
-route, turning the silence into a printed line. It is the **third copy of the predicate** (§8.1),
-so it is written as the predicate itself, not an approximation of it: a direct-DeepSeek route
-passes by the substring clause however the overlay reads, and the only warning is a lens-fronted
-route whose **present** overlay declares a *different* address — an absent overlay passes with a
-note. P2, and the one bead in this plan that could be dropped without
-weakening the fix.
+Claude Code's settings file — substring on `deepseek` first, else equality with the URL the
+overlay declares — reports whether the peak guard will recognize this route, turning the silence
+into a printed line. It is the **third copy of the predicate** (§8.1), so it is written as the
+predicate itself, not an approximation of it: a direct-DeepSeek route passes by the substring
+clause however the overlay reads, and the only warning is a lens-fronted route whose **present**
+overlay declares a *different* address — an absent overlay passes with a note.
+
+**This check is the only lens code that touches a plugin-owned file, and therefore the only place
+this story could make lens fail without the plugin.** `runDoctor` returns a non-zero exit as soon
+as one check returns `FAIL` (`internal/cli/doctor.go:41-45`), so the check must be incapable of
+returning `FAIL`: every unexpected condition — no config directory at all, no `settings.json`, an
+unreadable file, a directory where a file was expected, an unparseable overlay — resolves to
+`pass` with a note. `WARN` is reserved for the one genuinely actionable state (a present overlay
+declaring a different address), and even that must not fail the command. Bead 04 enumerates the
+cases and tests each.
+
+**Resolving Claude Code's config directory is a different question from resolving lens's home, and
+must not reuse the helper built for the latter.** Claude Code relocates its whole config directory
+— `settings.json`, session history, plugins together — when `CLAUDE_CONFIG_DIR` is set, and on
+Windows `~/.claude` is documented as meaning `%USERPROFILE%\.claude`, not `$HOME/.claude`.
+`config.userHomeDir()` (`internal/config/config.go:83`) resolves `$HOME` **first**, deliberately,
+so that tests and users can redirect *lens's own* files (`config.toml`, `prices.toml`, the
+database) uniformly across platforms. Inheriting that precedence here would read a directory
+Claude Code does not use whenever `$HOME` differs from `%USERPROFILE%` — the ordinary state of a
+Git Bash session on Windows, this repo's target platform — and the check would then answer
+confidently about a file the hooks never read. So bead 04 adds a small `claudeConfigDir()` beside
+its only caller, honoring Claude Code's precedence: `CLAUDE_CONFIG_DIR`, else `%USERPROFILE%` on
+Windows, else `$HOME`, else `os.UserHomeDir()`. That last chain is also exactly what Node's
+`os.homedir()` resolves in the hooks, so the check finally reads the same file the hooks do.
+`config.UserHomeDir` is therefore **not** exported, and `internal/config/config.go` is not touched
+by this story.
+
+P2, and the one bead in this plan that could be dropped without weakening the fix — but it is
+also the bead that *proves* the no-plugin guarantee, since it is the only place that guarantee can
+be broken.
 
 ## 5. Data flow
 
@@ -260,12 +310,11 @@ the SQLite write beside it.
 | `internal/analyze/kinds.go` | add `KindPeakPricing` and its one-sentence description |
 | `internal/analyze/rules.go` | add `rulePeakPricing` to the rule table |
 | `internal/analyze/analyze_test.go` | add cases including peak+priced, peak+unpriced, and off-peak (six in all — see bead 03) |
-| `README.md` | add the `peak_pricing` row inside the `BEGIN/END warning kinds` markers; note peak pricing in the cost section |
+| `README.md` | add the `peak_pricing` row inside the `BEGIN/END warning kinds` markers; note peak pricing in the cost section, and that the plugin integration is optional |
 | `internal/consumer/consumer.go` | pass `req.StartedAt` to `Compute` (one line) |
 | `internal/consumer/consumer_test.go` | pin `simpleCall()`'s `StartedAt` off-peak (shared fixture); peak/off-peak row assertion (bead 02) |
-| `internal/cli/doctor.go` | hook-recognition check (P2) |
-| `internal/cli/cli_test.go` | doctor check case |
-| `internal/config/config.go` | export `userHomeDir` as `UserHomeDir` (update its two callers); no behaviour change (bead 04) |
+| `internal/cli/doctor.go` | hook-recognition check (P2), plus the `claudeConfigDir()` resolver it reads through — `CLAUDE_CONFIG_DIR`, else `%USERPROFILE%`, else `$HOME` |
+| `internal/cli/cli_test.go` | the check's cases, including every no-plugin path (absent config dir, absent or unreadable `settings.json`) |
 | `docs/context/data-model.md` | add `peak_pricing` to the warning-kind list |
 | `docs/context/*.md` | Phase 6.5 refresh |
 
@@ -306,6 +355,16 @@ asserting `rows[0]` at `:975`) must stamp its second call with a **distinct** of
 (e.g. base + 1 hour) — otherwise `rows[0]`'s ordering would rest on the `idx_requests_started_at`
 tiebreak (`store.go:341` orders by `started_at DESC` with no secondary key; `schema.sql:45`)
 rather than on the fixture. Both rows stay off-peak, so no multiplier applies.
+
+**Unit — `internal/cli`** (bead 04; this is where the no-plugin guarantee is verified): every
+condition that arises when there is no plugin, or no Claude Code at all, resolves to `pass` and
+leaves `doctor`'s exit code at zero — no config directory, an empty config directory with no
+`settings.json`, an unreadable `settings.json`, a directory where the file was expected, a
+malformed overlay, a sectioned overlay carrying the same URL under `env`. The four predicate
+combinations each exercise both clauses. Tests point at a throwaway config directory through
+`CLAUDE_CONFIG_DIR`, which isolates on every platform in one line; a test that set only `$HOME`
+would read the developer's real `~/.claude/` on Windows, since the resolver prefers
+`%USERPROFILE%` — the leak the isolation exists to prevent.
 
 **Hook tests** — extend `hooks/test-deepseek-auto-toggle.sh`, which already runs the toggle
 against a throwaway `HOME` with a pinned clock (this is the pattern to follow, not a new harness):
@@ -376,14 +435,32 @@ above).
 chosen over a loopback heuristic precisely to keep this rare; `.provider-override` remains the
 documented escape hatch and is untouched.
 
-**8.6 Self-review lens** (required by the flywheel): *security* — no auth, secret, or permission
+**8.6 Claude Code's config directory is not always `~/.claude`.** `CLAUDE_CONFIG_DIR` relocates
+Claude Code's config directory — settings, session history and plugins together — and on Windows
+`~/.claude` is documented as meaning `%USERPROFILE%\.claude` rather than `$HOME/.claude`. Bead 04
+corrects lens's side of this with a `claudeConfigDir()` resolver (§4.5), so `provider_hooks` reads
+the file the hooks read rather than the one the Go helper happened to prefer. **The plugin's
+toggle keeps the bug**: `deepseek-auto-toggle.js:28` hardcodes
+`path.join(home, ".claude", "settings.json")`, so for a user with a relocated config directory the
+hook edits a file Claude Code does not read — it appears to act, and has no effect. The peak guard
+is affected far less: it takes its effective `ANTHROPIC_BASE_URL` from the hook's own environment,
+which Claude Code populates from the effective settings, and its declared value from the plugin's
+own overlay path convention, so its two inputs stay consistent with each other. *Mitigation*:
+recorded here rather than fixed — it is a pre-existing plugin defect affecting a population the
+plugin already fails to serve, and repairing the toggle would widen bead 07's scope and test
+matrix beyond this story's. *Upgrade path*: `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` in the toggle —
+one line, in a file bead 07 already edits. *Not a regression*: lens's behaviour and both hooks' are
+unchanged for every user who does not set `CLAUDE_CONFIG_DIR`, which is the default.
+
+**8.7 Self-review lens** (required by the flywheel): *security* — no auth, secret, or permission
 surface is touched; the hooks read a local config file that already holds no credential (the key
 lives in a user environment variable, read by `apiKeyHelper`); no new network call is added
 anywhere; lens's loopback-only binding and `x-api-key` redaction are untouched. *QA* — the
 edge cases that matter are the window boundaries, the UTC-vs-local trap, the unpriced-at-peak
-case, and the overlay-shape variants, all enumerated in §7. *Architecture* — the cost step keeps
-its place in the fixed pipeline order, the hot path gains nothing, and no new configuration or
-dependency is introduced.
+case, the overlay-shape variants, and the no-plugin conditions of §8.6 and §4.5, all enumerated
+in §7. *Architecture* — the cost step keeps its place in the fixed pipeline order, the hot path
+gains nothing, no new configuration or dependency is introduced, and the one new read of a
+foreign file is confined to a check that cannot fail the command it runs under.
 
 ## 9. Pre-flight (needs a decision before bead 01)
 
@@ -409,7 +486,7 @@ dependency is introduced.
 |---|---|---|---|---|
 | 01 | `feat` pricing: peak-window predicate and multiplier | P0 | — | lens |
 | 02 | `feat` pricing: apply the peak multiplier in Compute | P0 | 01 | lens |
-| 03 | `feat` analyze: `peak_pricing` warning kind and rule | P1 | 01 | lens |
+| 03 | `feat` analyze: `peak_pricing` warning kind and rule | P0 | 01 | lens |
 | 04 | `feat` cli: doctor reports whether the hooks recognize the route | P2 | 07 | lens |
 | 05 | `docs` lens: document peak pricing in README and the price-file header | P2 | 02, 03 | lens |
 | 06 | `docs` refresh `docs/context/` | P1 | 02, 03, 04 | lens |
@@ -429,10 +506,34 @@ declares the proxy URL: with the overlay still naming `api.deepseek.com`, the pr
 recognize the route and the peak session proceeds (bead 08 supplies that setup; see §8.2 and §1).
 
 Suggested order: `07 → 08 → 01 → 02 → 03 → 05 → 04 → 06`. Bead 04 is last among the code because
-it verifies 07's behaviour from the lens side, and it is the one bead that can be dropped.
+it verifies 07's behaviour from the lens side, and it is the one bead that can be dropped. It
+carries two jobs at once, which is why it is specified case-by-case rather than sketched: it is
+the only bead that *verifies* the no-plugin guarantee (§2) and the only bead that could *break*
+it, since it is the only lens code that reads a file the plugin owns.
+
+**Which beads a non-plugin user actually gets.** Beads 01, 02, 03, 05 and 06 are the whole of
+that user's experience and touch the plugin not at all: correct peak pricing, a warning that says
+why the number doubled, and docs that say so. Beads 04, 07 and 08 are the plugin integration, and
+the absence of the plugin degrades lens by exactly one printed `doctor` row — which reads `pass`
+with a note saying the plugin is not managing this machine.
 
 ## Change History
 
+- **v4 (standalone-usability pass)** — §2 states the no-plugin guarantee as a requirement rather
+  than leaving it implicit, with the corresponding non-goal. §4.5 rewritten: the `provider_hooks`
+  check is the only lens code that reads a plugin-owned file, and therefore the only place that
+  guarantee can break, so it must be incapable of returning `FAIL` (a `FAIL` is a non-zero exit —
+  `internal/cli/doctor.go:41-45`). Claude Code's config directory is resolved by a new
+  `claudeConfigDir()` (`CLAUDE_CONFIG_DIR` → `%USERPROFILE%` → `$HOME` → `os.UserHomeDir()`) rather
+  than the `$HOME`-first `config.userHomeDir()`, which was built to redirect *lens's own* files and
+  is not Claude Code's precedence — on Windows the two disagree, and following the bead as written
+  would have had the check read a file the hooks never touch. `internal/config/config.go` drops out
+  of §6; `config.UserHomeDir` is not exported (bead 04). §4.3 and bead 03: `peak_pricing` promoted
+  P1 → P0, because for a user running no guard it is the only peak signal that exists rather than a
+  retrospective supplement. §7 gains the `internal/cli` verification section, isolating through
+  `CLAUDE_CONFIG_DIR`. New §8.6 records that the plugin's toggle still hardcodes `~/.claude` and is
+  silently inert under a relocated config directory — recorded, not fixed, with the one-line
+  upgrade path. §10 states which beads a non-plugin user receives.
 - **v3 (round-2 review)** — F2.1: bead 04's doctor check now evaluates the **hook predicate**
   (effective `ANTHROPIC_BASE_URL` from `settings.json` contains `deepseek`, else equals the
   overlay's declared URL, in that order), not overlay-vs-`cfg.ProxyAddr` equality, and its test
