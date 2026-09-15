@@ -145,6 +145,7 @@ tbody tr:hover { background: var(--row-hover); }
   overflow-y: auto;
   z-index: 20;
 }
+.modal[hidden] { display: none; }
 .modal-content {
   background: var(--bg);
   border: 1px solid var(--border);
