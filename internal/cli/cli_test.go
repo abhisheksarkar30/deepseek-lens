@@ -730,6 +730,313 @@ func TestDoctorWarnsWhenServerNotRunning(t *testing.T) {
 	}
 }
 
+// --- doctor: provider_hooks ---
+
+// writeJSON writes v as JSON to path, creating any parent directory needed.
+func writeJSON(t *testing.T, path string, v any) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
+const lensProxyAddr = "127.0.0.1:8787"
+const lensURL = "http://" + lensProxyAddr
+
+func lensCfg() *config.Config {
+	return &config.Config{ProxyAddr: lensProxyAddr}
+}
+
+// TestProviderHooksSubstringClauseIgnoresOverlayMismatch is the regression
+// case: a direct-DeepSeek user recognized by the guard's substring clause
+// must PASS even though their overlay names a different URL than
+// cfg.ProxyAddr — the old overlay-vs-ProxyAddr check warned here.
+func TestProviderHooksSubstringClauseIgnoresOverlayMismatch(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeJSON(t, filepath.Join(dir, "settings.json"), map[string]any{
+		"env": map[string]string{"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"},
+	})
+	writeJSON(t, filepath.Join(dir, ".deepseek-env.json"), map[string]string{
+		"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+	})
+
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+func TestProviderHooksSubstringClauseFiresEvenWithDifferentOverlay(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeJSON(t, filepath.Join(dir, "settings.json"), map[string]any{
+		"env": map[string]string{"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"},
+	})
+	writeJSON(t, filepath.Join(dir, ".deepseek-env.json"), map[string]string{
+		"ANTHROPIC_BASE_URL": lensURL,
+	})
+
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+func TestProviderHooksEqualityClauseRecognizesLensRoute(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeJSON(t, filepath.Join(dir, "settings.json"), map[string]any{
+		"env": map[string]string{"ANTHROPIC_BASE_URL": lensURL},
+	})
+	writeJSON(t, filepath.Join(dir, ".deepseek-env.json"), map[string]string{
+		"ANTHROPIC_BASE_URL": lensURL,
+	})
+
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+func TestProviderHooksMissingOverlayShortCircuitsToPass(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeJSON(t, filepath.Join(dir, "settings.json"), map[string]any{
+		"env": map[string]string{"ANTHROPIC_BASE_URL": lensURL},
+	})
+	// No .deepseek-env.json written.
+
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+// TestProviderHooksWarnsOnTheGenuineBlindSpot is the one WARN case: the
+// lens route, declared differently than what's actually effective. It also
+// exercises the scheme normalization (cfg.ProxyAddr is bare host:port).
+func TestProviderHooksWarnsOnTheGenuineBlindSpot(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeJSON(t, filepath.Join(dir, "settings.json"), map[string]any{
+		"env": map[string]string{"ANTHROPIC_BASE_URL": lensURL},
+	})
+	writeJSON(t, filepath.Join(dir, ".deepseek-env.json"), map[string]string{
+		"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+	})
+
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusWarn {
+		t.Fatalf("status = %s, want WARN: %s", c.Status, c.Detail)
+	}
+	if !strings.Contains(c.Detail, lensURL) || !strings.Contains(c.Detail, "https://api.deepseek.com/anthropic") {
+		t.Errorf("detail names neither URL: %s", c.Detail)
+	}
+}
+
+func TestProviderHooksNoConfigDirAtAllPasses(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+func TestProviderHooksNoSettingsFilePasses(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+// TestProviderHooksUnreadableSettingsPasses uses the same best-effort chmod
+// internal/store uses (os.Chmod's write-only effect on Windows means this is
+// real coverage on Unix and degrades to the equally-required "readable but
+// nothing to check" path on Windows — either way the check must PASS).
+func TestProviderHooksUnreadableSettingsPasses(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	settingsPath := filepath.Join(dir, "settings.json")
+	writeJSON(t, settingsPath, map[string]any{
+		"env": map[string]string{"ANTHROPIC_BASE_URL": lensURL},
+	})
+	_ = os.Chmod(settingsPath, 0o000)
+	t.Cleanup(func() { os.Chmod(settingsPath, 0o644) })
+
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+func TestProviderHooksSettingsIsDirectoryPasses(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	if err := os.Mkdir(filepath.Join(dir, "settings.json"), 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+func TestProviderHooksSettingsWithNoEnvBlockPasses(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeJSON(t, filepath.Join(dir, "settings.json"), map[string]any{"model": "x"})
+
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+func TestProviderHooksEnvBlockWithNoBaseURLPasses(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeJSON(t, filepath.Join(dir, "settings.json"), map[string]any{
+		"env": map[string]string{"SOME_OTHER_VAR": "x"},
+	})
+
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+func TestProviderHooksMalformedOverlayJSONPasses(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeJSON(t, filepath.Join(dir, "settings.json"), map[string]any{
+		"env": map[string]string{"ANTHROPIC_BASE_URL": lensURL},
+	})
+	if err := os.WriteFile(filepath.Join(dir, ".deepseek-env.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+// TestProviderHooksUnreadableOverlayPasses: see
+// TestProviderHooksUnreadableSettingsPasses for why the overlay is written
+// with a value that still PASSes if chmod's write-only effect on Windows
+// lets the read through anyway.
+func TestProviderHooksUnreadableOverlayPasses(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeJSON(t, filepath.Join(dir, "settings.json"), map[string]any{
+		"env": map[string]string{"ANTHROPIC_BASE_URL": lensURL},
+	})
+	overlayPath := filepath.Join(dir, ".deepseek-env.json")
+	writeJSON(t, overlayPath, map[string]string{"ANTHROPIC_BASE_URL": lensURL})
+	_ = os.Chmod(overlayPath, 0o000)
+	t.Cleanup(func() { os.Chmod(overlayPath, 0o644) })
+
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+func TestProviderHooksSectionedOverlayShapePasses(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeJSON(t, filepath.Join(dir, "settings.json"), map[string]any{
+		"env": map[string]string{"ANTHROPIC_BASE_URL": lensURL},
+	})
+	writeJSON(t, filepath.Join(dir, ".deepseek-env.json"), map[string]any{
+		"env":      map[string]string{"ANTHROPIC_BASE_URL": lensURL},
+		"settings": map[string]string{"apiKeyHelper": "x"},
+	})
+
+	c := providerHookCheck(lensCfg())
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+}
+
+// TestProviderHooksResolverPrecedence pins claudeConfigDir's precedence:
+// CLAUDE_CONFIG_DIR, then USERPROFILE, then HOME. A test that isolated only
+// via HOME would leak on Windows, where USERPROFILE is set for real and
+// outranks it.
+func TestProviderHooksResolverPrecedence(t *testing.T) {
+	writeLensSettings := func(dir string) {
+		writeJSON(t, filepath.Join(dir, ".claude", "settings.json"), map[string]any{
+			"env": map[string]string{"ANTHROPIC_BASE_URL": lensURL},
+		})
+	}
+
+	t.Run("CLAUDE_CONFIG_DIR wins when set", func(t *testing.T) {
+		want := t.TempDir()
+		writeJSON(t, filepath.Join(want, "settings.json"), map[string]any{
+			"env": map[string]string{"ANTHROPIC_BASE_URL": lensURL},
+		})
+		decoy := t.TempDir()
+		writeLensSettings(decoy)
+
+		t.Setenv("CLAUDE_CONFIG_DIR", want)
+		t.Setenv("USERPROFILE", decoy)
+		t.Setenv("HOME", decoy)
+
+		if got := claudeConfigDir(); got != want {
+			t.Fatalf("claudeConfigDir() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("USERPROFILE used when CLAUDE_CONFIG_DIR unset", func(t *testing.T) {
+		up := t.TempDir()
+		home := t.TempDir()
+		t.Setenv("CLAUDE_CONFIG_DIR", "")
+		t.Setenv("USERPROFILE", up)
+		t.Setenv("HOME", home)
+
+		want := filepath.Join(up, ".claude")
+		if got := claudeConfigDir(); got != want {
+			t.Fatalf("claudeConfigDir() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("HOME used when CLAUDE_CONFIG_DIR and USERPROFILE unset", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("CLAUDE_CONFIG_DIR", "")
+		t.Setenv("USERPROFILE", "")
+		t.Setenv("HOME", home)
+
+		want := filepath.Join(home, ".claude")
+		if got := claudeConfigDir(); got != want {
+			t.Fatalf("claudeConfigDir() = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestDoctorReportsProviderHooksRow proves runDoctor actually wires the
+// check in, not just that providerHookCheck works standalone.
+func TestDoctorReportsProviderHooksRow(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v\n%s", err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "provider_hooks") {
+		t.Errorf("doctor output missing provider_hooks row:\n%s", buf.String())
+	}
+}
+
 // --- serve ---
 
 func TestServeHelpListsFlags(t *testing.T) {
