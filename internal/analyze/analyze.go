@@ -127,8 +127,12 @@ func (r Rules) Analyze(meta parse.Meta, usage parse.Usage, req *store.Request) [
 // names the offending site (a dotted/bracket path into the request body, or
 // the header name for a header-sourced rule), and Detail is the human
 // sentence — the product, since a Kind alone teaches nothing.
-func warn(kind, severity, detail, path string) store.Warning {
-	return store.Warning{Kind: kind, Severity: severity, Detail: detail, Path: path}
+//
+// kind is a Kind rather than a string so the rule table can only name a kind
+// declared in kinds.go; that is what keeps AllKinds — and the README table
+// checked against it — from missing a kind some rule emits.
+func warn(kind Kind, severity, detail, path string) store.Warning {
+	return store.Warning{Kind: string(kind), Severity: severity, Detail: detail, Path: path}
 }
 
 // matchModel resolves a client model name against the map, returning the

@@ -60,7 +60,7 @@ func ruleCacheControlIgnored(in ruleInput) []store.Warning {
 	if len(in.meta.CacheControlSites) == 1 {
 		path = in.meta.CacheControlSites[0]
 	}
-	return []store.Warning{warn("cache_control_ignored", sevWarn,
+	return []store.Warning{warn(KindCacheControlIgnored, sevWarn,
 		fmt.Sprintf("client requested prompt caching at %s; DeepSeek ignores cache_control, so no caching occurs",
 			strings.Join(in.meta.CacheControlSites, ", ")), path)}
 }
@@ -70,7 +70,7 @@ func ruleBudgetTokensIgnored(in ruleInput) []store.Warning {
 	if in.meta.ThinkingBudget == nil {
 		return nil
 	}
-	return []store.Warning{warn("budget_tokens_ignored", sevWarn,
+	return []store.Warning{warn(KindBudgetTokensIgnored, sevWarn,
 		fmt.Sprintf("thinking.budget_tokens=%d is disregarded", *in.meta.ThinkingBudget),
 		"thinking.budget_tokens")}
 }
@@ -81,7 +81,7 @@ func ruleTopPClamped(in ruleInput) []store.Warning {
 	if in.meta.HasThinking || in.meta.TopP == nil || *in.meta.TopP == 1.0 {
 		return nil
 	}
-	return []store.Warning{warn("top_p_clamped", sevWarn,
+	return []store.Warning{warn(KindTopPClamped, sevWarn,
 		fmt.Sprintf("top_p=%g is ignored outside thinking mode; sampling is forced to 1.0", *in.meta.TopP),
 		"top_p")}
 }
@@ -94,7 +94,7 @@ func ruleTopPBelowFloor(in ruleInput) []store.Warning {
 	if !in.meta.HasThinking || in.meta.TopP == nil || *in.meta.TopP >= 0.95 {
 		return nil
 	}
-	return []store.Warning{warn("top_p_below_floor", sevWarn,
+	return []store.Warning{warn(KindTopPBelowFloor, sevWarn,
 		fmt.Sprintf("top_p=%g is below DeepSeek's 0.95 floor in thinking mode", *in.meta.TopP),
 		"top_p")}
 }
@@ -105,7 +105,7 @@ func ruleParallelToolUseIgnored(in ruleInput) []store.Warning {
 	if !in.meta.DisableParallelToolUse {
 		return nil
 	}
-	return []store.Warning{warn("parallel_tool_use_ignored", sevInfo,
+	return []store.Warning{warn(KindParallelToolUseIgnored, sevInfo,
 		"tool_choice.disable_parallel_tool_use is ignored; DeepSeek decides tool-call parallelism itself",
 		"tool_choice.disable_parallel_tool_use")}
 }
@@ -121,14 +121,14 @@ func ruleModelRemapped(in ruleInput) []store.Warning {
 	}
 	target, recognized := in.opts.matchModel(in.meta.ModelRequested)
 	if !recognized {
-		return []store.Warning{warn("model_remapped", sevWarn,
+		return []store.Warning{warn(KindModelRemapped, sevWarn,
 			fmt.Sprintf("unrecognized model %s falls back to %s — quality and cost may differ from expectation",
 				in.meta.ModelRequested, target), "model")}
 	}
 	if strings.EqualFold(target, in.meta.ModelRequested) {
 		return nil // already a DeepSeek model: nothing is remapped
 	}
-	return []store.Warning{warn("model_remapped", sevInfo,
+	return []store.Warning{warn(KindModelRemapped, sevInfo,
 		fmt.Sprintf("%s → %s (billed at %s rates)", in.meta.ModelRequested, target, target), "model")}
 }
 
@@ -146,7 +146,7 @@ func ruleModelMappingDrift(in ruleInput) []store.Warning {
 	if !recognized || strings.EqualFold(target, in.usage.Model) {
 		return nil
 	}
-	return []store.Warning{warn("model_mapping_drift", sevWarn,
+	return []store.Warning{warn(KindModelMappingDrift, sevWarn,
 		fmt.Sprintf("config maps %s to %s but the response reports %s — the model map may be stale",
 			in.meta.ModelRequested, target, in.usage.Model), "model")}
 }
@@ -158,7 +158,7 @@ func ruleModelMappingDrift(in ruleInput) []store.Warning {
 func ruleUnsupportedContentBlocks(in ruleInput) []store.Warning {
 	var out []store.Warning
 	for _, typ := range in.meta.UnsupportedBlocks {
-		out = append(out, warn("unsupported_content_block", sevError,
+		out = append(out, warn(KindUnsupportedContentBlock, sevError,
 			fmt.Sprintf("content block type '%s' is not supported by DeepSeek's Anthropic endpoint; this request may fail or the block may be dropped",
 				typ), ""))
 	}
@@ -170,7 +170,7 @@ func ruleTopKIgnored(in ruleInput) []store.Warning {
 	if in.meta.TopK == nil {
 		return nil
 	}
-	return []store.Warning{warn("param_ignored", sevInfo,
+	return []store.Warning{warn(KindParamIgnored, sevInfo,
 		fmt.Sprintf("top_k=%d is accepted and ignored by DeepSeek", *in.meta.TopK), "top_k")}
 }
 
@@ -180,7 +180,7 @@ func ruleServiceTierIgnored(in ruleInput) []store.Warning {
 	if in.meta.ServiceTier == "" {
 		return nil
 	}
-	return []store.Warning{warn("param_ignored", sevInfo,
+	return []store.Warning{warn(KindParamIgnored, sevInfo,
 		fmt.Sprintf("service_tier=%s is accepted and ignored by DeepSeek", in.meta.ServiceTier), "service_tier")}
 }
 
@@ -190,7 +190,7 @@ func ruleContainerIgnored(in ruleInput) []store.Warning {
 	if !in.meta.ContainerPresent {
 		return nil
 	}
-	return []store.Warning{warn("param_ignored", sevInfo,
+	return []store.Warning{warn(KindParamIgnored, sevInfo,
 		"container is accepted and ignored by DeepSeek", "container")}
 }
 
@@ -199,7 +199,7 @@ func ruleMCPServersIgnored(in ruleInput) []store.Warning {
 	if !in.meta.MCPServersPresent {
 		return nil
 	}
-	return []store.Warning{warn("param_ignored", sevInfo,
+	return []store.Warning{warn(KindParamIgnored, sevInfo,
 		"mcp_servers is accepted and ignored by DeepSeek", "mcp_servers")}
 }
 
@@ -215,7 +215,7 @@ func ruleMaxTokensExceedsCeiling(in ruleInput) []store.Warning {
 	if !known || in.meta.MaxTokens <= ceiling {
 		return nil
 	}
-	return []store.Warning{warn("param_ignored", sevInfo,
+	return []store.Warning{warn(KindParamIgnored, sevInfo,
 		fmt.Sprintf("max_tokens=%d exceeds %s's %d-token ceiling; the request may be rejected or truncated",
 			in.meta.MaxTokens, target, ceiling), "max_tokens")}
 }
@@ -226,7 +226,7 @@ func ruleHeaderIgnored(in ruleInput) []store.Warning {
 	if !in.meta.HasAnthropicBeta {
 		return nil
 	}
-	return []store.Warning{warn("header_ignored", sevInfo,
+	return []store.Warning{warn(KindHeaderIgnored, sevInfo,
 		"anthropic-beta is ignored for /messages", "anthropic-beta")}
 }
 
@@ -244,7 +244,7 @@ func ruleUpstreamError(in ruleInput) []store.Warning {
 	if !ok {
 		return nil
 	}
-	return []store.Warning{warn("upstream_error", sevError, "upstream returned an error: "+msg, "error")}
+	return []store.Warning{warn(KindUpstreamError, sevError, "upstream returned an error: "+msg, "error")}
 }
 
 // apiError is the error object's shape on the Anthropic-compatible wire:
