@@ -51,7 +51,7 @@ sequenceDiagram
     loop per call in batch (prepareCall)
         Co->>Pa: ExtractMeta / ExtractUsage
         Co->>Se: Resolve(meta, now) — session id (pre-insert)
-        Co->>Pr: Compute(model, usage, table) — cost (pre-insert)
+        Co->>Pr: Compute(model, usage, table, startedAt) — cost, peak-aware (pre-insert)
     end
     Co->>St: InsertRequests(batch) — one transaction
     alt batch transaction fails
