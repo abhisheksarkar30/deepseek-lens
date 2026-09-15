@@ -82,3 +82,11 @@ coding session, so the diagnostic ships before the thing it diagnoses.
 - `internal/config/config_test.go` (create)
 - `cmd/lens/main.go` (create)
 - `.gitignore` (create — `*.db`, `*.db-wal`, `*.db-shm`, `config.toml`, `~/.deepseek-lens/`)
+
+## Review Notes (Phase 5.5, 2026-09-15)
+
+- **WARNING — the `lens doctor` subprocess test was not written.** The Test Specifications asked for
+  `doctor` driven via `exec` against a temp `HOME`; the suite covers `config.Load` and `Validate`
+  directly instead. Handler-level coverage is real and `docs/acceptance.md` ran the binary for real,
+  so no defect is hidden — but the specified test is absent.
+- `.gitignore` was appended to rather than created (all required patterns present).

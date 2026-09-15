@@ -113,3 +113,16 @@ wedged browser tab must not be able to slow the proxy. Same invariant, second ap
 - `internal/web/index.html`, `app.js`, `style.css` (create)
 - `internal/web/embed.go` (create — `//go:embed` FS export)
 - `internal/cli/serve.go` (modify — start the dashboard listener)
+
+## Review Notes (Phase 5.5, 2026-09-15)
+
+- **OK.** The `Msg→Detail`-adjacent JSON surface, the SSE broker's drop-slow-clients policy (500
+  events, stalled subscriber dropped, publisher bounded), and the embedded-asset endpoints are all
+  covered by real tests, and `/api/requests/{id}/replay` is correctly absent (br-GI-1-13's job).
+- **Honest flag.** `internal/api/publishing_store.go` is outside this bead's file list; the commit
+  body says so explicitly and explains why (the consumer's `Store` interface is satisfied
+  structurally, so no edit to `internal/consumer` was needed).
+- **WARNING — the "serve as a subprocess, then fetch `/api/requests`" E2E test was not written.**
+  Same gap as br-GI-1-08; covered manually in `docs/acceptance.md`.
+- A raw NUL byte in `app.js`'s grouping key made git treat the file as binary; fixed in `1003c56`
+  (see that commit for why reviewability of the flagship UI was worth the one-line change).

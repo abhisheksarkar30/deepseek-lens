@@ -110,3 +110,17 @@ serve dashboard queries without contending.
 - `internal/store/store_test.go` (create)
 - `internal/store/types.go` (create — `Request`, `Warning`, `Session`, `Filter`, `Summary`)
 - `go.mod` (modify — add `modernc.org/sqlite`)
+
+## Review Notes (Phase 5.5, 2026-09-15)
+
+- **WARNING, fixed after review — `RedactCheck` was never called.** The bead specifies it as a
+  startup self-test ("caught at boot rather than at rest"); nothing invoked it, so the check existed
+  and was tested in isolation while being inert at runtime. Now called from `lens serve` via
+  `cli.checkRedaction`, log-and-continue, with two tests pinning the call site (commit `6f3f147`).
+- **Flagging gap — `race_off_test.go` / `race_on_test.go` were added but never mentioned in the
+  commit body.** The build-tag shim relaxes the 10k-row timing budget only under `-race`, which is
+  the right call (race instrumentation overhead is not a regression), but an unannounced build-tag
+  pair is exactly the kind of thing a later reader misreads as a weakened assertion.
+- This bead's claim that all columns for all 13 later beads are created here is overbroad: the
+  `sessions` aggregates and `prefix_hash` arrived in br-GI-1-12, which is correct per that bead's own
+  description. See br-GI-1-12's notes.

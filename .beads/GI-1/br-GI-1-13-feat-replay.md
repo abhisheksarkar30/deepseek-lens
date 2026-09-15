@@ -151,3 +151,19 @@ nested JSON) is isolated from I/O so it can be tested exhaustively without a net
 - `internal/api/api.go` (modify — `POST /api/requests/{id}/replay`)
 - `internal/store/store.go` (modify — `replay_edits` column handling; column already exists from br-GI-1-06)
 - `internal/web/app.js`, `index.html` (modify — replay editor and comparison)
+
+## Review Notes (Phase 5.5, 2026-09-15)
+
+- **OK — the load-bearing security claim holds.** The 403 is returned before any upstream send on
+  both controls, and the tests assert the recording fake upstream saw **zero** hits on every
+  rejection path while the enabled happy path reaches it exactly once.
+- **OK — five out-of-list files, all flagged honestly** (`proxy.go`, `sink.go`, `consumer.go`,
+  `config.go`, `serve.go`). Each was the minimum needed: routing the replay through the live proxy
+  Handler is what preserves both the single-writer discipline and honest capture.
+- **WARNING — `lens replay --dump` opens a writer-capable store.** `store.Open` runs `schemaSQL` and
+  opens the writer pool, so a `--dump` during a live `serve` can issue `CREATE TABLE IF NOT EXISTS`
+  from a second connection, which makes the blanket "exactly one writer" claim narrowly false on
+  that path. Documented in the code and the commit body. The obvious fix (a `mode=ro` open) is not
+  available in the pinned `modernc.org/sqlite` version, which always opens
+  `READWRITE|CREATE` — see br-GI-1-06's notes — so this stays a known, bounded exception rather than
+  an oversight.

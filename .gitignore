@@ -32,11 +32,15 @@ go.work.sum
 # .vscode/
 
 # Local runtime state. The real files live in ~/.deepseek-lens/ (config.toml,
-# lens.db); these guard a repo-local override via --db or a local config file.
+# prices.toml, lens.db) — outside this repo, so gitignore has nothing to do
+# there (a literal "~/..." pattern doesn't expand to $HOME and would never
+# match it anyway). These guard only a repo-local override via --db-path,
+# --config, or the equivalent prices path.
 *.db
 *.db-wal
 *.db-shm
 config.toml
+prices.toml
 
 # Local cross-review artifacts (should never be committed)
 /**/*review*/

@@ -112,3 +112,13 @@ the documented ceiling.
 - `internal/cli/sessions.go` (create), `ls.go` (modify — `--session`), `stats.go` (modify — `--by session`)
 - `internal/api/api.go` (modify — real session endpoints)
 - `internal/web/app.js`, `index.html` (modify — session table and drill-down)
+
+## Review Notes (Phase 5.5, 2026-09-15)
+
+- **OK.** All 14 specified unit cases exist and assert the specified thing, including the inclusive
+  gap boundary, the older-timestamp direction, the null-prefix 1min/10min split, and the id regex.
+- **WARNING — `schema.sql` was modified without being flagged in the commit body.** This bead's
+  Files-to-Touch lists only `internal/store/store.go`, but its Description requires eight aggregate
+  columns plus `prefix_hash` and an index, so editing the schema was genuinely forced (the repo has
+  no migration framework by design). The change is right; the missing flag is the issue — every other
+  out-of-list edit in this story announced itself.

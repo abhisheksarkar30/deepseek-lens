@@ -202,6 +202,35 @@ point conforms to `Analyze(meta parse.Meta, usage parse.Usage, req *store.Reques
 | Replay write path | `lens replay` calls the running server's replay API — single writer preserved | CLI opens its own DB writer (breaks the single-writer discipline) |
 | CLI | stdlib `flag` | `cobra` unless ergonomics demand it |
 
+## Acceptance (br-GI-1-14, 2026-09-15)
+
+The ten-step run in `.beads/GI-1/br-GI-1-14-docs-acceptance.md` was executed against the real
+`https://api.deepseek.com/anthropic` endpoint and recorded verbatim in `docs/acceptance.md`.
+Everything below is measured, not projected.
+
+- **Steps 1–9 pass.** A real Claude Code 2.1.268 client and `curl` were proxied, captured, priced,
+  grouped, warned on, and replayed through the run.
+- **Model mapping is confirmed, not assumed.** `claude-sonnet-4-5` was served as `deepseek-flash`
+  and the response's own `usage.model` agreed with the shipped model map — no `model_mapping_drift`,
+  so risk 6 did not materialise on this traffic.
+- **The dropped-parameter engine fired on unmodified client traffic.** The CLI's own calls raised
+  `cache_control_ignored` (three sites), `budget_tokens_ignored` (31999), and `header_ignored`,
+  each on a `200`.
+- **Step 10 measured delta: +12.5 ms added first-byte latency** (warm medians, five paired runs,
+  direct 192.1 ms vs proxied 204.6 ms), against a 50 ms budget. The cold comparison shows the proxy
+  *faster* by 78.1 ms, which is connection pooling rather than proxy speed and is written up as such.
+  Upstream jitter (~±30 ms) is larger than the delta, so the figure is a recorded number to regress
+  against, not a precise instrument reading.
+- **Three open findings, all written up with causes**: a replay against a key-protected upstream is
+  answered `401` because lens stores `[redacted]` rather than a credential; `export
+  ANTHROPIC_BASE_URL=...` alone does not move a Claude Code install whose `settings.json` carries its
+  own `env` block; and graceful SIGINT shutdown cannot be raised against a native Windows process
+  from Git Bash, so the shutdown drain was not exercised. A fourth, cosmetic: Claude Code's
+  `HEAD /api/hello` probe is proxied and stored as a row.
+- **Not verified**: browser rendering of the dashboard (no browser here — step 8 verified HTTP, the
+  JSON API, and a live SSE event at 0.267 s, and claims nothing about pixels), the Cline path, and
+  DeepSeek's actual per-token prices (which is why the shipped table remains empty).
+
 ## Change History
 
 ### v2 — round 1 review (2026-09-14)
@@ -249,3 +278,9 @@ point conforms to `Analyze(meta parse.Meta, usage parse.Usage, req *store.Reques
   (v4), all 14 beads, and the spec, re-verified both round-3 findings as landed, and found no new
   inconsistency. The cross-review loop converged; no content change was made — this entry records the
   status marker only. The version number stays 4 (a status marker, not a content revision).
+
+### v5 — acceptance recorded (2026-09-15)
+- Added the `## Acceptance` section: the measured outcome of br-GI-1-14's ten-step run against the
+  real DeepSeek endpoint, with the step-10 latency delta recorded as a number and the run's findings
+  named. No plan content changed; the run confirmed the plan's assumptions (risk 6 in particular)
+  rather than revising them.

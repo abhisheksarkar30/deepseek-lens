@@ -114,3 +114,13 @@ reimplemented seven times.
   `serve.go` (create)
 - `internal/cli/cli_test.go` (create)
 - `cmd/lens/main.go` (modify — register the new subcommands)
+
+## Review Notes (Phase 5.5, 2026-09-15)
+
+- **OK** on all subcommands: 31 cli tests, the testable-function pattern held, and
+  `prices`/`replay` were registered as stubs with specific errors as the bead required.
+- **WARNING — the "`lens serve` as a subprocess, request, `lens ls`" integration test was not
+  written.** Flagged by the implementer at the time. The real end-to-end path is recorded instead in
+  `docs/acceptance.md`, so the behaviour is verified somewhere, just not as an automated test.
+- `prices.go` and `replay.go` were created here but were not in the bead's Files-to-Touch list; the
+  bead's own prose requires them, so the change is correct.
