@@ -333,13 +333,13 @@ func (a *api) stream(w http.ResponseWriter, r *http.Request) {
 }
 
 type healthResponse struct {
-	SinkAccepted      uint64 `json:"sink_accepted"`
-	SinkDropped       uint64 `json:"sink_dropped"`
-	ConsumerProcessed uint64 `json:"consumer_processed"`
-	ConsumerFailed    uint64 `json:"consumer_failed"`
-	ConsumerFlushes   uint64 `json:"consumer_flushes"`
+	SinkAccepted      uint64     `json:"sink_accepted"`
+	SinkDropped       uint64     `json:"sink_dropped"`
+	ConsumerProcessed uint64     `json:"consumer_processed"`
+	ConsumerFailed    uint64     `json:"consumer_failed"`
+	ConsumerFlushes   uint64     `json:"consumer_flushes"`
 	LastWriteAt       *time.Time `json:"last_write_at,omitempty"`
-	LastWriteAgeMs    int64  `json:"last_write_age_ms,omitempty"`
+	LastWriteAgeMs    int64      `json:"last_write_age_ms,omitempty"`
 }
 
 func (a *api) health(w http.ResponseWriter, r *http.Request) {
