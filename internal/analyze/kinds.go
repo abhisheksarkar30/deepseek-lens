@@ -24,6 +24,7 @@ const (
 	KindParamIgnored            Kind = "param_ignored"
 	KindHeaderIgnored           Kind = "header_ignored"
 	KindUpstreamError           Kind = "upstream_error"
+	KindPeakPricing             Kind = "peak_pricing"
 )
 
 // KindInfo pairs a Kind with the one sentence the README's warning table
@@ -86,6 +87,10 @@ var allKinds = []KindInfo{
 	{
 		KindUpstreamError,
 		"The upstream returned an error. Raised here when the error object arrives inside a 200 body (how the Anthropic wire reports overload and invalid requests once a stream has begun), and by the capture pipeline for a transport-level failure — the same kind, because it means the same thing to the reader.",
+	},
+	{
+		KindPeakPricing,
+		"The call landed inside DeepSeek's 01:00-04:00 or 06:00-10:00 UTC (Mon-Fri) peak-pricing window, so `cost_usd` reflects DeepSeek's 2x peak rate rather than the configured off-peak one.",
 	},
 }
 
