@@ -10,11 +10,13 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/abhisheksarkar30/deepseek-lens/internal/api"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/proxy"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/web"
 )
 
 // shutdownGrace bounds how long Serve waits for both http.Servers to
@@ -22,13 +24,10 @@ import (
 // shutdownBound drain (internal/consumer).
 const shutdownGrace = 5 * time.Second
 
-// Serve runs `lens serve`: the proxy listener (br-GI-1-03), a placeholder
-// dashboard listener, and the consumer (br-GI-1-07), in one process. The
-// dashboard here is intentionally a stub — the real internal/api +
-// internal/web land in br-GI-1-09, which depends on this bead and will
-// replace this handler; this bead only proves the second listener binds
-// and serves. It blocks until SIGINT, then shuts down both servers with a
-// bounded drain.
+// Serve runs `lens serve`: the proxy listener (br-GI-1-03), the dashboard
+// listener (internal/api + internal/web, br-GI-1-09), and the consumer
+// (br-GI-1-07), in one process. It blocks until SIGINT, then shuts down both
+// servers with a bounded drain.
 func Serve(args []string) error {
 	cfg, err := config.Load(translateNoCapture(args))
 	if err != nil {
@@ -45,16 +44,26 @@ func Serve(args []string) error {
 	defer st.Close()
 
 	sk := sink.New(sink.DefaultCapacity)
+	broker := api.NewBroker()
+	// PublishingStore wraps st so the consumer's writes also publish SSE
+	// events (br-GI-1-09's broker) — see internal/api/publishing_store.go's
+	// doc comment for why this lives here as a decorator instead of a
+	// consumer.go change: consumer.go is outside this bead's Files-to-Touch
+	// list, and consumer.New's Store parameter is already a narrow
+	// interface anything satisfies structurally.
+	pubStore := api.NewPublishingStore(st, broker)
 	// This bead injects a nil SessionResolver, matching br-GI-1-07's own
 	// convention (session resolution lands in br-GI-1-12) — Request.SessionID
 	// simply stays unset until then.
-	cons := consumer.New(sk, st, nil)
+	cons := consumer.New(sk, pubStore, nil)
 
 	proxySrv, err := proxy.NewServer(cfg, sk)
 	if err != nil {
 		return fmt.Errorf("serve: build proxy: %w", err)
 	}
-	dashSrv := &http.Server{Addr: cfg.DashboardAddr, Handler: placeholderDashboard(cfg)}
+	// The dashboard's read endpoints use the bare *store.Store (not
+	// pubStore) so a read can never itself trigger a broker publish.
+	dashSrv := &http.Server{Addr: cfg.DashboardAddr, Handler: api.New(st, sk, cons, broker, web.Files)}
 
 	printBanner(os.Stdout, cfg)
 
@@ -101,22 +110,6 @@ func Serve(args []string) error {
 	<-consumerDone
 
 	return nil
-}
-
-// placeholderDashboard is the stand-in dashboard handler for this bead.
-// br-GI-1-09 replaces it with the real internal/api + internal/web; the
-// `/api/requests/{id}/replay` endpoint (br-GI-1-13, guarded by an
-// Origin/Host allowlist, gated on cfg.ReplayEnabled) is not implemented
-// here either — both are explicitly out of this bead's scope.
-func placeholderDashboard(cfg *config.Config) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "deepseek-lens dashboard: not yet implemented (br-GI-1-09)")
-		if cfg.ReplayEnabled {
-			fmt.Fprintln(w, "replay is enabled in config, but the endpoint is not implemented yet (br-GI-1-13)")
-		}
-	})
 }
 
 // printBanner prints the copy-pasteable ANTHROPIC_BASE_URL line, the

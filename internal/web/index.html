@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek Lens</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="app-header">
+  <h1>DeepSeek Lens</h1>
+  <div class="totals" id="totals" aria-label="session totals">
+    <span><strong id="total-calls">0</strong> calls</span>
+    <span><strong id="total-tokens">0</strong> tokens</span>
+    <span><strong id="total-cost">$0.00</strong></span>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-view="feed" type="button">Live Feed</button>
+    <button class="tab" data-view="warnings" type="button">Warnings</button>
+    <button class="tab" data-view="stats" type="button">Stats</button>
+    <button class="tab" data-view="sessions" type="button">Sessions</button>
+  </nav>
+</header>
+
+<main>
+  <section id="view-feed" class="view">
+    <div class="feed-controls">
+      <button id="pause-btn" type="button">Pause</button>
+      <span id="feed-status" class="feed-status">live</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th><th>Duration</th><th>Model</th><th>Tokens</th>
+            <th>Cost</th><th>Status</th><th>&#9888;</th>
+          </tr>
+        </thead>
+        <tbody id="feed-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="view-warnings" class="view" hidden>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Kind</th><th>Severity</th><th>Count</th><th>Last Seen</th></tr></thead>
+        <tbody id="warnings-groups"></tbody>
+      </table>
+    </div>
+    <div id="warnings-detail" class="detail-panel" hidden>
+      <h3 id="warnings-detail-title"></h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Request</th><th>Severity</th><th>When</th><th>Message</th></tr></thead>
+          <tbody id="warnings-detail-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-stats" class="view" hidden>
+    <div class="table-wrap">
+      <table id="stats-summary">
+        <tbody></tbody>
+      </table>
+    </div>
+    <h3>Calls per day</h3>
+    <svg id="stats-chart" viewBox="0 0 600 200" preserveAspectRatio="xMidYMid meet" role="img" aria-label="calls per day line chart"></svg>
+    <h3>By model</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Model</th><th>Calls</th><th>In/Out Tokens</th><th>Cost</th></tr></thead>
+        <tbody id="stats-by-model"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="view-sessions" class="view" hidden>
+    <p class="hint">Session drill-down lands in a later release; this is the raw session list.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Session</th><th>First Seen</th><th>Last Seen</th><th>Requests</th></tr></thead>
+        <tbody id="sessions-body"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<div id="detail-modal" class="modal" hidden>
+  <div class="modal-content">
+    <button id="detail-close" class="modal-close" type="button" aria-label="close">&times;</button>
+    <div id="detail-body"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
