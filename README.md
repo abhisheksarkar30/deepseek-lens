@@ -38,6 +38,18 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
 claude
 ```
 
+If that has no effect — the session is answered as usual and `lens ls` stays empty — check
+`~/.claude/settings.json`. Its `env` block **takes precedence over the shell environment**, so an
+install that already pins `ANTHROPIC_BASE_URL` there ignores your `export`. Point it at lens for one
+run instead of editing the file:
+
+```sh
+claude --settings <(echo '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8787"}}')
+```
+
+(On Windows, write that JSON to a file and pass its path — process substitution is not available in
+`cmd` or PowerShell.)
+
 **Cline** — Cline runs inside your editor, so it inherits the editor's environment, not your
 terminal's. Either set the Anthropic provider's API base URL to `http://127.0.0.1:8787` in Cline's
 settings, or launch the editor itself from a shell that has the variable exported:
