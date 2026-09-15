@@ -13,6 +13,10 @@ See `docs/planning/GI-1-deepseek-lens-v1.md` for the converged plan (v4, 4 revie
 `docs/superpowers/specs/2026-09-14-deepseek-lens-design.md` for the design spec. The work items are
 `.beads/GI-1/br-GI-1-01` … `-14`; each bead names its own file list and outcome definition.
 
+For a categorized, cited map of the codebase (architecture, data model, API surface, workflows,
+conventions, build/run, CLI, security, testing) meant for an AI agent picking this repo up cold, see
+[docs/context/INDEX.md](docs/context/INDEX.md).
+
 ## Setup
 
 One step per clone, with no build system to do it for you:
