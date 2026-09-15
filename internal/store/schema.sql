@@ -34,7 +34,12 @@ CREATE TABLE IF NOT EXISTS requests (
     cost_source            TEXT,
     replay_of              INTEGER,
     replay_edits           TEXT,
-    prefix_hash            TEXT NOT NULL DEFAULT ''
+    prefix_hash            TEXT NOT NULL DEFAULT '',
+    -- SET NULL, not the default RESTRICT: PurgeOlderThan must still be able
+    -- to delete an old original that a newer, kept replay row points back
+    -- to (fail open) — losing that linkage is an acceptable degradation,
+    -- failing the purge is not.
+    FOREIGN KEY (replay_of) REFERENCES requests(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_requests_started_at ON requests(started_at);
@@ -71,7 +76,8 @@ CREATE TABLE IF NOT EXISTS warnings (
     severity   TEXT NOT NULL,
     detail     TEXT NOT NULL,
     path       TEXT NOT NULL DEFAULT '',
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (request_id) REFERENCES requests(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_warnings_request_id ON warnings(request_id);

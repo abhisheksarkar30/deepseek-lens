@@ -64,12 +64,15 @@ enforced in Go:
 - `warnings.kind` — one of the `analyze.Kind` constants (`cache_control_ignored`,
   `budget_tokens_ignored`, `top_p_clamped`, `top_p_below_floor`, `parallel_tool_use_ignored`,
   `model_remapped`, `model_mapping_drift`, `unsupported_content_block`, `param_ignored`,
-  `header_ignored`, `upstream_error`) — see [internal/analyze/kinds.go](../../internal/analyze/kinds.go).
+  `header_ignored`, `upstream_error`) — see [internal/analyze/kinds.go](../../internal/analyze/kinds.go)
+  — plus `analyzer_panic`, which the consumer itself attaches (not an `analyze.Kind`) when an
+  analyzer panics, see [internal/consumer/consumer.go](../../internal/consumer/consumer.go).
 - `warnings.severity` — `info` / `warn` / `error`, assigned per-rule in
   [internal/analyze/rules.go](../../internal/analyze/rules.go).
-- `requests.cost_source` — one of pricing's four values (`priced`, `unpriced`, `unknown-model`, or
-  similar), set by the cost step in
-  [internal/consumer/consumer.go:374-388](../../internal/consumer/consumer.go).
+- `requests.cost_source` — one of `pricing.CostSource`'s four values: `configured`, `unpriced`,
+  `unknown-model`, `approximate`, set by the cost step in
+  [internal/consumer/consumer.go:374-388](../../internal/consumer/consumer.go) — see
+  [internal/pricing/pricing.go](../../internal/pricing/pricing.go).
 
 `requests.prefix_hash` and `sessions.prefix_hash` carry a **load-bearing three-way meaning**
 (documented in [internal/store/schema.sql:43-49](../../internal/store/schema.sql)): `NULL` means the

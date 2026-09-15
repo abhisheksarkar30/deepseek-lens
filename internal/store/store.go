@@ -34,9 +34,13 @@ const DefaultLimit = 1000
 // pragmaDSN is appended to the database file path for both the writer and
 // reader connections: WAL so reader queries never block on an open writer
 // transaction, a busy timeout so momentary contention retries instead of
-// erroring, and NORMAL synchronous (safe under WAL — only a power loss, not
-// a process crash, can lose the most recent commit).
-const pragmaDSN = "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
+// erroring, NORMAL synchronous (safe under WAL — only a power loss, not
+// a process crash, can lose the most recent commit), and foreign_keys so
+// schema.sql's FOREIGN KEY declarations (warnings.request_id,
+// requests.replay_of) are actually enforced — SQLite ignores them silently
+// otherwise. SQLite pragmas are per-connection, so this must ride the DSN
+// rather than a one-time PRAGMA statement.
+const pragmaDSN = "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
 
 const redactedHeaderValue = "[redacted]"
 
@@ -113,7 +117,15 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("store: apply schema: %w", err)
 	}
 
+	// WAL mode's -wal/-shm sidecar files hold the same request/response body
+	// content as the main file (uncommitted pages, in the -wal's case) —
+	// they need the same 0600 as dbPath, not whatever the process umask
+	// would otherwise leave them at. Best-effort, like the chmod above:
+	// meaningless on Windows, and a permission failure here must not fail
+	// Open (fail open).
 	_ = os.Chmod(dbPath, 0o600)
+	_ = os.Chmod(dbPath+"-wal", 0o600)
+	_ = os.Chmod(dbPath+"-shm", 0o600)
 
 	return &Store{writer: writer, reader: reader}, nil
 }
@@ -716,7 +728,11 @@ func (s *Store) ListWarnings(ctx context.Context, f Filter) ([]*Warning, error) 
 }
 
 // PurgeOlderThan deletes requests started before cutoff and their warnings,
-// as one transaction, and returns the number of requests deleted.
+// as one transaction, and returns the number of requests deleted. Any
+// session that had requests purged out of it is reconciled in the same
+// transaction (see reconcileSession) — sessions' counters are otherwise
+// incrementally maintained (UpsertSession only ever adds), so without this a
+// purged session's row would keep reporting calls that no longer exist.
 func (s *Store) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
 	tx, err := s.writer.BeginTx(ctx, nil)
 	if err != nil {
@@ -725,6 +741,26 @@ func (s *Store) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, er
 	defer tx.Rollback()
 
 	before := cutoff.UnixNano()
+
+	sessionRows, err := tx.QueryContext(ctx,
+		"SELECT DISTINCT session_id FROM requests WHERE started_at < ? AND session_id IS NOT NULL", before)
+	if err != nil {
+		return 0, fmt.Errorf("store: purge: affected sessions: %w", err)
+	}
+	var affected []string
+	for sessionRows.Next() {
+		var id string
+		if err := sessionRows.Scan(&id); err != nil {
+			sessionRows.Close()
+			return 0, fmt.Errorf("store: purge: affected sessions: %w", err)
+		}
+		affected = append(affected, id)
+	}
+	if err := sessionRows.Err(); err != nil {
+		return 0, fmt.Errorf("store: purge: affected sessions: %w", err)
+	}
+	sessionRows.Close()
+
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM warnings WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)", before,
 	); err != nil {
@@ -739,10 +775,82 @@ func (s *Store) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, er
 	if err != nil {
 		return 0, fmt.Errorf("store: purge: rows affected: %w", err)
 	}
+
+	for _, id := range affected {
+		if err := reconcileSession(ctx, tx, id); err != nil {
+			return 0, fmt.Errorf("store: purge: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("store: purge: commit: %w", err)
 	}
 	return n, nil
+}
+
+// reconcileSession recomputes sessionID's row from whatever requests/warnings
+// remain for it, or deletes the row entirely if none remain. It exists
+// because UpsertSession's counters are additive deltas — correct for normal
+// ingest, but with nothing to subtract once a contributing row is gone —
+// so after a purge the only correct move is to rebuild from what is left,
+// not to try to net out what was removed.
+func reconcileSession(ctx context.Context, tx *sql.Tx, sessionID string) error {
+	var (
+		count                    int64
+		inputTok, outputTok      int64
+		costUSD                  sql.NullFloat64
+		pricedCount, unpricedCnt int64
+		firstSeen, lastSeen      sql.NullInt64
+	)
+	err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+		       SUM(cost_usd), COUNT(cost_usd), COUNT(*) - COUNT(cost_usd),
+		       MIN(started_at), MAX(started_at)
+		FROM requests WHERE session_id = ?`, sessionID,
+	).Scan(&count, &inputTok, &outputTok, &costUSD, &pricedCount, &unpricedCnt, &firstSeen, &lastSeen)
+	if err != nil {
+		return fmt.Errorf("reconcile session %s: aggregate: %w", sessionID, err)
+	}
+
+	if count == 0 {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", sessionID); err != nil {
+			return fmt.Errorf("reconcile session %s: delete: %w", sessionID, err)
+		}
+		return nil
+	}
+
+	var modelSet sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+		SELECT GROUP_CONCAT(model_resolved) FROM (
+			SELECT DISTINCT model_resolved FROM requests
+			WHERE session_id = ? AND model_resolved != '' ORDER BY model_resolved)`,
+		sessionID,
+	).Scan(&modelSet); err != nil {
+		return fmt.Errorf("reconcile session %s: model set: %w", sessionID, err)
+	}
+
+	var warningCount int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM warnings w JOIN requests r ON r.id = w.request_id WHERE r.session_id = ?`,
+		sessionID,
+	).Scan(&warningCount); err != nil {
+		return fmt.Errorf("reconcile session %s: warning count: %w", sessionID, err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE sessions SET
+			first_seen = ?, last_seen = ?, request_count = ?,
+			total_input_tokens = ?, total_output_tokens = ?, total_cost_usd = ?,
+			priced_count = ?, unpriced_count = ?, model_set = ?, warning_count = ?
+		WHERE id = ?`,
+		firstSeen.Int64, lastSeen.Int64, count,
+		inputTok, outputTok, costUSD.Float64,
+		pricedCount, unpricedCnt, modelSet.String, warningCount,
+		sessionID)
+	if err != nil {
+		return fmt.Errorf("reconcile session %s: update: %w", sessionID, err)
+	}
+	return nil
 }
 
 // RedactCheck is a startup self-test: it scans every row's stored header
@@ -765,39 +873,52 @@ func (s *Store) RedactCheck(ctx context.Context) error {
 		if err := rows.Scan(&id, &reqHeaders, &respHeaders); err != nil {
 			return fmt.Errorf("store: redact check: %w", err)
 		}
-		if v, leaked := leakedAPIKey(reqHeaders); leaked {
-			return fmt.Errorf("store: redact check: request %d: x-api-key value %q reachable in req_headers", id, v)
+		if name, v, leaked := leakedSensitiveHeader(reqHeaders); leaked {
+			return fmt.Errorf("store: redact check: request %d: %s value %q reachable in req_headers", id, name, v)
 		}
-		if v, leaked := leakedAPIKey(respHeaders); leaked {
-			return fmt.Errorf("store: redact check: request %d: x-api-key value %q reachable in resp_headers", id, v)
+		if name, v, leaked := leakedSensitiveHeader(respHeaders); leaked {
+			return fmt.Errorf("store: redact check: request %d: %s value %q reachable in resp_headers", id, name, v)
 		}
 	}
 	return rows.Err()
 }
 
-// leakedAPIKey reports whether headerJSON — a JSON object mapping header
-// name to a string or array-of-string value, the shape json.Marshal
-// produces for an http.Header — contains a non-empty, non-redacted
-// x-api-key value.
-func leakedAPIKey(headerJSON string) (string, bool) {
+// redactCheckHeaders is the belt-and-braces list RedactCheck scans for —
+// kept independently of internal/proxy/redact.go's sensitiveHeaders rather
+// than importing it, since the point of this self-test is to verify
+// redaction actually happened, not to trust the same list that decided it.
+var redactCheckHeaders = []string{"x-api-key", "authorization", "cookie"}
+
+// leakedSensitiveHeader reports whether headerJSON — a JSON object mapping
+// header name to a string or array-of-string value, the shape
+// json.Marshal produces for an http.Header — contains a non-empty,
+// non-redacted value for any of redactCheckHeaders.
+func leakedSensitiveHeader(headerJSON string) (name, value string, leaked bool) {
 	if headerJSON == "" {
-		return "", false
+		return "", "", false
 	}
 	var obj map[string]interface{}
 	if err := json.Unmarshal([]byte(headerJSON), &obj); err != nil {
-		return "", false
+		return "", "", false
 	}
 	for k, v := range obj {
-		if !strings.EqualFold(k, "x-api-key") {
+		matched := ""
+		for _, want := range redactCheckHeaders {
+			if strings.EqualFold(k, want) {
+				matched = want
+				break
+			}
+		}
+		if matched == "" {
 			continue
 		}
 		for _, sv := range flattenStrings(v) {
 			if sv != "" && sv != redactedHeaderValue {
-				return sv, true
+				return matched, sv, true
 			}
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // flattenStrings extracts every string leaf out of v, which is either a

@@ -61,11 +61,11 @@ func runLS(args []string, w io.Writer, st *store.Store) error {
 	ctx := context.Background()
 	reqs, err := st.ListRequests(ctx, filter)
 	if err != nil {
-		return fmt.Errorf("list requests: %w", err)
+		return fmt.Errorf("ls: list requests: %w", err)
 	}
 	warnedIDs, err := warnedRequestIDs(ctx, st)
 	if err != nil {
-		return fmt.Errorf("list warnings: %w", err)
+		return fmt.Errorf("ls: list warnings: %w", err)
 	}
 
 	if *jsonOut {

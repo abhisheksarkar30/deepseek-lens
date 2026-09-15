@@ -57,7 +57,7 @@ func runReplay(args []string, w io.Writer, cfg *config.Config) error {
 	// Usage and flag errors go to w rather than os.Stderr, which keeps the
 	// command's help testable through the same injected writer as its output.
 	fs.SetOutput(w)
-	var sets stringList
+	var sets repeatedFlag
 	fs.Var(&sets, "set", "<jsonpath>=<value> to change in the body before sending (repeatable)")
 	dump := fs.String("dump", "", "write the edited body to this path and exit without sending (local only)")
 	noCapture := fs.Bool("no-capture", false, "send the replay without recording it")
@@ -333,15 +333,4 @@ func displayOrDash(s string) string {
 		return "—"
 	}
 	return s
-}
-
-// stringList is a repeatable string flag — stdlib flag has no built-in for
-// `--set a=1 --set b=2`.
-type stringList []string
-
-func (s *stringList) String() string { return strings.Join(*s, ",") }
-
-func (s *stringList) Set(v string) error {
-	*s = append(*s, v)
-	return nil
 }

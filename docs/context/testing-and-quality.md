@@ -10,8 +10,10 @@
 | Store race coverage | Split race-on/race-off test files, run under `go test -race` | [internal/store/race_on_test.go](../../internal/store/race_on_test.go), [internal/store/race_off_test.go](../../internal/store/race_off_test.go) | — |
 | Documentation-consistency | A test that diffs generated warning descriptions against README prose | [internal/analyze/readme_test.go](../../internal/analyze/readme_test.go) | — |
 
-As of this doc's generation, `go test ./...` is green across every package with tests (`cmd/lens` and
-`internal/web` have none, by design — no logic to test).
+As of this doc's generation, `go test ./...` is green across every package with tests (`cmd/lens` has
+none, by design; `internal/web` has none by the same convention, even though `app.js` does carry real
+logic — grouping/formatting helpers such as `groupWarnings`/`groupSessionWarnings` — that convention
+has not yet extended to a JS test runner).
 
 ## Coverage
 
@@ -34,8 +36,13 @@ As of this doc's generation, `go test ./...` is green across every package with 
 - Doctor's live-stats check, both server-up and server-down paths —
   `TestDoctorReportsLiveStatsFromRunningServer`, `TestDoctorWarnsWhenServerNotRunning`
   ([internal/cli/cli_test.go](../../internal/cli/cli_test.go)).
-- Store's single-writer discipline under concurrency — race-on/race-off test pair
-  ([internal/store/race_on_test.go](../../internal/store/race_on_test.go)).
+- Store's single-writer discipline under concurrency —
+  `TestConcurrentInsertsSerialize` ([internal/store/store_test.go](../../internal/store/store_test.go)),
+  which runs unconditionally (no `//go:build race` tag). The race-on/race-off test pair
+  ([internal/store/race_on_test.go](../../internal/store/race_on_test.go),
+  [internal/store/race_off_test.go](../../internal/store/race_off_test.go)) is a smaller, differently-scoped
+  thing: it only relaxes a performance test's timing budget under `go test -race`'s instrumentation
+  overhead, not a concurrency-correctness test itself.
 
 **Known gaps:** none explicitly flagged in code (`TODO`/`FIXME`) as untested at review time; the
 `security-and-permissions.md` file notes one open question (body-content secret scanning) that has no

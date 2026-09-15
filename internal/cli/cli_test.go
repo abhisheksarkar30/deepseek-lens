@@ -815,6 +815,61 @@ func TestTailPlainOutputWhenNotTTY(t *testing.T) {
 	}
 }
 
+func TestTailFiltersBySession(t *testing.T) {
+	st := newTestStore(t)
+	seedRequest(t, st, func(r *store.Request) {
+		sid := "sess-a"
+		r.SessionID = &sid
+		r.ModelResolved = "deepseek-in-session"
+	})
+	seedRequest(t, st, func(r *store.Request) {
+		sid := "sess-b"
+		r.SessionID = &sid
+		r.ModelResolved = "deepseek-other-session"
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	var buf bytes.Buffer
+	if err := runTail(ctx, []string{"--session", "sess-a"}, &buf, st); err != nil {
+		t.Fatalf("runTail: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "deepseek-in-session") {
+		t.Errorf("tail --session sess-a missing the matching request:\n%s", out)
+	}
+	if strings.Contains(out, "deepseek-other-session") {
+		t.Errorf("tail --session sess-a leaked another session's request:\n%s", out)
+	}
+}
+
+func TestTailFiltersByWarn(t *testing.T) {
+	st := newTestStore(t)
+	warned := seedRequest(t, st, func(r *store.Request) { r.ModelResolved = "deepseek-warned" })
+	seedRequest(t, st, func(r *store.Request) { r.ModelResolved = "deepseek-unwarned" })
+	if err := st.InsertWarnings(context.Background(), warned.ID, []store.Warning{
+		{Kind: "k", Severity: "warn", Detail: "m", CreatedAt: time.Now()},
+	}); err != nil {
+		t.Fatalf("InsertWarnings: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	var buf bytes.Buffer
+	if err := runTail(ctx, []string{"--warn"}, &buf, st); err != nil {
+		t.Fatalf("runTail: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "deepseek-warned") {
+		t.Errorf("tail --warn missing the warned request:\n%s", out)
+	}
+	if strings.Contains(out, "deepseek-unwarned") {
+		t.Errorf("tail --warn leaked the unwarned request:\n%s", out)
+	}
+}
+
 // TestServeRedactionCheckReportsALeak proves the boot self-test is actually
 // wired and notifies: a stored request whose header JSON still carries a
 // reachable x-api-key must produce a logged line naming that request. This

@@ -57,7 +57,7 @@ func (r *Rates) Set(field string, v float64) error {
 	case "cache_write":
 		r.CacheWrite = p
 	default:
-		return fmt.Errorf("unknown rate field %q (want input, output, cache_read, or cache_write)", field)
+		return fmt.Errorf("pricing: set rate: unknown rate field %q (want input, output, cache_read, or cache_write)", field)
 	}
 	return nil
 }

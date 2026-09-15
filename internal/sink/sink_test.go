@@ -1,7 +1,6 @@
 package sink
 
 import (
-	"context"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +8,15 @@ import (
 
 func newCall() *CapturedCall {
 	return &CapturedCall{StartedAt: time.Now(), Method: "POST", Path: "/v1/chat/completions"}
+}
+
+func TestNewNonPositiveCapacityFallsBackToDefault(t *testing.T) {
+	for _, capacity := range []int{0, -1} {
+		s := New(capacity)
+		if got := cap(s.ch); got != DefaultCapacity {
+			t.Errorf("New(%d): channel capacity = %d, want DefaultCapacity (%d)", capacity, got, DefaultCapacity)
+		}
+	}
 }
 
 func TestSubmitEmptySink(t *testing.T) {
@@ -113,7 +121,7 @@ func TestCloseTerminatesDrainRange(t *testing.T) {
 		s.Submit(newCall())
 	}
 
-	ch := s.Drain(context.Background())
+	ch := s.Drain()
 	s.Close()
 
 	got := 0
@@ -143,7 +151,7 @@ func TestConcurrentSubmitAndConsume(t *testing.T) {
 	consumed := 0
 	consumerDone := make(chan struct{})
 	go func() {
-		for range s.Drain(context.Background()) {
+		for range s.Drain() {
 			consumed++
 		}
 		close(consumerDone)

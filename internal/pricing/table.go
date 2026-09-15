@@ -56,11 +56,11 @@ func Load(path string) (Table, error) {
 		return Default(), nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading price table: %w", err)
+		return nil, fmt.Errorf("pricing: load: reading price table: %w", err)
 	}
 	t, err := parseTable(string(data))
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("pricing: load: %s: %w", path, err)
 	}
 	for model, r := range Default() {
 		if _, ok := t[model]; !ok {
@@ -153,7 +153,7 @@ func validModel(s string) bool {
 func Save(path string, t Table) error {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return fmt.Errorf("creating price dir %s: %w", dir, err)
+			return fmt.Errorf("pricing: save: creating price dir %s: %w", dir, err)
 		}
 	}
 
@@ -177,7 +177,7 @@ func Save(path string, t Table) error {
 		}
 	}
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
-		return fmt.Errorf("writing price table: %w", err)
+		return fmt.Errorf("pricing: save: writing price table: %w", err)
 	}
 	return nil
 }

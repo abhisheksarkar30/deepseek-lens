@@ -44,13 +44,13 @@ func runExport(args []string, w io.Writer, st *store.Store) error {
 
 	reqs, err := st.ListRequests(context.Background(), filter)
 	if err != nil {
-		return fmt.Errorf("list requests: %w", err)
+		return fmt.Errorf("export: list requests: %w", err)
 	}
 
 	enc := json.NewEncoder(w)
 	for _, r := range reqs {
 		if err := enc.Encode(r); err != nil {
-			return fmt.Errorf("encode request %d: %w", r.ID, err)
+			return fmt.Errorf("export: encode request %d: %w", r.ID, err)
 		}
 	}
 	return nil

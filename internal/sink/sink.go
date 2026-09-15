@@ -5,7 +5,6 @@
 package sink
 
 import (
-	"context"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -93,9 +92,10 @@ func (s *Sink) Stats() (accepted, dropped uint64) {
 }
 
 // Drain returns the receive side of the channel for the consumer to range
-// over. The consumer owns reading; it should stop when ctx is done.
-func (s *Sink) Drain(ctx context.Context) <-chan *CapturedCall {
-	_ = ctx
+// over. Drain itself does no waiting or cancellation — the caller owns
+// reading and is the one that should stop selecting on this channel when
+// its own context is done (consumer.Run does, alongside this channel).
+func (s *Sink) Drain() <-chan *CapturedCall {
 	return s.ch
 }
 

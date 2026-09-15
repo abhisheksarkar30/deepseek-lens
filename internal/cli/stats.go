@@ -53,15 +53,15 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 	ctx := context.Background()
 	summary, err := st.StatsSummary(ctx, sinceTime)
 	if err != nil {
-		return fmt.Errorf("stats summary: %w", err)
+		return fmt.Errorf("stats: summary: %w", err)
 	}
 	byModel, err := st.StatsByModel(ctx, sinceTime)
 	if err != nil {
-		return fmt.Errorf("stats by model: %w", err)
+		return fmt.Errorf("stats: by model: %w", err)
 	}
 	byDay, err := st.StatsByDay(ctx, sinceTime)
 	if err != nil {
-		return fmt.Errorf("stats by day: %w", err)
+		return fmt.Errorf("stats: by day: %w", err)
 	}
 	// Only fetched when asked for: the session ranking reads the sessions
 	// table's own running totals, so there is nothing to compute speculatively.
@@ -69,7 +69,7 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 	if *by == "session" {
 		bySession, err = st.StatsBySession(ctx, sinceTime)
 		if err != nil {
-			return fmt.Errorf("stats by session: %w", err)
+			return fmt.Errorf("stats: by session: %w", err)
 		}
 	}
 
@@ -189,7 +189,7 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 // calls would report a total the tool cannot actually know — the whole point
 // of making "unpriced" a first-class state.
 //
-// priced is the group's total call count, since unpriced is always a subset
+// count is the group's total call count, since unpriced is always a subset
 // of it.
 func costCell(total float64, count, unpriced int) string {
 	switch {

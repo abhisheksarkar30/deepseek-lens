@@ -16,9 +16,6 @@ func headers(kv ...string) http.Header {
 	return h
 }
 
-func floatPtr(f float64) *float64 { return &f }
-func intPtr(i int) *int           { return &i }
-
 func TestExtractMeta_FullRealisticRequest(t *testing.T) {
 	body := []byte(`{
 		"model": "claude-sonnet-5",
@@ -295,6 +292,21 @@ func TestExtractMeta_SessionHeader(t *testing.T) {
 	got = ExtractMeta([]byte(`{}`), nil)
 	if got.SessionHeader != "" {
 		t.Errorf("SessionHeader = %q, want empty", got.SessionHeader)
+	}
+}
+
+func TestExtractMeta_SessionHeaderOverlongIsRejected(t *testing.T) {
+	ok := strings.Repeat("a", maxSessionHeaderLen)
+	got := ExtractMeta([]byte(`{}`), headers("x-lens-session", ok))
+	if got.SessionHeader != ok {
+		t.Errorf("SessionHeader at the cap: got len %d, want the full value kept", len(got.SessionHeader))
+	}
+
+	tooLong := ok + "a"
+	got = ExtractMeta([]byte(`{}`), headers("x-lens-session", tooLong))
+	if got.SessionHeader != "" {
+		t.Errorf("SessionHeader over the cap = %q (len %d), want empty (fall back to the prefix/gap heuristic)",
+			got.SessionHeader, len(got.SessionHeader))
 	}
 }
 

@@ -127,7 +127,7 @@ tbody tr:hover { background: var(--row-hover); }
   text-transform: uppercase;
 }
 .sev-error { background: var(--sev-error-bg); color: var(--sev-error-fg); }
-.sev-warn, .sev-warning { background: var(--sev-warn-bg); color: var(--sev-warn-fg); }
+.sev-warn { background: var(--sev-warn-bg); color: var(--sev-warn-fg); }
 .sev-info { background: var(--sev-info-bg); color: var(--sev-info-fg); }
 
 .hint { color: var(--fg-muted); font-size: 0.85rem; }

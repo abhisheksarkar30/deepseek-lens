@@ -35,7 +35,7 @@ func runSessions(args []string, w io.Writer, st *store.Store) error {
 
 	sessions, err := st.ListSessions(context.Background())
 	if err != nil {
-		return fmt.Errorf("list sessions: %w", err)
+		return fmt.Errorf("sessions: list sessions: %w", err)
 	}
 
 	now := time.Now()

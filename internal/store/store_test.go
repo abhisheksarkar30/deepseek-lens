@@ -26,7 +26,11 @@ func newTestStore(t *testing.T) *Store {
 }
 
 // fullRequest returns a fully-populated Request fixture, every nullable
-// field set to a non-nil value, so round-trip tests exercise every column.
+// field set to a non-nil value except ReplayOf, so round-trip tests exercise
+// every column. ReplayOf is left nil here because it is a real foreign key
+// (schema.sql) into requests.id: a fixture value has nothing to reference,
+// so tests that care about ReplayOf's round trip (TestRoundTrip) set it to
+// an actually-inserted row's id instead.
 func fullRequest() *Request {
 	stopReason := "end_turn"
 	errorText := "upstream 502"
@@ -34,7 +38,6 @@ func fullRequest() *Request {
 	sessionID := "sess-abc"
 	costUSD := 0.1234
 	costSource := "pricing-table-v1"
-	replayOf := int64(7)
 	replayEdits := `{"max_tokens":512}`
 	return &Request{
 		StartedAt:           time.Date(2026, 1, 2, 3, 4, 5, 6000, time.UTC),
@@ -60,7 +63,6 @@ func fullRequest() *Request {
 		SessionID:           &sessionID,
 		CostUSD:             &costUSD,
 		CostSource:          &costSource,
-		ReplayOf:            &replayOf,
 		ReplayEdits:         &replayEdits,
 		PrefixHash:          "abcdef0123456789",
 	}
@@ -173,7 +175,13 @@ func TestRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
+	base, err := s.InsertRequest(ctx, fullRequest())
+	if err != nil {
+		t.Fatalf("InsertRequest(base): %v", err)
+	}
+
 	want := fullRequest()
+	want.ReplayOf = &base
 	id, err := s.InsertRequest(ctx, want)
 	if err != nil {
 		t.Fatalf("InsertRequest: %v", err)
@@ -235,7 +243,6 @@ func TestNullHandling(t *testing.T) {
 	r.CostUSD = nil
 	r.CostSource = nil
 	r.ErrorText = nil
-	r.ReplayOf = nil
 	r.ReplayEdits = nil
 
 	id, err := s.InsertRequest(ctx, r)
@@ -596,6 +603,81 @@ func TestPurgeOlderThan(t *testing.T) {
 	}
 }
 
+// TestPurgeOlderThanReconcilesSessionAggregates covers the gap left by
+// UpsertSession's additive-only design: a purge that removes some of a
+// session's requests must shrink that session's counters to match what
+// remains, and a purge that removes all of them must remove the session row
+// too — otherwise a session keeps reporting calls that no longer exist.
+func TestPurgeOlderThanReconcilesSessionAggregates(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	mkReq := func(sessionID string, startedAt time.Time, tokens int, cost *float64) int64 {
+		r := fullRequest()
+		r.SessionID = &sessionID
+		r.StartedAt = startedAt
+		r.InputTokens = tokens
+		r.OutputTokens = tokens
+		r.CostUSD = cost
+		r.ModelResolved = "deepseek-flash"
+		id, err := s.InsertRequest(ctx, r)
+		if err != nil {
+			t.Fatalf("InsertRequest: %v", err)
+		}
+		return id
+	}
+	upsertFor := func(sessionID string, id int64, startedAt time.Time, tokens int, cost *float64) {
+		t.Helper()
+		sess := &Session{
+			ID: sessionID, FirstSeen: startedAt, LastSeen: startedAt,
+			RequestCount: 1, TotalInputTokens: int64(tokens), TotalOutputTokens: int64(tokens),
+			ModelSet: "deepseek-flash",
+		}
+		if cost != nil {
+			sess.TotalCostUSD = *cost
+			sess.PricedCount = 1
+		} else {
+			sess.UnpricedCount = 1
+		}
+		if err := s.UpsertSession(ctx, sess); err != nil {
+			t.Fatalf("UpsertSession: %v", err)
+		}
+	}
+
+	price := 0.5
+	oldID := mkReq("partial", cutoff.Add(-time.Hour), 10, &price)
+	upsertFor("partial", oldID, cutoff.Add(-time.Hour), 10, &price)
+	newID := mkReq("partial", cutoff.Add(time.Hour), 20, nil)
+	upsertFor("partial", newID, cutoff.Add(time.Hour), 20, nil)
+
+	goneID := mkReq("emptied", cutoff.Add(-2*time.Hour), 5, nil)
+	upsertFor("emptied", goneID, cutoff.Add(-2*time.Hour), 5, nil)
+
+	if _, err := s.PurgeOlderThan(ctx, cutoff); err != nil {
+		t.Fatalf("PurgeOlderThan: %v", err)
+	}
+
+	partial, err := s.GetSession(ctx, "partial")
+	if err != nil {
+		t.Fatalf("GetSession(partial): %v", err)
+	}
+	if partial.RequestCount != 1 {
+		t.Errorf("partial.RequestCount = %d, want 1 (the purged request must not still be counted)", partial.RequestCount)
+	}
+	if partial.TotalInputTokens != 20 {
+		t.Errorf("partial.TotalInputTokens = %d, want 20 (only the surviving request's)", partial.TotalInputTokens)
+	}
+	if partial.TotalCostUSD != 0 || partial.PricedCount != 0 || partial.UnpricedCount != 1 {
+		t.Errorf("partial cost/priced/unpriced = %v/%d/%d, want 0/0/1 (the priced request was purged)",
+			partial.TotalCostUSD, partial.PricedCount, partial.UnpricedCount)
+	}
+
+	if _, err := s.GetSession(ctx, "emptied"); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("emptied session should be deleted once its only request is purged, got err=%v", err)
+	}
+}
+
 // TestRedactCheckDetectsLeak proves RedactCheck actually scans: given a
 // header blob that (unlike anything internal/proxy/redact.go would ever
 // produce) carries a live x-api-key value, RedactCheck must catch it and
@@ -617,6 +699,33 @@ func TestRedactCheckDetectsLeak(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), sentinel) {
 		t.Errorf("RedactCheck error does not name the leaked value: %v", err)
+	}
+}
+
+// TestRedactCheckDetectsLeakInOtherSensitiveHeaders proves RedactCheck's
+// scan is not x-api-key-only: Authorization and Cookie are equally
+// sensitive and must be caught too.
+func TestRedactCheckDetectsLeakInOtherSensitiveHeaders(t *testing.T) {
+	for _, name := range []string{"Authorization", "Cookie"} {
+		t.Run(name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+
+			sentinel := "TESTSENTINEL-do-not-leak-" + name
+			leaked := fullRequest()
+			leaked.RespHeaders = fmt.Sprintf(`{%q:["%s"],"Content-Type":["application/json"]}`, name, sentinel)
+			if _, err := s.InsertRequest(ctx, leaked); err != nil {
+				t.Fatalf("InsertRequest: %v", err)
+			}
+
+			err := s.RedactCheck(ctx)
+			if err == nil {
+				t.Fatalf("RedactCheck did not catch a reachable %s value", name)
+			}
+			if !strings.Contains(err.Error(), sentinel) {
+				t.Errorf("RedactCheck error does not name the leaked value: %v", err)
+			}
+		})
 	}
 }
 
@@ -729,6 +838,34 @@ func TestConcurrentInsertsSerialize(t *testing.T) {
 			t.Fatalf("duplicate id %d — corruption under concurrent writers", r.ID)
 		}
 		seen[r.ID] = true
+	}
+}
+
+// TestInsertRequestsRollsBackOnFailure exercises the "all-or-nothing" batch
+// guarantee documented on InsertRequests: a batch that fails partway through
+// must leave no row behind, not just the failing one.
+func TestInsertRequestsRollsBackOnFailure(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.InsertRequest(ctx, fullRequest()); err != nil {
+		t.Fatalf("baseline InsertRequest: %v", err)
+	}
+
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	batch := []*Request{fullRequest(), fullRequest(), fullRequest()}
+	if err := s.InsertRequests(canceled, batch); err == nil {
+		t.Fatal("InsertRequests with a canceled context: got nil error, want one")
+	}
+
+	got, err := s.ListRequests(ctx, Filter{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d requests after failed batch, want 1 (only the baseline row — batch must roll back atomically)", len(got))
 	}
 }
 

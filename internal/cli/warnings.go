@@ -41,7 +41,7 @@ func runWarnings(args []string, w io.Writer, st *store.Store) error {
 
 	all, err := st.ListWarnings(context.Background(), store.Filter{Limit: store.DefaultLimit})
 	if err != nil {
-		return fmt.Errorf("list warnings: %w", err)
+		return fmt.Errorf("warnings: list warnings: %w", err)
 	}
 
 	type key struct{ kind, severity string }

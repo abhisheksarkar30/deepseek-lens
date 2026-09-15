@@ -19,7 +19,7 @@ func redactHeaders(h http.Header) http.Header {
 		clone = http.Header{}
 	}
 	for _, name := range sensitiveHeaders {
-		if clone.Get(name) != "" {
+		if len(clone.Values(name)) > 0 {
 			clone.Set(name, redactedValue)
 		}
 	}

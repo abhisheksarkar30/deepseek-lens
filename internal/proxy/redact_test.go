@@ -55,6 +55,22 @@ func TestRedactHeadersMissingHeaderNotAdded(t *testing.T) {
 	}
 }
 
+func TestRedactHeadersMultiValueEmptyFirst(t *testing.T) {
+	h := http.Header{}
+	h["X-Api-Key"] = []string{"", "sk-real-secret"}
+
+	redacted := redactHeaders(h)
+	if got := redacted.Get("X-Api-Key"); got != redactedValue {
+		t.Errorf("redacted.Get(X-Api-Key) = %q, want %q (multi-value header must still redact)", got, redactedValue)
+	}
+	for _, v := range redacted["X-Api-Key"] {
+		if v != redactedValue {
+			t.Errorf("X-Api-Key values = %v, want all values redacted", redacted["X-Api-Key"])
+			break
+		}
+	}
+}
+
 func TestRedactHeadersNilHeader(t *testing.T) {
 	redacted := redactHeaders(nil)
 	if redacted == nil {

@@ -23,7 +23,7 @@ func Prices(args []string) error {
 // it at a temp file instead of the user's real table.
 func runPrices(args []string, w io.Writer, path string) error {
 	fs := flag.NewFlagSet("prices", flag.ContinueOnError)
-	var sets multiFlag
+	var sets repeatedFlag
 	fs.Var(&sets, "set", "set a rate, model.field=rate (repeatable); fields: input, output, cache_read, cache_write")
 	unset := fs.String("unset", "", "revert a model to unpriced")
 	edit := fs.Bool("edit", false, "open the price file in $EDITOR")
@@ -65,16 +65,6 @@ func runPrices(args []string, w io.Writer, path string) error {
 	}
 
 	return printPrices(w, path, tbl)
-}
-
-// multiFlag collects a repeatable string flag (--set a --set b).
-type multiFlag []string
-
-func (m *multiFlag) String() string { return strings.Join(*m, ", ") }
-
-func (m *multiFlag) Set(v string) error {
-	*m = append(*m, v)
-	return nil
 }
 
 // applySet parses "model.field=rate" into tbl.

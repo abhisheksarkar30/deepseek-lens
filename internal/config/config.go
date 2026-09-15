@@ -148,13 +148,13 @@ func parseFlatFile(data []byte) (map[string]string, error) {
 		}
 		idx := strings.Index(line, "=")
 		if idx < 0 {
-			return nil, fmt.Errorf("line %d: missing '=': %q", i+1, line)
+			return nil, fmt.Errorf("config: parse flat file: line %d: missing '=': %q", i+1, line)
 		}
 		key := strings.TrimSpace(line[:idx])
 		val := strings.TrimSpace(line[idx+1:])
 		if strings.HasPrefix(val, `"`) {
 			if len(val) < 2 || !strings.HasSuffix(val, `"`) {
-				return nil, fmt.Errorf("line %d: unterminated quote: %q", i+1, line)
+				return nil, fmt.Errorf("config: parse flat file: line %d: unterminated quote: %q", i+1, line)
 			}
 			val = val[1 : len(val)-1]
 		}
@@ -199,10 +199,10 @@ func applyKV(cfg *Config, kv map[string]string) error {
 		case "ModelMaxTokens":
 			cfg.ModelMaxTokens = val
 		default:
-			return fmt.Errorf("unknown key %q", key)
+			return fmt.Errorf("config: apply: unknown key %q", key)
 		}
 		if err != nil {
-			return fmt.Errorf("key %s: invalid value %q: %w", key, val, err)
+			return fmt.Errorf("config: apply: key %s: invalid value %q: %w", key, val, err)
 		}
 	}
 	return nil
@@ -241,19 +241,19 @@ func Load(args []string) (*Config, error) {
 	case err == nil:
 		kv, perr := parseFlatFile(data)
 		if perr != nil {
-			return nil, fmt.Errorf("config file %s: %w", path, perr)
+			return nil, fmt.Errorf("config: load: config file %s: %w", path, perr)
 		}
 		if aerr := applyKV(cfg, kv); aerr != nil {
-			return nil, fmt.Errorf("config file %s: %w", path, aerr)
+			return nil, fmt.Errorf("config: load: config file %s: %w", path, aerr)
 		}
 	case os.IsNotExist(err):
 		// no config file — fine, defaults stand.
 	default:
-		return nil, fmt.Errorf("reading config file %s: %w", path, err)
+		return nil, fmt.Errorf("config: load: reading config file %s: %w", path, err)
 	}
 
 	if err := applyKV(cfg, envKV()); err != nil {
-		return nil, fmt.Errorf("environment: %w", err)
+		return nil, fmt.Errorf("config: load: environment: %w", err)
 	}
 
 	if err := applyFlags(cfg, args); err != nil {
@@ -275,23 +275,23 @@ func (c *Config) Validate() error {
 	switch c.BodyPolicy {
 	case "full", "truncated", "off":
 	default:
-		return fmt.Errorf("BodyPolicy: invalid value %q (want full, truncated, or off)", c.BodyPolicy)
+		return fmt.Errorf("config: validate: BodyPolicy: invalid value %q (want full, truncated, or off)", c.BodyPolicy)
 	}
 	if c.BodyCapBytes <= 0 {
-		return fmt.Errorf("BodyCapBytes: must be positive, got %d", c.BodyCapBytes)
+		return fmt.Errorf("config: validate: BodyCapBytes: must be positive, got %d", c.BodyCapBytes)
 	}
 	u, err := url.Parse(c.UpstreamURL)
 	if err != nil {
-		return fmt.Errorf("UpstreamURL: invalid value %q: %v", c.UpstreamURL, err)
+		return fmt.Errorf("config: validate: UpstreamURL: invalid value %q: %w", c.UpstreamURL, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("UpstreamURL: invalid value %q (scheme must be http or https)", c.UpstreamURL)
+		return fmt.Errorf("config: validate: UpstreamURL: invalid value %q (scheme must be http or https)", c.UpstreamURL)
 	}
 	if u.Host == "" {
-		return fmt.Errorf("UpstreamURL: invalid value %q (missing host)", c.UpstreamURL)
+		return fmt.Errorf("config: validate: UpstreamURL: invalid value %q (missing host)", c.UpstreamURL)
 	}
 	if c.SessionGapMinutes <= 0 {
-		return fmt.Errorf("SessionGapMinutes: must be positive, got %d", c.SessionGapMinutes)
+		return fmt.Errorf("config: validate: SessionGapMinutes: must be positive, got %d", c.SessionGapMinutes)
 	}
 	// A negative threshold is nonsense and a NaN one is worse: every
 	// comparison against NaN is false, so the cost gate would silently never
@@ -299,7 +299,7 @@ func (c *Config) Validate() error {
 	// rejects both, since NaN fails it too. Zero is allowed — it means "every
 	// replay needs --yes", a legitimate strict setting.
 	if !(c.ReplayCostThresholdUSD >= 0) {
-		return fmt.Errorf("ReplayCostThresholdUSD: must be a non-negative number, got %v", c.ReplayCostThresholdUSD)
+		return fmt.Errorf("config: validate: ReplayCostThresholdUSD: must be a non-negative number, got %v", c.ReplayCostThresholdUSD)
 	}
 	return nil
 }
@@ -307,7 +307,7 @@ func (c *Config) Validate() error {
 func validateLoopback(field, addr string, allowRemote bool) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("%s: invalid address %q: %v", field, addr, err)
+		return fmt.Errorf("config: validate: %s: invalid address %q: %w", field, addr, err)
 	}
 	if allowRemote {
 		return nil
@@ -318,5 +318,5 @@ func validateLoopback(field, addr string, allowRemote bool) error {
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return nil
 	}
-	return fmt.Errorf("%s: non-loopback address %q requires AllowRemote", field, addr)
+	return fmt.Errorf("config: validate: %s: non-loopback address %q requires AllowRemote", field, addr)
 }

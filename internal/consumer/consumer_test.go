@@ -298,6 +298,34 @@ func TestPanickingAnalyzer(t *testing.T) {
 	}
 }
 
+// panicResolver panics on every call, to exercise prepareCall's own
+// recover — distinct from the post-insert analyzer recover path above.
+type panicResolver struct{}
+
+func (panicResolver) Resolve(parse.Meta, time.Time) string {
+	panic("resolver boom")
+}
+
+func TestPanickingSessionResolver(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, panicResolver{})
+
+	runClosed(t, c, sk, []*sink.CapturedCall{simpleCall(), simpleCall()})
+
+	reqs, err := st.ListRequests(context.Background(), store.Filter{})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	if len(reqs) != 0 {
+		t.Fatalf("got %d rows, want 0 — a panicking resolver must drop the call, not insert it half-built", len(reqs))
+	}
+
+	if got := c.Stats().Failed; got != 2 {
+		t.Fatalf("Stats().Failed = %d, want 2", got)
+	}
+}
+
 // warningAnalyzer always returns one deterministic warning, to prove a
 // registered analyzer's output lands in the warnings table.
 type warningAnalyzer struct{}
@@ -378,6 +406,73 @@ func TestFailingStore(t *testing.T) {
 	}
 	if stats.Failed != 1 {
 		t.Errorf("Failed = %d, want 1", stats.Failed)
+	}
+}
+
+// failWarningsStore always fails InsertWarnings, to exercise finishCall's
+// warnings-insert error branch — unlike a failed RecordCall, this one does
+// count the call failed (the warnings themselves are lost, not just an
+// aggregate).
+type failWarningsStore struct {
+	*store.Store
+}
+
+func (f *failWarningsStore) InsertWarnings(ctx context.Context, reqID int64, warnings []store.Warning) error {
+	return errors.New("injected warnings failure")
+}
+
+func TestFinishCallCountsFailedOnWarningsInsertError(t *testing.T) {
+	st := newTestStore(t)
+	fs := &failWarningsStore{Store: st}
+	sk := sink.New(16)
+	c := New(sk, fs, nil, warningAnalyzer{})
+
+	runClosed(t, c, sk, []*sink.CapturedCall{simpleCall()})
+
+	reqs, err := st.ListRequests(context.Background(), store.Filter{})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("got %d rows, want 1 (a warnings-insert failure must not lose the already-committed row)", len(reqs))
+	}
+	if got := c.Stats().Failed; got != 1 {
+		t.Fatalf("Stats().Failed = %d, want 1", got)
+	}
+}
+
+// fixedResolver resolves every call to the same session id, letting a test
+// force p.req.SessionID != nil without a real session.Resolver.
+type fixedResolver struct{ id string }
+
+func (f fixedResolver) Resolve(parse.Meta, time.Time) string { return f.id }
+
+// errAggregator always fails RecordCall, to exercise finishCall's session-fold
+// error branch — logged only, per CLAUDE.md's fail open: the row this call is
+// about is already committed, so this must never count as a failed call.
+type errAggregator struct{}
+
+func (errAggregator) RecordCall(context.Context, string, *store.Request, int) error {
+	return errors.New("injected aggregate failure")
+}
+
+func TestFinishCallDoesNotCountFailedOnAggregatorError(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, fixedResolver{id: "sess-x"})
+	c.SetSessionAggregator(errAggregator{})
+
+	runClosed(t, c, sk, []*sink.CapturedCall{simpleCall()})
+
+	reqs, err := st.ListRequests(context.Background(), store.Filter{})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("got %d rows, want 1", len(reqs))
+	}
+	if got := c.Stats().Failed; got != 0 {
+		t.Fatalf("Stats().Failed = %d, want 0 (a RecordCall failure must not count the already-committed call as failed)", got)
 	}
 }
 

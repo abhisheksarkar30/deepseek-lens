@@ -29,7 +29,7 @@ one SQLite file, no hosted deployment, no multi-user auth
 
 ## Components
 
-One process, `cmd/lens`, dispatches to eleven `internal/` packages. `lens serve`
+One process, `cmd/lens`, dispatches to the 13 `internal/` packages in the table below. `lens serve`
 ([internal/cli/serve.go](../../internal/cli/serve.go)) is the only command that wires them all
 together at once; every other CLI command opens the store or dashboard API on its own.
 

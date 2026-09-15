@@ -13,6 +13,12 @@ import (
 // warning rules and this scanner share one source of truth. server_tool_use
 // is handled separately in scanBlock: it is unsupported unless its "name"
 // is "web_search".
+// maxSessionHeaderLen bounds x-lens-session before it is accepted as
+// meta.SessionHeader, which session.Resolve uses verbatim as sessions.id.
+// 200 is generous for a client-chosen id/label and small next to SQLite's
+// own TEXT limits.
+const maxSessionHeaderLen = 200
+
 var unsupportedBlockTypes = []string{
 	"document",
 	"search_result",
@@ -48,7 +54,16 @@ func ExtractMeta(reqBody []byte, headers http.Header) Meta {
 		return m
 	}
 
-	m.SessionHeader = headers.Get("x-lens-session")
+	// An overlong x-lens-session is left empty rather than truncated:
+	// unlike PrefixHash (a bounded 16-char hash), this value rides straight
+	// into sessions.id verbatim (session.Resolve), so an unbounded client
+	// header would mean an unbounded primary key. Silently truncating would
+	// also risk colliding two different clients' ids onto the same session,
+	// which is worse than falling back to the prefix/gap heuristic
+	// session.Resolve already has for exactly this case.
+	if sh := headers.Get("x-lens-session"); len(sh) <= maxSessionHeaderLen {
+		m.SessionHeader = sh
+	}
 	m.HasAnthropicBeta = headers.Get("anthropic-beta") != ""
 
 	m.ModelRequested = asString(body["model"])

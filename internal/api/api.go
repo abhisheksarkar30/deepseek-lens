@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
@@ -49,6 +51,13 @@ type api struct {
 	// is config.ReplayEnabled — the endpoint's opt-in control (br-GI-1-13).
 	proxyHandler  http.Handler
 	replayEnabled bool
+
+	// replayRejected counts every replay request turned away by either guard
+	// in replay() — disabled-by-default or the Origin/Host allowlist. Without
+	// this, a rejected probe against the one billable route leaves no
+	// server-side trace at all. Surfaced on /api/health alongside the other
+	// counters.
+	replayRejected atomic.Uint64
 }
 
 // New builds the dashboard's http.Handler: the read-only JSON API under
@@ -275,10 +284,14 @@ const (
 // returned along with the compact Outcome `lens replay` diffs.
 func (a *api) replay(w http.ResponseWriter, r *http.Request) {
 	if !a.replayEnabled {
+		a.replayRejected.Add(1)
+		log.Printf("api: replay rejected from %s: replay is disabled", r.RemoteAddr)
 		writeError(w, http.StatusForbidden, "replay is disabled: start `lens serve --replay` to enable it")
 		return
 	}
 	if reason := replayOriginReject(r); reason != "" {
+		a.replayRejected.Add(1)
+		log.Printf("api: replay rejected from %s: %s", r.RemoteAddr, reason)
 		writeError(w, http.StatusForbidden, reason)
 		return
 	}
@@ -748,7 +761,8 @@ type healthResponse struct {
 	// editor at all: the button must be inert when the endpoint it would call
 	// answers 403 (br-GI-1-13). It rides on /api/health, which is already the
 	// dashboard's one view of server state.
-	ReplayEnabled bool `json:"replay_enabled"`
+	ReplayEnabled  bool   `json:"replay_enabled"`
+	ReplayRejected uint64 `json:"replay_rejected"`
 }
 
 func (a *api) health(w http.ResponseWriter, r *http.Request) {
@@ -762,6 +776,7 @@ func (a *api) health(w http.ResponseWriter, r *http.Request) {
 		ConsumerFailed:    cs.Failed,
 		ConsumerFlushes:   cs.Flushes,
 		ReplayEnabled:     a.replayEnabled,
+		ReplayRejected:    a.replayRejected.Load(),
 	}
 	if !cs.LastWriteAt.IsZero() {
 		t := cs.LastWriteAt

@@ -23,6 +23,18 @@ import (
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
 
+// repeatedFlag collects a repeatable string flag (e.g. `--set a --set b`) —
+// stdlib flag has no built-in for that. Shared by prices.go's --set and
+// replay.go's --set, which each used to hand-roll their own identical type.
+type repeatedFlag []string
+
+func (r *repeatedFlag) String() string { return strings.Join(*r, ", ") }
+
+func (r *repeatedFlag) Set(v string) error {
+	*r = append(*r, v)
+	return nil
+}
+
 // humanTokens formats a token count compactly: a plain integer under
 // 1000, otherwise one decimal place with a k/M suffix (1500 -> "1.5k",
 // 1_500_000 -> "1.5M").

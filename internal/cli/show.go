@@ -57,22 +57,22 @@ func runShow(args []string, w io.Writer, st *store.Store) error {
 		sessionHeader(w, sess)
 		return nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("session %s: %w", arg, err)
+		return fmt.Errorf("show: session %s: %w", arg, err)
 	}
 
 	id, err := strconv.ParseInt(arg, 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid request id %q: %w", arg, err)
+		return fmt.Errorf("show: invalid request id %q: %w", arg, err)
 	}
 
 	r, err := st.GetRequest(ctx, id)
 	if err != nil {
-		return fmt.Errorf("request %d: %w", id, err)
+		return fmt.Errorf("show: request %d: %w", id, err)
 	}
 
 	allWarnings, err := st.ListWarnings(ctx, store.Filter{Limit: store.DefaultLimit})
 	if err != nil {
-		return fmt.Errorf("list warnings: %w", err)
+		return fmt.Errorf("show: list warnings: %w", err)
 	}
 	var warnings []*store.Warning
 	for _, wn := range allWarnings {

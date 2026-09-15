@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,6 +71,40 @@ func TestEnvOverridesFile(t *testing.T) {
 	}
 	if cfg.ProxyAddr != "127.0.0.1:7777" {
 		t.Errorf("ProxyAddr = %q, want env value", cfg.ProxyAddr)
+	}
+}
+
+// TestApplyKVRejectsBadValues exercises applyKV's own conversion error
+// branches (int, bool, float) and its unknown-key branch, through Load's
+// env path — applyKV has no test of its own since it is unexported.
+func TestApplyKVRejectsBadValues(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, val string
+	}{
+		{"BodyCapBytes not an int", "LENS_BODY_CAP_BYTES", "not-a-number"},
+		{"AllowRemote not a bool", "LENS_ALLOW_REMOTE", "not-a-bool"},
+		{"Capture not a bool", "LENS_CAPTURE", "not-a-bool"},
+		{"SessionGapMinutes not an int", "LENS_SESSION_GAP_MINUTES", "not-a-number"},
+		{"ReplayEnabled not a bool", "LENS_REPLAY_ENABLED", "not-a-bool"},
+		{"ReplayCostThresholdUSD not a float", "LENS_REPLAY_COST_THRESHOLD_USD", "not-a-number"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			freshHome(t)
+			t.Setenv(tc.env, tc.val)
+			if _, err := Load(nil); err == nil {
+				t.Errorf("Load: expected error for %s=%q, got nil", tc.env, tc.val)
+			}
+		})
+	}
+}
+
+// TestApplyKVRejectsUnknownKey covers applyKV's default branch through the
+// config-file path, since env vars are only ever the fixed fieldsByEnv set.
+func TestApplyKVRejectsUnknownKey(t *testing.T) {
+	home := freshHome(t)
+	writeConfigFile(t, home, "NotARealField = value\n")
+	if _, err := Load(nil); err == nil {
+		t.Fatal("Load: expected error for an unknown config key, got nil")
 	}
 }
 
@@ -211,5 +246,26 @@ func TestValidateRejectsSessionGapMinutes(t *testing.T) {
 	cfg.SessionGapMinutes = 0
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate: expected error for SessionGapMinutes=0, got nil")
+	}
+}
+
+// TestValidateReplayCostThresholdUSD covers the NaN-rejection comment on
+// Validate: `!(x >= 0)` is the one predicate meant to reject both a negative
+// threshold and a NaN one (every comparison against NaN is false, so a naive
+// `x < 0` check would let NaN slip through as "not negative").
+func TestValidateReplayCostThresholdUSD(t *testing.T) {
+	for _, v := range []float64{-0.01, -1, math.NaN()} {
+		cfg := Default()
+		cfg.ReplayCostThresholdUSD = v
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate: expected error for ReplayCostThresholdUSD=%v, got nil", v)
+		}
+	}
+	for _, v := range []float64{0, 0.01, 100} {
+		cfg := Default()
+		cfg.ReplayCostThresholdUSD = v
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate: expected no error for ReplayCostThresholdUSD=%v, got %v", v, err)
+		}
 	}
 }

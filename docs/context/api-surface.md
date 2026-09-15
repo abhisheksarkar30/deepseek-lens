@@ -84,7 +84,7 @@ touching the store directly — [internal/cli/replay.go](../../internal/cli/repl
   "outcome": {
     "id": 42, "status": 200, "model": "deepseek-flash",
     "input_tokens": 120, "output_tokens": 340,
-    "cost_usd": 0.0021, "cost_source": "priced",
+    "cost_usd": 0.0021, "cost_source": "configured",
     "duration_ms": 812.4, "warnings": ["top_p_clamped: ..."]
   }
 }

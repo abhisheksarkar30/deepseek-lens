@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/abhisheksarkar30/deepseek-lens/internal/analyze"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/parse"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
@@ -153,7 +154,7 @@ func (c *Consumer) Stats() Stats {
 // every per-call failure is contained and counted in Stats instead (see the
 // package doc).
 func (c *Consumer) Run(ctx context.Context) error {
-	ch := c.sink.Drain(ctx)
+	ch := c.sink.Drain()
 	batch := make([]*sink.CapturedCall, 0, batchSize)
 
 	var timer *time.Timer
@@ -294,7 +295,7 @@ type pendingCall struct {
 // ExtractMeta/ExtractUsage -> build the row -> resolve session -> cost step.
 // seen is the flush's session memo (see flushBatch). A panic anywhere in this
 // half is recovered, logged, and counted failed — the same containment
-// processCall used to give the whole pipeline — and reported as ok=false so
+// prepareCall gives the whole pipeline — and reported as ok=false so
 // the call is dropped from the batch rather than inserted half-built.
 func (c *Consumer) prepareCall(call *sink.CapturedCall, seen map[string]string) (p pendingCall, ok bool) {
 	defer func() {
@@ -400,7 +401,7 @@ func (c *Consumer) prepareCall(call *sink.CapturedCall, seen map[string]string) 
 // The store write carries the same per-call panic containment the rest of the
 // pipeline does (br-GI-1-07: "error containment is the point of this bead";
 // the consumer must never die on a store failure). Before the batch split the
-// write ran inside processCall's recover; insertGrouped/insertOne restore that
+// write ran inside prepareCall's recover; insertGrouped/insertOne restore that
 // boundary here.
 func (c *Consumer) insertBatch(ctx context.Context, pend []pendingCall) {
 	if len(pend) == 0 {
@@ -445,7 +446,7 @@ func (c *Consumer) insertGrouped(ctx context.Context, bi batchInserter, reqs []*
 }
 
 // insertOne writes one call's row with its own recover, the per-call boundary
-// processCall gave the whole pipeline before the batch split: a panic in this
+// prepareCall gave the whole pipeline before the batch split: a panic in this
 // call's store write is logged once and counted failed, and the rest of the
 // batch's rows still land.
 func (c *Consumer) insertOne(ctx context.Context, call *sink.CapturedCall, r *store.Request) {
@@ -470,7 +471,7 @@ func (c *Consumer) insertOne(ctx context.Context, call *sink.CapturedCall, r *st
 // finishCall runs the post-insert half of the pipeline for one call whose row
 // is committed: the registered analyzers, an `upstream_error` warning when
 // call.Err != nil, the warnings write, and finally the session fold. Like
-// processCall before it, a panic anywhere in this work for one call is
+// prepareCall before it, a panic anywhere in this work for one call is
 // recovered, logged once, and counted failed — it never takes the consumer
 // down.
 func (c *Consumer) finishCall(ctx context.Context, p pendingCall) {
@@ -488,7 +489,7 @@ func (c *Consumer) finishCall(ctx context.Context, p pendingCall) {
 	if p.call.Err != nil {
 		warnings = append(warnings, store.Warning{
 			RequestID: p.req.ID,
-			Kind:      "upstream_error",
+			Kind:      string(analyze.KindUpstreamError),
 			Severity:  "error",
 			Detail:    p.call.Err.Error(),
 			CreatedAt: time.Now(),

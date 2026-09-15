@@ -20,6 +20,12 @@ function fmtCost(v) {
   return "$" + v.toFixed(4);
 }
 
+// isUnpriced is the one place "this call has no cost" is decided — a null
+// CostUSD, not a zero one, since a free/zero-cost call is still priced.
+function isUnpriced(costUSD) {
+  return costUSD === null || costUSD === undefined;
+}
+
 // costBadge is the "?" an unpriced call carries, with the reason in the
 // tooltip. Meaning is never colour-only: the glyph is a literal "?" and the
 // title names the source, so the badge still reads in monochrome and to a
@@ -120,7 +126,7 @@ function bumpTotals(req) {
 // counted, not added as zero: `cost += req.CostUSD || 0` is how a header
 // total quietly claims to cover calls it never priced.
 function addCost(req) {
-  if (req.CostUSD === null || req.CostUSD === undefined) {
+  if (isUnpriced(req.CostUSD)) {
     state.totals.unpriced += 1;
   } else {
     state.totals.cost += req.CostUSD;
@@ -173,6 +179,8 @@ function prependFeedRow(req) {
   const body = document.getElementById("feed-body");
   body.insertAdjacentHTML("afterbegin", feedRowHTML(req));
   while (body.rows.length > state.feedRowLimit) {
+    const last = body.rows[body.rows.length - 1];
+    state.warnedIds.delete(Number(last.dataset.id));
     body.deleteRow(body.rows.length - 1);
   }
 }
@@ -448,7 +456,7 @@ async function openSession(id) {
     let runTokens = 0, runCost = 0, runUnpriced = 0;
     const callRows = calls.map((c, i) => {
       runTokens += (c.InputTokens || 0) + (c.OutputTokens || 0);
-      if (c.CostUSD === null || c.CostUSD === undefined) runUnpriced += 1;
+      if (isUnpriced(c.CostUSD)) runUnpriced += 1;
       else runCost += c.CostUSD;
       const n = perCall.get(c.ID) || 0;
       return `<tr data-id="${c.ID}">
@@ -556,7 +564,7 @@ function replayPanelHTML(r) {
       <p class="hint">Replay is disabled. Start <code>lens serve --replay</code> to enable it.</p>
     </div>`;
   }
-  const cost = r.CostUSD === null || r.CostUSD === undefined
+  const cost = isUnpriced(r.CostUSD)
     ? "unknown — this call has no configured price"
     : fmtCost(r.CostUSD);
   return `<div class="detail-panel">
@@ -653,29 +661,38 @@ document.getElementById("detail-modal").addEventListener("click", (e) => {
 
 function connectStream() {
   const es = new EventSource("/api/stream");
-  es.onmessage = async (ev) => {
-    let evt;
-    try { evt = JSON.parse(ev.data); } catch (e) { return; }
-
-    if (evt.type === "request") {
-      try {
-        const req = await fetchJSON(`/api/requests/${evt.id}`);
-        bumpTotals(req);
-        if (!state.paused) prependFeedRow(req);
-      } catch (e) { console.error("stream request fetch", e); }
-    } else if (evt.type === "warnings") {
-      markFeedRowWarned(evt.id);
-      if (Array.isArray(evt.warnings)) {
-        state.warningsCache = state.warningsCache.concat(evt.warnings);
-        if (!document.getElementById("view-warnings").hidden) {
-          renderWarningGroups(state.warningsCache);
-        }
-      }
-    }
+  // Events are handled one at a time, in arrival order: onmessage fires
+  // synchronously per event, but its body is async, so without this chain
+  // two events' fetchJSON calls could resolve out of order and prepend feed
+  // rows in the wrong sequence.
+  let queue = Promise.resolve();
+  es.onmessage = (ev) => {
+    queue = queue.then(() => handleStreamEvent(ev));
   };
   es.onerror = () => {
     // EventSource retries on its own; nothing else to do here.
   };
+}
+
+async function handleStreamEvent(ev) {
+  let evt;
+  try { evt = JSON.parse(ev.data); } catch (e) { return; }
+
+  if (evt.type === "request") {
+    try {
+      const req = await fetchJSON(`/api/requests/${evt.id}`);
+      bumpTotals(req);
+      if (!state.paused) prependFeedRow(req);
+    } catch (e) { console.error("stream request fetch", e); }
+  } else if (evt.type === "warnings") {
+    markFeedRowWarned(evt.id);
+    if (Array.isArray(evt.warnings)) {
+      state.warningsCache = state.warningsCache.concat(evt.warnings).slice(-state.feedRowLimit);
+      if (!document.getElementById("view-warnings").hidden) {
+        renderWarningGroups(state.warningsCache);
+      }
+    }
+  }
 }
 
 // ---- boot ---------------------------------------------------------------

@@ -3,7 +3,6 @@ package proxy
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,10 +42,8 @@ func newProxyServer(t *testing.T, cfg *config.Config, sk *sink.Sink) *httptest.S
 // test if none arrives within the deadline.
 func drainOne(t *testing.T, sk *sink.Sink) *sink.CapturedCall {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	select {
-	case call := <-sk.Drain(ctx):
+	case call := <-sk.Drain():
 		return call
 	case <-time.After(2 * time.Second):
 		t.Fatal("no CapturedCall submitted within deadline")

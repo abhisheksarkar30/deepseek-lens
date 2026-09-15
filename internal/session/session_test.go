@@ -124,6 +124,20 @@ func TestSamePrefixBeyondWindowIsANewSessionWithTheSamePrefixHash(t *testing.T) 
 	}
 }
 
+// TestResolveDegradesToNoSessionOnStoreError covers Resolve's fail-open
+// path: a store error (other than "no rows") must return "" — no session —
+// rather than propagate, since Resolve has no error return of its own and a
+// failed lookup must never fail or misgroup the call it's resolving for.
+func TestResolveDegradesToNoSessionOnStoreError(t *testing.T) {
+	r, st := newResolver(t, 30)
+	st.Close() // any subsequent store call now errors with "database is closed"
+
+	meta := parse.Meta{PrefixHash: hashA}
+	if got := r.Resolve(meta, base); got != "" {
+		t.Errorf("Resolve on a broken store = %q, want empty (fail open, not a wrong grouping)", got)
+	}
+}
+
 func TestDifferentPrefixIsANewSession(t *testing.T) {
 	r, _ := newResolver(t, 30)
 
@@ -286,9 +300,11 @@ func TestAggregatesCountPricedAndUnpriced(t *testing.T) {
 		return func(req *store.Request) { req.CostUSD = &v }
 	}
 
-	id := runCall(t, r, callOpts{prefix: hashA, at: base, tweak: price(0.01)})
-	id = runCall(t, r, callOpts{prefix: hashA, at: base.Add(time.Minute), tweak: price(0.02)})
-	id = runCall(t, r, callOpts{prefix: hashA, at: base.Add(2 * time.Minute)}) // unpriced: CostUSD nil
+	runCall(t, r, callOpts{prefix: hashA, at: base, tweak: price(0.01)})
+	runCall(t, r, callOpts{prefix: hashA, at: base.Add(time.Minute), tweak: price(0.02)})
+	// unpriced: CostUSD nil. Every call above shares hashA's session, so the
+	// last call's id is the session's id.
+	id := runCall(t, r, callOpts{prefix: hashA, at: base.Add(2 * time.Minute)})
 
 	sess := getSession(t, st, id)
 	if sess.PricedCount != 2 || sess.UnpricedCount != 1 {
@@ -321,10 +337,12 @@ func TestModelSetKeepsDistinctModelsOnly(t *testing.T) {
 		return func(req *store.Request) { req.ModelResolved = m }
 	}
 
-	id := runCall(t, r, callOpts{prefix: hashA, at: base, tweak: model("deepseek-flash")})
-	id = runCall(t, r, callOpts{prefix: hashA, at: base.Add(time.Minute), tweak: model("deepseek-flash")})
-	id = runCall(t, r, callOpts{prefix: hashA, at: base.Add(2 * time.Minute), tweak: model("deepseek-v4-pro")})
-	id = runCall(t, r, callOpts{prefix: hashA, at: base.Add(3 * time.Minute), tweak: model("")}) // unresolved
+	runCall(t, r, callOpts{prefix: hashA, at: base, tweak: model("deepseek-flash")})
+	runCall(t, r, callOpts{prefix: hashA, at: base.Add(time.Minute), tweak: model("deepseek-flash")})
+	runCall(t, r, callOpts{prefix: hashA, at: base.Add(2 * time.Minute), tweak: model("deepseek-v4-pro")})
+	// unresolved. Every call above shares hashA's session, so the last call's
+	// id is the session's id.
+	id := runCall(t, r, callOpts{prefix: hashA, at: base.Add(3 * time.Minute), tweak: model("")})
 
 	if got := getSession(t, st, id).ModelSet; got != "deepseek-flash,deepseek-v4-pro" {
 		t.Errorf("ModelSet = %q, want %q", got, "deepseek-flash,deepseek-v4-pro")

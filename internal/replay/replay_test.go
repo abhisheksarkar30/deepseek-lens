@@ -279,6 +279,40 @@ func TestReplayEndpointRejectsWhenDisabled(t *testing.T) {
 	assertNothingSent(t, s, orig.ID)
 }
 
+// replayRejectedCount reads /api/health's replay_rejected counter — the
+// server-side trace a rejected replay probe leaves behind.
+func (s *stack) replayRejectedCount(t *testing.T) uint64 {
+	t.Helper()
+	res, err := http.Get(s.dash.URL + "/api/health")
+	if err != nil {
+		t.Fatalf("GET /api/health: %v", err)
+	}
+	defer res.Body.Close()
+	var body struct {
+		ReplayRejected uint64 `json:"replay_rejected"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /api/health: %v", err)
+	}
+	return body.ReplayRejected
+}
+
+func TestReplayEndpointCountsRejections(t *testing.T) {
+	s := newStack(t, true)
+	orig := s.seedOriginal(t)
+
+	before := s.replayRejectedCount(t)
+	res := s.post(t, orig.ID, "", func(r *http.Request) {
+		r.Header.Set("Origin", "http://evil.example")
+	})
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a foreign Origin: %s", res.StatusCode, readBody(t, res))
+	}
+	if after := s.replayRejectedCount(t); after != before+1 {
+		t.Fatalf("replay_rejected = %d, want %d (one rejection counted)", after, before+1)
+	}
+}
+
 func TestReplayEndpointRejectsACrossOriginPage(t *testing.T) {
 	s := newStack(t, true)
 	orig := s.seedOriginal(t)
@@ -428,6 +462,52 @@ func TestReplayWithoutEditsRecordsLinkageButNoEditsBlob(t *testing.T) {
 	}
 	if n := s.up.hits(); n != 1 {
 		t.Fatalf("upstream hits = %d, want 1", n)
+	}
+}
+
+// TestOutcomeOfModelFallback covers OutcomeOf's one branch: a request whose
+// resolved model is unknown — an unpriced/unparsed upstream response — must
+// still name the model by what the client asked for, since every surface that
+// shows a model falls back the same way (internal/cli's displayModel).
+func TestOutcomeOfModelFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		requested string
+		resolved  string
+		want      string
+	}{
+		{"resolved model wins", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash"},
+		{"unresolved falls back to requested", "deepseek-v4-pro", "", "deepseek-v4-pro"},
+		{"both empty stays empty", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := replay.OutcomeOf(&store.Request{
+				ModelRequested: tc.requested,
+				ModelResolved:  tc.resolved,
+			}, nil)
+			if got.Model != tc.want {
+				t.Errorf("OutcomeOf().Model = %q, want %q", got.Model, tc.want)
+			}
+		})
+	}
+}
+
+// TestOutcomeOfCarriesWarnings asserts one "kind: detail" line per warning,
+// in the order attached — the whole reason Outcome carries strings and not a
+// count.
+func TestOutcomeOfCarriesWarnings(t *testing.T) {
+	got := replay.OutcomeOf(&store.Request{}, []*store.Warning{
+		{Kind: string(analyze.KindUpstreamError), Detail: "502"},
+		{Kind: "analyzer_panic", Detail: "cost: index out of range"},
+	})
+	want := []string{"upstream_error: 502", "analyzer_panic: cost: index out of range"}
+	if len(got.Warnings) != len(want) {
+		t.Fatalf("OutcomeOf().Warnings = %v, want %v", got.Warnings, want)
+	}
+	for i := range want {
+		if got.Warnings[i] != want[i] {
+			t.Errorf("Warnings[%d] = %q, want %q", i, got.Warnings[i], want[i])
+		}
 	}
 }
 
