@@ -309,3 +309,10 @@ JavaScript test harness for `internal/web`, which this repo has no convention fo
 changes an on-disk encoding, which is a migration decision and not a review fix. The full report and
 its resolution are comments on the v1 pull request; the panel's per-persona diff slices live under
 `planning/GI-1/review/`, which is gitignored.
+
+## License
+
+[MIT](LICENSE). Use it, fork it, modify it, redistribute it, sell it — commercially or not. The one
+condition is attribution: the copyright notice and the license text ship with every copy, so a
+redistribution cannot quietly drop where it came from. Contributions are accepted under the same
+terms.
