@@ -316,10 +316,11 @@ func (s *Store) StatsSummary(ctx context.Context, since time.Time) (*Summary, er
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(cache_creation_tokens), 0),
 			COALESCE(SUM(cache_read_tokens), 0),
-			COALESCE(SUM(cost_usd), 0)
+			COALESCE(SUM(cost_usd), 0),
+			COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0)
 		FROM requests WHERE started_at >= ?`, since.UnixNano())
 	if err := row.Scan(&sum.RequestCount, &sum.ErrorCount, &sum.InputTokens, &sum.OutputTokens,
-		&sum.CacheCreationTokens, &sum.CacheReadTokens, &sum.CostUSDTotal); err != nil {
+		&sum.CacheCreationTokens, &sum.CacheReadTokens, &sum.CostUSDTotal, &sum.UnpricedCount); err != nil {
 		return nil, fmt.Errorf("store: stats summary: %w", err)
 	}
 
@@ -385,7 +386,8 @@ func percentileMs(sortedNs []int64, p float64) float64 {
 func (s *Store) StatsByModel(ctx context.Context, since time.Time) ([]ModelStat, error) {
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT CASE WHEN model_resolved <> '' THEN model_resolved ELSE model_requested END,
-			COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0)
+			COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0),
+			COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0)
 		FROM requests
 		WHERE started_at >= ?
 		GROUP BY 1
@@ -398,7 +400,7 @@ func (s *Store) StatsByModel(ctx context.Context, since time.Time) ([]ModelStat,
 	var out []ModelStat
 	for rows.Next() {
 		var m ModelStat
-		if err := rows.Scan(&m.Model, &m.RequestCount, &m.InputTokens, &m.OutputTokens, &m.CostUSDTotal); err != nil {
+		if err := rows.Scan(&m.Model, &m.RequestCount, &m.InputTokens, &m.OutputTokens, &m.CostUSDTotal, &m.UnpricedCount); err != nil {
 			return nil, fmt.Errorf("store: stats by model: %w", err)
 		}
 		out = append(out, m)
@@ -411,7 +413,8 @@ func (s *Store) StatsByModel(ctx context.Context, since time.Time) ([]ModelStat,
 func (s *Store) StatsByDay(ctx context.Context, since time.Time) ([]DayStat, error) {
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT strftime('%Y-%m-%d', started_at / 1000000000, 'unixepoch'),
-			COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0)
+			COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0),
+			COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0)
 		FROM requests
 		WHERE started_at >= ?
 		GROUP BY 1
@@ -424,10 +427,40 @@ func (s *Store) StatsByDay(ctx context.Context, since time.Time) ([]DayStat, err
 	var out []DayStat
 	for rows.Next() {
 		var d DayStat
-		if err := rows.Scan(&d.Day, &d.RequestCount, &d.InputTokens, &d.OutputTokens, &d.CostUSDTotal); err != nil {
+		if err := rows.Scan(&d.Day, &d.RequestCount, &d.InputTokens, &d.OutputTokens, &d.CostUSDTotal, &d.UnpricedCount); err != nil {
 			return nil, fmt.Errorf("store: stats by day: %w", err)
 		}
 		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// StatsByCostSource groups the window's requests by cost_source: the
+// breakdown behind every surface that must not present a partial total as a
+// whole one (br-GI-1-11). A NULL source — a row written before this bead, or
+// by a writer with no price table — is reported as "unpriced", because those
+// are exactly the rows with no cost_usd either; folding them in keeps the
+// label set closed to the four real sources.
+func (s *Store) StatsByCostSource(ctx context.Context, since time.Time) ([]CostSourceStat, error) {
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT COALESCE(cost_source, 'unpriced'),
+			COUNT(*), COALESCE(SUM(cost_usd), 0)
+		FROM requests
+		WHERE started_at >= ?
+		GROUP BY 1
+		ORDER BY 2 DESC`, since.UnixNano())
+	if err != nil {
+		return nil, fmt.Errorf("store: stats by cost source: %w", err)
+	}
+	defer rows.Close()
+
+	var out []CostSourceStat
+	for rows.Next() {
+		var c CostSourceStat
+		if err := rows.Scan(&c.Source, &c.RequestCount, &c.CostUSDTotal); err != nil {
+			return nil, fmt.Errorf("store: stats by cost source: %w", err)
+		}
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }

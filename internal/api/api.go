@@ -26,6 +26,7 @@ type Store interface {
 	StatsSummary(ctx context.Context, since time.Time) (*store.Summary, error)
 	StatsByModel(ctx context.Context, since time.Time) ([]store.ModelStat, error)
 	StatsByDay(ctx context.Context, since time.Time) ([]store.DayStat, error)
+	StatsByCostSource(ctx context.Context, since time.Time) ([]store.CostSourceStat, error)
 	ListSessions(ctx context.Context) ([]*store.Session, error)
 	GetSession(ctx context.Context, id string) (*store.Session, error)
 	ListWarnings(ctx context.Context, f store.Filter) ([]*store.Warning, error)
@@ -215,6 +216,11 @@ type statsResponse struct {
 	Summary *store.Summary    `json:"summary"`
 	ByModel []store.ModelStat `json:"by_model"`
 	ByDay   []store.DayStat   `json:"by_day"`
+	// CostSources is the cost-source breakdown: how many calls in the window
+	// were priced, approximate, unpriced, or for a model the table does not
+	// know. The dashboard needs it because a cost total alone cannot say
+	// whether it covered every call.
+	CostSources []store.CostSourceStat `json:"cost_sources"`
 }
 
 func (a *api) stats(w http.ResponseWriter, r *http.Request) {
@@ -239,8 +245,15 @@ func (a *api) stats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	costSources, err := a.store.StatsByCostSource(r.Context(), since)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
-	writeJSON(w, http.StatusOK, statsResponse{Since: since, Summary: summary, ByModel: byModel, ByDay: byDay})
+	writeJSON(w, http.StatusOK, statsResponse{
+		Since: since, Summary: summary, ByModel: byModel, ByDay: byDay, CostSources: costSources,
+	})
 }
 
 func (a *api) listWarnings(w http.ResponseWriter, r *http.Request) {

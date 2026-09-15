@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
 
@@ -229,6 +230,177 @@ func TestStatsTotalsMatchFixture(t *testing.T) {
 	}
 	if !strings.Contains(out, "$0.0300") {
 		t.Errorf("stats output missing expected cost total:\n%s", out)
+	}
+}
+
+// TestStatsMixedPricingNamesTheUnpricedCount is the bead's core rule: a total
+// over calls that includes unpriced ones says how many, so a partial sum is
+// never read as the whole bill.
+func TestStatsMixedPricingNamesTheUnpricedCount(t *testing.T) {
+	st := newTestStore(t)
+	priced := 0.01
+	seedRequest(t, st, func(r *store.Request) { r.CostUSD = &priced })
+	seedRequest(t, st, func(r *store.Request) { r.CostUSD = nil })
+
+	var buf bytes.Buffer
+	if err := runStats([]string{"--since", "24h"}, &buf, st); err != nil {
+		t.Fatalf("runStats: %v", err)
+	}
+	if out := buf.String(); !strings.Contains(out, "$0.0100 + 1 unpriced") {
+		t.Errorf("stats output does not name the unpriced call:\n%s", out)
+	}
+}
+
+func TestStatsAllUnpricedShowsNoPartialDollarTotal(t *testing.T) {
+	st := newTestStore(t)
+	seedRequest(t, st, func(r *store.Request) { r.CostUSD = nil })
+
+	var buf bytes.Buffer
+	if err := runStats([]string{"--since", "24h"}, &buf, st); err != nil {
+		t.Fatalf("runStats: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "— + 1 unpriced") {
+		t.Errorf("stats output should show no dollar total at all:\n%s", out)
+	}
+	if strings.Contains(out, "$0.0000") {
+		t.Errorf("stats claimed a $0 total for calls it never priced:\n%s", out)
+	}
+}
+
+func TestStatsByDayBreakdown(t *testing.T) {
+	st := newTestStore(t)
+	seedRequest(t, st, nil)
+
+	var buf bytes.Buffer
+	if err := runStats([]string{"--since", "24h", "--by", "day"}, &buf, st); err != nil {
+		t.Fatalf("runStats --by day: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "day split:") || !strings.Contains(out, "COST") {
+		t.Errorf("runStats --by day did not render a day breakdown:\n%s", out)
+	}
+}
+
+func TestStatsRejectsUnknownByValue(t *testing.T) {
+	st := newTestStore(t)
+	var buf bytes.Buffer
+	if err := runStats([]string{"--by", "hour"}, &buf, st); err == nil {
+		t.Fatal("runStats --by hour should be rejected")
+	}
+}
+
+// TestLSCostColumnNeverClaimsZero pins the presentation rule for ls: an
+// unpriced call renders "—" plus the reason, never "$0.00".
+func TestLSCostColumnNeverClaimsZero(t *testing.T) {
+	st := newTestStore(t)
+	unpriced := "unpriced"
+	seedRequest(t, st, func(r *store.Request) { r.CostUSD = nil; r.CostSource = &unpriced })
+	seedRequest(t, st, nil) // priced
+
+	var buf bytes.Buffer
+	if err := runLS(nil, &buf, st); err != nil {
+		t.Fatalf("runLS: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "$0.00") {
+		t.Errorf("ls rendered a $0.00 cost for an unpriced call:\n%s", out)
+	}
+	if !strings.Contains(out, "(unpriced)") {
+		t.Errorf("ls did not name the cost source:\n%s", out)
+	}
+}
+
+// --- prices ---
+
+func TestPricesSetWritesTheFileAndPrintsTheUnit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prices.toml")
+
+	var buf bytes.Buffer
+	if err := runPrices([]string{
+		"--set", "deepseek-flash.input=0.28",
+		"--set", "deepseek-flash.output=0.42",
+	}, &buf, path); err != nil {
+		t.Fatalf("runPrices --set: %v", err)
+	}
+	// A bare "0.28" beside a model name is ambiguous between per-token and
+	// per-million-token, so the unit has to be in the header.
+	if !strings.Contains(buf.String(), "per 1,000,000 tokens") {
+		t.Errorf("price table header does not name the unit:\n%s", buf.String())
+	}
+
+	tbl, err := pricing.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	r := tbl["deepseek-flash"]
+	if r.Input == nil || *r.Input != 0.28 || r.Output == nil || *r.Output != 0.42 {
+		t.Errorf("flash rates = %+v, want input 0.28 and output 0.42", r)
+	}
+	if r.Source() != pricing.SourceConfigured {
+		t.Errorf("source = %q, want %q", r.Source(), pricing.SourceConfigured)
+	}
+	// The shipped models survive an edit to one of them.
+	if _, ok := tbl["deepseek-v4-pro"]; !ok {
+		t.Error("deepseek-v4-pro vanished from the table after editing flash")
+	}
+}
+
+func TestPricesUnsetRevertsToUnpriced(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prices.toml")
+	var buf bytes.Buffer
+
+	if err := runPrices([]string{"--set", "deepseek-flash.input=0.28"}, &buf, path); err != nil {
+		t.Fatalf("runPrices --set: %v", err)
+	}
+	buf.Reset()
+	if err := runPrices([]string{"--unset", "deepseek-flash"}, &buf, path); err != nil {
+		t.Fatalf("runPrices --unset: %v", err)
+	}
+
+	tbl, err := pricing.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := tbl["deepseek-flash"].Source(); got != pricing.SourceUnpriced {
+		t.Errorf("source after --unset = %q, want %q", got, pricing.SourceUnpriced)
+	}
+	if !strings.Contains(buf.String(), "unpriced") {
+		t.Errorf("printed table does not show the model as unpriced:\n%s", buf.String())
+	}
+}
+
+func TestPricesRejectsBadRateWithoutWriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prices.toml")
+	for _, arg := range []string{
+		"deepseek-flash.input=-1",     // negative
+		"deepseek-flash.thinking=0.1", // unknown field
+		"deepseek-flash",              // no field
+		"deepseek-flash.input=abc",    // not a number
+	} {
+		var buf bytes.Buffer
+		if err := runPrices([]string{"--set", arg}, &buf, path); err == nil {
+			t.Errorf("--set %q was accepted", arg)
+		}
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a rejected --set still wrote %s (stat err = %v)", path, err)
+	}
+}
+
+func TestPricesPrintsTheShippedTableWithNoFlags(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prices.toml") // never written
+
+	var buf bytes.Buffer
+	if err := runPrices(nil, &buf, path); err != nil {
+		t.Fatalf("runPrices: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "deepseek-v4-pro") || !strings.Contains(out, "deepseek-flash") {
+		t.Errorf("shipped table missing a known model:\n%s", out)
+	}
+	if !strings.Contains(out, "unpriced") {
+		t.Errorf("shipped table should report both models as unpriced:\n%s", out)
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 	"sort"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
@@ -28,6 +28,7 @@ type statsJSON struct {
 	Since          time.Time         `json:"since"`
 	Summary        *store.Summary    `json:"summary"`
 	ByModel        []store.ModelStat `json:"by_model"`
+	ByDay          []store.DayStat   `json:"by_day"`
 	WarningsByKind map[string]int    `json:"warnings_by_kind"`
 	MeanDurationMs float64           `json:"mean_duration_ms"`
 }
@@ -35,9 +36,13 @@ type statsJSON struct {
 func runStats(args []string, w io.Writer, st *store.Store) error {
 	fs := flag.NewFlagSet("stats", flag.ContinueOnError)
 	since := fs.String("since", "24h", "time window: a Go duration (e.g. 24h, 30m) or RFC3339 timestamp")
+	by := fs.String("by", "model", "breakdown section: model or day")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *by != "model" && *by != "day" {
+		return fmt.Errorf("--by: invalid value %q (want model or day)", *by)
 	}
 	sinceTime, err := parseSince(*since)
 	if err != nil {
@@ -52,6 +57,10 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 	byModel, err := st.StatsByModel(ctx, sinceTime)
 	if err != nil {
 		return fmt.Errorf("stats by model: %w", err)
+	}
+	byDay, err := st.StatsByDay(ctx, sinceTime)
+	if err != nil {
+		return fmt.Errorf("stats by day: %w", err)
 	}
 
 	// ponytail: mean duration is sampled from up to store.DefaultLimit of
@@ -84,14 +93,15 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 
 	if *jsonOut {
 		return json.NewEncoder(w).Encode(statsJSON{
-			Since: sinceTime, Summary: summary, ByModel: byModel, WarningsByKind: byKind, MeanDurationMs: meanMs,
+			Since: sinceTime, Summary: summary, ByModel: byModel, ByDay: byDay,
+			WarningsByKind: byKind, MeanDurationMs: meanMs,
 		})
 	}
 
 	fmt.Fprintf(w, "window:        since %s\n", sinceTime.Format(time.RFC3339))
 	fmt.Fprintf(w, "calls:         %d (%d errors)\n", summary.RequestCount, summary.ErrorCount)
 	fmt.Fprintf(w, "tokens:        in=%s out=%s\n", humanTokens(summary.InputTokens), humanTokens(summary.OutputTokens))
-	fmt.Fprintf(w, "cost:          %s\n", humanCost(&summary.CostUSDTotal))
+	fmt.Fprintf(w, "cost:          %s\n", costCell(summary.CostUSDTotal, summary.RequestCount, summary.UnpricedCount))
 	fmt.Fprintf(w, "warnings:      %d\n", summary.WarningCount)
 	fmt.Fprintf(w, "duration:      mean=%s p50=%s p95=%s\n",
 		humanDuration(msToDuration(meanMs)),
@@ -112,25 +122,57 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 		fmt.Fprint(w, table([]string{"KIND", "COUNT"}, rows, 0))
 	}
 
+	if *by == "day" {
+		if len(byDay) > 0 {
+			fmt.Fprintln(w, "\nday split:")
+			rows := make([][]string, 0, len(byDay))
+			for _, d := range byDay {
+				rows = append(rows, []string{
+					d.Day,
+					strconv.Itoa(d.RequestCount),
+					fmt.Sprintf("%s/%s", humanTokens(d.InputTokens), humanTokens(d.OutputTokens)),
+					costCell(d.CostUSDTotal, d.RequestCount, d.UnpricedCount),
+				})
+			}
+			fmt.Fprint(w, table([]string{"DAY", "CALLS", "IN/OUT TOK", "COST"}, rows, 0))
+		}
+		return nil
+	}
+
 	if len(byModel) > 0 {
 		fmt.Fprintln(w, "\nmodel split:")
-		maxCount := 0
+		rows := make([][]string, 0, len(byModel))
 		for _, m := range byModel {
-			if m.RequestCount > maxCount {
-				maxCount = m.RequestCount
-			}
+			rows = append(rows, []string{
+				m.Model,
+				strconv.Itoa(m.RequestCount),
+				fmt.Sprintf("%s/%s", humanTokens(m.InputTokens), humanTokens(m.OutputTokens)),
+				costCell(m.CostUSDTotal, m.RequestCount, m.UnpricedCount),
+			})
 		}
-		const barWidth = 30
-		for _, m := range byModel {
-			barLen := 0
-			if maxCount > 0 {
-				barLen = m.RequestCount * barWidth / maxCount
-			}
-			fmt.Fprintf(w, "  %-24s %s %d\n", m.Model, strings.Repeat("█", barLen), m.RequestCount)
-		}
+		fmt.Fprint(w, table([]string{"MODEL", "CALLS", "IN/OUT TOK", "COST"}, rows, 0))
 	}
 
 	return nil
+}
+
+// costCell formats an aggregate cost under the bead's mixed-pricing rule:
+// when some of the group's calls have no price at all, the sum is partial and
+// says so. Printing a bare "$1.23" over a group that also contains unpriced
+// calls would report a total the tool cannot actually know — the whole point
+// of making "unpriced" a first-class state.
+//
+// priced is the group's total call count, since unpriced is always a subset
+// of it.
+func costCell(total float64, count, unpriced int) string {
+	switch {
+	case unpriced <= 0:
+		return fmt.Sprintf("$%.4f", total)
+	case unpriced >= count:
+		return fmt.Sprintf("— + %d unpriced", unpriced)
+	default:
+		return fmt.Sprintf("$%.4f + %d unpriced", total, unpriced)
+	}
 }
 
 func msToDuration(ms float64) time.Duration {

@@ -216,6 +216,42 @@ func TestStatsTotalsMatchFixture(t *testing.T) {
 	}
 }
 
+// TestStatsIncludesCostSourceBreakdown is br-GI-1-11's dashboard case: a
+// cost total alone cannot say whether it covered every call, so /api/stats
+// carries the breakdown by source too.
+func TestStatsIncludesCostSourceBreakdown(t *testing.T) {
+	st := newTestStore(t)
+	configured, unpriced, unknown := "configured", "unpriced", "unknown-model"
+	seedRequest(t, st, func(r *store.Request) { r.CostSource = &configured })
+	seedRequest(t, st, func(r *store.Request) { r.CostUSD = nil; r.CostSource = &unpriced })
+	seedRequest(t, st, func(r *store.Request) { r.CostUSD = nil; r.CostSource = &unknown })
+
+	handler, _, _, _ := newTestAPI(t, st)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/stats", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "cost_sources") {
+		t.Errorf("response has no cost_sources field: %s", body)
+	}
+
+	got := decodeJSON[statsResponse](t, strings.NewReader(body))
+	if got.Summary.UnpricedCount != 2 {
+		t.Errorf("UnpricedCount = %d, want 2", got.Summary.UnpricedCount)
+	}
+	bySource := map[string]int{}
+	for _, c := range got.CostSources {
+		bySource[c.Source] = c.RequestCount
+	}
+	for source, want := range map[string]int{"configured": 1, "unpriced": 1, "unknown-model": 1} {
+		if bySource[source] != want {
+			t.Errorf("cost_sources[%q] = %d, want %d (got %+v)", source, bySource[source], want, got.CostSources)
+		}
+	}
+}
+
 func TestListWarningsFilteredByKind(t *testing.T) {
 	st := newTestStore(t)
 	r1 := seedRequest(t, st, nil)

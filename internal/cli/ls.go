@@ -31,6 +31,7 @@ type lsJSONRow struct {
 	InputTokens  int       `json:"input_tokens"`
 	OutputTokens int       `json:"output_tokens"`
 	CostUSD      *float64  `json:"cost_usd"`
+	CostSource   *string   `json:"cost_source"`
 	Status       int       `json:"status"`
 	Warned       bool      `json:"warned"`
 }
@@ -73,7 +74,7 @@ func runLS(args []string, w io.Writer, st *store.Store) error {
 			row := lsJSONRow{
 				ID: r.ID, StartedAt: r.StartedAt, DurationMs: float64(r.Duration.Milliseconds()),
 				Model: displayModel(r), InputTokens: r.InputTokens, OutputTokens: r.OutputTokens,
-				CostUSD: r.CostUSD, Status: r.Status, Warned: warnedIDs[r.ID],
+				CostUSD: r.CostUSD, CostSource: r.CostSource, Status: r.Status, Warned: warnedIDs[r.ID],
 			}
 			if err := enc.Encode(row); err != nil {
 				return err
@@ -95,13 +96,26 @@ func runLS(args []string, w io.Writer, st *store.Store) error {
 			humanDuration(r.Duration),
 			displayModel(r),
 			fmt.Sprintf("%s/%s", humanTokens(int64(r.InputTokens)), humanTokens(int64(r.OutputTokens))),
-			humanCost(r.CostUSD),
+			costColumn(r),
 			fmt.Sprintf("%d", r.Status),
 			warnMark,
 		})
 	}
 	fmt.Fprint(w, table([]string{"ID", "TIME", "DUR", "MODEL", "IN/OUT TOK", "COST", "STATUS", "⚠"}, rows, 0))
 	return nil
+}
+
+// costColumn renders one row's COST cell: the amount via humanCost ("—" for a
+// call with no price, never "$0.00"), with the source named alongside it
+// whenever it is not "configured". "—" already says there is no price; the
+// source says why, which is the difference between a number the user should
+// configure and one the tool cannot know.
+func costColumn(r *store.Request) string {
+	cell := humanCost(r.CostUSD)
+	if r.CostSource != nil && *r.CostSource != "configured" {
+		cell += " (" + *r.CostSource + ")"
+	}
+	return cell
 }
 
 // displayModel prefers the resolved model (what the API actually reported

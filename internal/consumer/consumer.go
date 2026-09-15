@@ -2,9 +2,10 @@
 // rows: one goroutine, owned by Consumer.Run, that drains a *sink.Sink,
 // parses each call with internal/parse, and writes it through internal/store.
 // See CLAUDE.md's "cold-path pipeline order is fixed" — session resolution
-// and cost accounting (the latter not wired until br-GI-1-11) run before
-// InsertRequest because they populate columns on the row; analyzers run
-// after, because their warnings attach to the row by id.
+// and cost accounting run before InsertRequest because they populate columns
+// on the row; analyzers run after, because their warnings attach to the row
+// by id. Cost accounting (br-GI-1-11) is a plain step, not an Analyzer: it
+// produces column values, no warnings.
 //
 // Error containment is the point of this package: a bad body, a store
 // error, or a panicking analyzer is logged once and the loop moves on. If
@@ -23,9 +24,25 @@ import (
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/parse"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
+
+// microPerDollar is the micro-dollar scale pricing.Cost.Amount is denominated
+// in. It exists so the conversion to the dollars `requests.cost_usd` stores
+// has exactly one site: here, in the pre-insert cost step.
+const microPerDollar = 1e6
+
+// PriceTable is the price source the pre-insert cost step prices against.
+// *pricing.Loader is the production implementation — it re-reads
+// prices.toml when the file changes, which is what makes `lens prices --set`
+// take effect without restarting `lens serve`. pricing.Table satisfies it
+// directly (its Table method returns itself), so a test can inject fixed
+// rates with no wrapper.
+type PriceTable interface {
+	Table() pricing.Table
+}
 
 const (
 	// batchSize is the call count that forces a flush regardless of quiet time.
@@ -69,6 +86,7 @@ type Consumer struct {
 	store     Store
 	resolver  SessionResolver
 	analyzers []Analyzer
+	prices    PriceTable
 
 	processed     atomic.Uint64
 	failed        atomic.Uint64
@@ -78,10 +96,17 @@ type Consumer struct {
 
 // New builds a Consumer that drains sk and writes through st. resolver may
 // be nil (this bead injects nil — Request.SessionID stays unset). analyzers
-// run, in order, after every insert; the slice is empty by default.
+// run, in order, after every insert; the slice is empty by default. A price
+// table is installed separately with SetPriceTable.
 func New(sk *sink.Sink, st Store, resolver SessionResolver, analyzers ...Analyzer) *Consumer {
 	return &Consumer{sink: sk, store: st, resolver: resolver, analyzers: analyzers}
 }
+
+// SetPriceTable installs the price table the pre-insert cost step uses.
+// Leaving it unset is legal and leaves CostUSD/CostSource NULL on every row,
+// which is what br-GI-1-07's tests do — cost is a separate pre-insert step,
+// not an Analyzer, so it is not part of New's variadic.
+func (c *Consumer) SetPriceTable(pt PriceTable) { c.prices = pt }
 
 // Stats returns a snapshot of the consumer's counters.
 func (c *Consumer) Stats() Stats {
@@ -226,8 +251,8 @@ func (c *Consumer) processCall(ctx context.Context, call *sink.CapturedCall) {
 
 // doProcessCall runs the bead's fixed 9-step pipeline for one call:
 // ExtractMeta -> ExtractUsage -> build store.Request -> resolve session ->
-// (cost step: absent in this bead) -> InsertRequest -> run analyzers ->
-// synthesize an upstream_error warning if call.Err != nil -> InsertWarnings.
+// cost step -> InsertRequest -> run analyzers -> synthesize an upstream_error
+// warning if call.Err != nil -> InsertWarnings.
 func (c *Consumer) doProcessCall(ctx context.Context, call *sink.CapturedCall) {
 	meta := parse.ExtractMeta(call.ReqBody, call.ReqHeaders)
 	usage, _ := parse.ExtractUsage(call.RespBody, call.RespHeaders.Get("Content-Type"))
@@ -280,8 +305,21 @@ func (c *Consumer) doProcessCall(ctx context.Context, call *sink.CapturedCall) {
 		}
 	}
 
-	// Cost step (br-GI-1-11) belongs here, before InsertRequest, writing
-	// req.CostUSD/req.CostSource. Absent in this bead.
+	// Cost step (br-GI-1-11): priced *before* the insert because CostUSD and
+	// CostSource are columns on the row. It is not an analyzer — it returns
+	// no warnings — and it never fails the call: an unreadable or mid-edit
+	// price file degrades to "unpriced", per CLAUDE.md's "fail open". The
+	// model keyed is the upstream-resolved one, which is what the table is
+	// keyed by; an unresolved model is priced as "unknown-model".
+	if c.prices != nil {
+		cost := pricing.Compute(req.ModelResolved, usage, c.prices.Table())
+		if cost.Amount != nil {
+			dollars := float64(*cost.Amount) / microPerDollar
+			req.CostUSD = &dollars
+		}
+		src := cost.Source
+		req.CostSource = &src
+	}
 
 	id, err := c.store.InsertRequest(ctx, req)
 	if err != nil {

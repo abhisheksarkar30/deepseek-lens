@@ -14,6 +14,7 @@ import (
 	"github.com/abhisheksarkar30/deepseek-lens/internal/api"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/proxy"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
@@ -66,6 +67,12 @@ func Serve(args []string) error {
 	// keeps the flags->rules->rows path explicit, and Analyze stays a pure
 	// function of the config tables it is handed.
 	cons := consumer.New(sk, pubStore, nil, analyze.NewRules(cfg.ModelMap, cfg.ModelMaxTokens))
+	// The cost step (br-GI-1-11) is installed here rather than baked into
+	// consumer.New for the same reason the rules engine above is: it is a
+	// separate pre-insert step, not an analyzer, and br-GI-1-07's tests
+	// construct Consumers without one. The Loader re-reads prices.toml when
+	// it changes, so `lens prices --set` takes effect without a restart.
+	cons.SetPriceTable(pricing.NewLoader(pricing.DefaultPath()))
 
 	proxySrv, err := proxy.NewServer(cfg, sk)
 	if err != nil {

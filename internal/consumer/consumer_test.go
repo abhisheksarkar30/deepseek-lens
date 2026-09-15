@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/analyze"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/parse"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
@@ -506,6 +508,168 @@ func TestShutdownBound(t *testing.T) {
 	}
 	if len(reqs) != n {
 		t.Fatalf("got %d rows, want %d — all already-buffered calls should flush on shutdown", len(reqs), n)
+	}
+}
+
+// --- cost step (br-GI-1-11) ---
+
+func rate(v float64) *float64 { return &v }
+
+// pricedCall is simpleCall whose response reports the upstream-resolved model
+// the price table is keyed by, with a known input token count.
+func pricedCall(model string, inputTokens int) *sink.CapturedCall {
+	call := simpleCall()
+	call.RespBody = []byte(fmt.Sprintf(
+		`{"model":%q,"stop_reason":"end_turn","usage":{"input_tokens":%d}}`, model, inputTokens))
+	return call
+}
+
+// waitForRows polls until the store holds at least n requests, newest first.
+func waitForRows(t *testing.T, st *store.Store, n int) []*store.Request {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		reqs, err := st.ListRequests(context.Background(), store.Filter{Limit: n + 10})
+		if err != nil {
+			t.Fatalf("ListRequests: %v", err)
+		}
+		if len(reqs) >= n {
+			return reqs
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("fewer than %d rows within 3s", n)
+	return nil
+}
+
+// TestCostStepPricesConfiguredRows is the bead's integration case: with rates
+// configured, the row carries a cost_usd, a "configured" source, and the
+// stored 280000-micro-dollar call reads back as exactly 0.28.
+func TestCostStepPricesConfiguredRows(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, nil)
+	c.SetPriceTable(pricing.Table{"deepseek-flash": {Input: rate(0.28)}})
+
+	runClosed(t, c, sk, []*sink.CapturedCall{
+		pricedCall("deepseek-flash", 1_000_000),
+		pricedCall("deepseek-flash", 0), // a real zero, not an unpriced NULL
+	})
+
+	byTokens := map[int]*store.Request{}
+	for _, r := range waitForRows(t, st, 2) {
+		byTokens[r.InputTokens] = r
+	}
+
+	priced := byTokens[1_000_000]
+	if priced == nil {
+		t.Fatal("the 1,000,000-token row is missing")
+	}
+	got, err := st.GetRequest(context.Background(), priced.ID)
+	if err != nil {
+		t.Fatalf("GetRequest: %v", err)
+	}
+	if got.CostUSD == nil || *got.CostUSD != 0.28 {
+		t.Errorf("CostUSD = %v, want 0.28 read back from the column", got.CostUSD)
+	}
+	if got.CostSource == nil || *got.CostSource != pricing.SourceConfigured {
+		t.Errorf("CostSource = %v, want %q", got.CostSource, pricing.SourceConfigured)
+	}
+
+	zero := byTokens[0]
+	if zero == nil {
+		t.Fatal("the zero-token row is missing")
+	}
+	if zero.CostUSD == nil {
+		t.Error("CostUSD = NULL for a configured zero-token call, want a real 0")
+	} else if *zero.CostUSD != 0 {
+		t.Errorf("CostUSD = %v, want 0", *zero.CostUSD)
+	}
+}
+
+// TestCostStepLeavesUnpricedRowsNull is the other half: the shipped table
+// knows the model but has no rates, so cost_usd stays NULL and the source
+// says "unpriced" — never 0, which would read as "this call was free".
+func TestCostStepLeavesUnpricedRowsNull(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, nil)
+	c.SetPriceTable(pricing.Default())
+
+	runClosed(t, c, sk, []*sink.CapturedCall{pricedCall("deepseek-flash", 500)})
+
+	r := waitForRows(t, st, 1)[0]
+	if r.CostUSD != nil {
+		t.Errorf("CostUSD = %v, want NULL for an unpriced model", *r.CostUSD)
+	}
+	if r.CostSource == nil || *r.CostSource != pricing.SourceUnpriced {
+		t.Errorf("CostSource = %v, want %q", r.CostSource, pricing.SourceUnpriced)
+	}
+}
+
+// TestCostStepWithoutATableLeavesCostNull keeps the pre-bead behaviour: a
+// Consumer built without a price table (every br-GI-1-07/10 test) writes no
+// cost columns at all and is otherwise unaffected.
+func TestCostStepWithoutATableLeavesCostNull(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, nil)
+
+	runClosed(t, c, sk, []*sink.CapturedCall{pricedCall("deepseek-flash", 500)})
+
+	r := waitForRows(t, st, 1)[0]
+	if r.CostUSD != nil || r.CostSource != nil {
+		t.Errorf("cost = (%v, %v), want both nil with no price table", r.CostUSD, r.CostSource)
+	}
+}
+
+// TestCostStepTakesEffectWithoutRestart is the bead's "`lens prices --set`
+// writes prices.toml and takes effect without restart": the consumer is a
+// long-lived goroutine, so the second call must pick up the rewritten file
+// without anything being rebuilt.
+func TestCostStepTakesEffectWithoutRestart(t *testing.T) {
+	st := newTestStore(t)
+	path := filepath.Join(t.TempDir(), "prices.toml")
+	if err := pricing.Save(path, pricing.Table{"deepseek-flash": {Input: rate(0.28)}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	sk := sink.New(16)
+	c := New(sk, st, nil)
+	c.SetPriceTable(pricing.NewLoader(path))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- c.Run(ctx) }()
+
+	if !sk.Submit(pricedCall("deepseek-flash", 1_000_000)) {
+		t.Fatal("submit dropped")
+	}
+	before := waitForRows(t, st, 1)[0]
+	if before.CostUSD == nil || *before.CostUSD != 0.28 {
+		t.Fatalf("first call: CostUSD = %v, want 0.28", before.CostUSD)
+	}
+
+	// Exactly what `lens prices --set deepseek-flash.input=0.31` does.
+	time.Sleep(20 * time.Millisecond) // mtime granularity, not a race guard
+	if err := pricing.Save(path, pricing.Table{"deepseek-flash": {Input: rate(0.31)}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if !sk.Submit(pricedCall("deepseek-flash", 1_000_000)) {
+		t.Fatal("submit dropped")
+	}
+	rows := waitForRows(t, st, 2)
+	if rows[0].CostUSD == nil || *rows[0].CostUSD != 0.31 {
+		t.Errorf("second call: CostUSD = %v, want 0.31 from the rewritten file", rows[0].CostUSD)
+	}
+
+	cancel()
+	sk.Close()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel")
 	}
 }
 

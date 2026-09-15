@@ -95,6 +95,14 @@ type Filter struct {
 }
 
 // Summary is StatsSummary's result: totals over a time window.
+//
+// UnpricedCount is the number of requests with no cost at all (cost_usd IS
+// NULL, which is what an unpriced model or an absent price table writes). It
+// is separate from CostUSDTotal because COALESCE(SUM(cost_usd), 0) cannot
+// tell "the total is 0" from "N calls were never priced" — and presenting
+// the second as the first is the exact bug br-GI-1-11 exists to prevent. A
+// real $0.00 (zero tokens, or all tokens free) is priced, so it is not
+// counted here.
 type Summary struct {
 	RequestCount        int
 	ErrorCount          int
@@ -104,25 +112,38 @@ type Summary struct {
 	CacheCreationTokens int64
 	CacheReadTokens     int64
 	CostUSDTotal        float64
+	UnpricedCount       int
 	DurationP50Ms       float64
 	DurationP95Ms       float64
 }
 
-// ModelStat is one row of StatsByModel's result.
+// ModelStat is one row of StatsByModel's result. UnpricedCount is that
+// model's share of Summary.UnpricedCount.
 type ModelStat struct {
-	Model        string
-	RequestCount int
-	InputTokens  int64
-	OutputTokens int64
-	CostUSDTotal float64
+	Model         string
+	RequestCount  int
+	InputTokens   int64
+	OutputTokens  int64
+	CostUSDTotal  float64
+	UnpricedCount int
 }
 
 // DayStat is one row of StatsByDay's result, Day formatted "2006-01-02" in
-// UTC.
+// UTC. UnpricedCount is that day's share of Summary.UnpricedCount.
 type DayStat struct {
-	Day          string
+	Day           string
+	RequestCount  int
+	InputTokens   int64
+	OutputTokens  int64
+	CostUSDTotal  float64
+	UnpricedCount int
+}
+
+// CostSourceStat is one row of StatsByCostSource's result: how many requests
+// in the window carry each cost_source, and what they summed to. Source is
+// one of pricing's four values.
+type CostSourceStat struct {
+	Source       string
 	RequestCount int
-	InputTokens  int64
-	OutputTokens int64
 	CostUSDTotal float64
 }
