@@ -115,14 +115,22 @@ Resolve it first, in both files, in one line each:
   `const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");`
   and build `settingsPath`, `overridePath` and `deepseekEnvPath` from it. Drop the `home` binding
   if nothing else reads it.
-- **bash** — `config_dir="${CLAUDE_CONFIG_DIR:-${HOME:-$USERPROFILE}/.claude}"`, replacing the
-  prefix in the existing `override_file=` assignment at `:19` and used for the overlay read this
-  bead adds below.
+- **bash** — replace the existing `override_file=` assignment at `:19` with
+  `config_dir="${CLAUDE_CONFIG_DIR:-${USERPROFILE:-$HOME}/.claude}"`, build `override_file` from
+  `config_dir`, and use `config_dir` for the overlay read this bead adds below.
 
-`CLAUDE_CONFIG_DIR` first, then today's expression unchanged. That ordering *is* the change: when
-the variable is unset — the default, and every existing user — the resolved path is
-byte-identical to what each file computes today, so neither hook can regress for anyone who has
-not relocated their config directory.
+`CLAUDE_CONFIG_DIR` first, then Claude Code's own home rule. That is the change, and it corrects
+two things at once: the JS half honors the relocation variable, and the bash half's *fallback* is
+itself fixed. The guard's old `${HOME:-$USERPROFILE}` preferred `HOME`, so on Windows — where
+Claude Code means `%USERPROFILE%\.claude` — it read a directory Claude Code never uses;
+`${USERPROFILE:-$HOME}` is Claude Code's rule, and the same one the JS `os.homedir()` already
+applies. With the variable unset, both hooks therefore resolve the same directory.
+
+That fallback correction is why the *unset* path is not "today's expression unchanged". It is
+identical wherever `HOME` and the platform home agree — all of Unix, and Windows where `HOME` is
+unset or already equals `%USERPROFILE%`. It is *deliberately changed* only where they diverge on
+Windows, from the `$HOME` directory Claude Code ignores to `%USERPROFILE%\.claude`, the one it
+reads; that divergence was a defect, not a behaviour to preserve.
 
 It rides in this bead rather than a sibling one for two reasons. **The bead already puts both
 files on this question**: the toggle's predicate is defined against the overlay, and the guard
@@ -157,8 +165,9 @@ assume where `~/.claude` is, and that assumption is wrong for exactly the user w
 deliberately. It belongs here because the predicate this bead adds is *defined in terms of that
 directory* — "the base URL the overlay declares" is only well-formed once both files agree on
 which overlay — so fixing the predicate while leaving the path hardcoded would leave the two
-clause lookups resolving against different files for a relocated user. One line per file,
-no new surface, and byte-identical behaviour for everyone who has not set the variable.
+clause lookups resolving against different files for a relocated user. One line per file, no new
+surface; and the guard's fallback is *corrected*, not merely extended with a prefix, so the only
+unset-path behaviour it changes is the one that was reading a directory Claude Code never uses.
 
 ## Outcome Definition
 
@@ -173,7 +182,10 @@ no new surface, and byte-identical behaviour for everyone who has not set the va
 - Existing cases are unaffected: a direct `api.deepseek.com` URL behaves exactly as before, in
   both hooks, on both sides of the peak window.
 - Both hooks find `settings.json` and the overlay through `CLAUDE_CONFIG_DIR` when it is set, and
-  through the platform home helper when it is not.
+  through Claude Code's own home rule when it is not.
+- With `CLAUDE_CONFIG_DIR` unset, both hooks resolve the same directory — whichever of
+  `USERPROFILE` or `HOME` the platform sets — so the guard reads the overlay Claude Code and the
+  toggle use.
 
 ## Test Specifications
 
@@ -212,9 +224,31 @@ no new surface, and byte-identical behaviour for everyone who has not set the va
   there covers every site.
 - **Relocated config directory**: point `CLAUDE_CONFIG_DIR` at the fixture while the platform home
   variables name a directory that does *not* exist, and assert both hooks still find the overlay
-  and `settings.json` — the toggle leaves the lens URL in place off-peak, and the guard blocks at
-  peak. Plus the mirror case: `CLAUDE_CONFIG_DIR` unset, home variables pointed at the fixture, so
-  the fallback is pinned as well. These two cases fail against either hook's pre-change code.
+  and `settings.json`. The toggle is asserted on both sides of the window: off-peak it leaves the
+  lens URL in place *and* emits no `couldn't read` systemMessage (a toggle that ignores
+  `CLAUDE_CONFIG_DIR` reads the absent home directory, prints that message at
+  `deepseek-auto-toggle.js:62-70` and returns — so the file is untouched for the wrong reason, and
+  only the absent-message assertion catches it), and at peak it removes the overlay's env block
+  and the owned `settings` keys (a toggle with no fold-in removes nothing, so the case fails where
+  the off-peak no-write alone would not). The guard half blocks at peak. The relocated case now
+  fails against either hook's pre-change code — the toggle because its pre-change run reads the
+  missing home directory and acts on nothing, the guard because its pre-change run has no overlay
+  read to match the lens URL against.
+  - **Mirror case — `CLAUDE_CONFIG_DIR` unset, and the two home variables disagree.** The case
+    above pins the variable-*set* path; this pins the fallback, and it is where the guard's
+    `HOME`-first bug is caught. Set `USERPROFILE` and `HOME` to two *different* fixture
+    directories, both populated and distinguishable; the harness's inline prefixes set them to the
+    *same* `$tmp`, so this is the first case to make them differ. Neutralise the harness's global
+    `export CLAUDE_CONFIG_DIR` with an empty-value prefix (`CLAUDE_CONFIG_DIR=`), which both hooks
+    read as unset — `:-` in bash, `||` in JS. Assert the **guard blocks at peak** with its matching
+    overlay only under `USERPROFILE`: that holds on every platform (`${USERPROFILE:-$HOME}` reads
+    `USERPROFILE` whenever it is set) and it **fails against the guard's pre-change code**, whose
+    `${HOME:-$USERPROFILE}` reads the `HOME` directory and finds no match. The **toggle** half is
+    asserted against the directory its own home rule selects — `os.homedir()` is `USERPROFILE` on
+    Windows but `HOME` on Unix, where `USERPROFILE` is ignored — so it is written
+    platform-appropriately rather than as an unconditional "the toggle reads the `USERPROFILE`
+    directory", which would pass on Windows and fail on Unix. The guard assertion carries the
+    cross-platform weight; the toggle half is platform-appropriate, not Windows-gated.
 - Integration Tests (`deepseek-peak-guard.sh` — new cases in the same script, or a sibling):
   - Lens URL, peak → the block JSON is emitted with `"continue": false`.
   - Lens URL, off-peak → no output.
