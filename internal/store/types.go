@@ -1,0 +1,119 @@
+package store
+
+import "time"
+
+// Request is one proxied call, row-for-row with the requests table. Nullable
+// columns (nothing populated until a later bead runs, or genuinely absent on
+// this request) are pointer fields so nil round-trips as SQL NULL rather
+// than as a zero value — see store.go's scan/insert code for the discipline
+// this requires.
+type Request struct {
+	ID         int64
+	StartedAt  time.Time
+	TTFB       time.Duration
+	Duration   time.Duration
+	Method     string
+	Path       string
+	RemoteAddr string
+	Status     int
+
+	// ReqHeaders/RespHeaders are pre-redacted JSON (caller's job, per
+	// internal/proxy/redact.go) — store persists them as opaque text and
+	// never parses them, except RedactCheck's belt-and-braces scan.
+	ReqHeaders  string
+	RespHeaders string
+	ReqBody     []byte
+	RespBody    []byte
+
+	InputTokens         int
+	OutputTokens        int
+	CacheCreationTokens int
+	CacheReadTokens     int
+	StopReason          *string
+
+	ModelRequested string // as the client sent it
+	ModelResolved  string // as usage.Model reported it back; "" if unknown
+
+	ErrorText *string
+
+	SessionHeader *string // raw x-lens-session header value, if any
+	SessionID     *string // resolved session key (br-GI-1-07/12), joins Session.ID
+
+	CostUSD    *float64
+	CostSource *string
+
+	ReplayOf    *int64
+	ReplayEdits *string // JSON blob describing what a replay changed
+
+	PrefixHash string
+}
+
+// Warning is one analyzer finding attached to a Request (e.g. a dropped
+// parameter, per CLAUDE.md). Kind/Severity/Message are free-form strings
+// owned by whichever analyzer bead (br-GI-1-09/10) produces them.
+type Warning struct {
+	ID        int64
+	RequestID int64
+	Kind      string
+	Severity  string
+	Message   string
+	CreatedAt time.Time
+}
+
+// Session groups requests correlated by SessionHeader/PrefixHash and an
+// inactivity gap (br-GI-1-07). ID is the session's correlation key, not a
+// surrogate — it's what Request.SessionID points at.
+type Session struct {
+	ID           string
+	FirstSeen    time.Time
+	LastSeen     time.Time
+	RequestCount int
+}
+
+// Filter narrows ListRequests and ListWarnings. Only the fields relevant to
+// the call being made are read — ListRequests ignores Kind/Severity,
+// ListWarnings ignores SessionID/Model/OnlyWarned/OnlyErrors.
+type Filter struct {
+	Limit      int // 0 means DefaultLimit, never unbounded
+	Since      time.Time
+	SessionID  string
+	Model      string
+	OnlyWarned bool
+	OnlyErrors bool
+
+	Kind     string
+	Severity string
+}
+
+// Summary is StatsSummary's result: totals over a time window.
+type Summary struct {
+	RequestCount        int
+	ErrorCount          int
+	WarningCount        int
+	InputTokens         int64
+	OutputTokens        int64
+	CacheCreationTokens int64
+	CacheReadTokens     int64
+	CostUSDTotal        float64
+	DurationP50Ms       float64
+	DurationP95Ms       float64
+}
+
+// ModelStat is one row of StatsByModel's result.
+type ModelStat struct {
+	Model        string
+	RequestCount int
+	InputTokens  int64
+	OutputTokens int64
+	CostUSDTotal float64
+}
+
+// DayStat is one row of StatsByDay's result, Day formatted "2006-01-02" in
+// UTC.
+type DayStat struct {
+	Day          string
+	RequestCount int
+	InputTokens  int64
+	OutputTokens int64
+	CostUSDTotal float64
+}
