@@ -46,6 +46,11 @@ func Serve(args []string) error {
 	}
 	defer st.Close()
 
+	// br-GI-1-06's startup self-test: scan stored header JSON for a
+	// reachable x-api-key value, belt-and-braces for the redaction the
+	// proxy already applies.
+	checkRedaction(context.Background(), st, log.Printf)
+
 	sk := sink.New(sink.DefaultCapacity)
 	broker := api.NewBroker()
 	// PublishingStore wraps st so the consumer's writes also publish SSE
@@ -143,6 +148,19 @@ func Serve(args []string) error {
 	<-consumerDone
 
 	return nil
+}
+
+// checkRedaction runs br-GI-1-06's startup leak self-test and reports the
+// result through logf. It logs and continues rather than refusing to start:
+// a reachable credential is worth knowing about, but a coding session must
+// not die over the observer's problem (CLAUDE.md's "fail open"). Split out
+// from Serve so the wiring is testable — the self-test's whole value is
+// that it actually runs at boot, which is not true of a function no one
+// calls.
+func checkRedaction(ctx context.Context, st *store.Store, logf func(string, ...any)) {
+	if err := st.RedactCheck(ctx); err != nil {
+		logf("serve: %v", err)
+	}
 }
 
 // printBanner prints the copy-pasteable ANTHROPIC_BASE_URL line, the

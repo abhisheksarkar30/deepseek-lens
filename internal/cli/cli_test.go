@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -764,5 +765,52 @@ func TestTailPlainOutputWhenNotTTY(t *testing.T) {
 	}
 	if !strings.Contains(out, "deepseek-chat") {
 		t.Errorf("tail did not print the seeded request:\n%s", out)
+	}
+}
+
+// TestServeRedactionCheckReportsALeak proves the boot self-test is actually
+// wired and notifies: a stored request whose header JSON still carries a
+// reachable x-api-key must produce a logged line naming that request. This
+// is the only test that exercises the call site in Serve, which is what
+// keeps RedactCheck from quietly becoming dead code again.
+func TestServeRedactionCheckReportsALeak(t *testing.T) {
+	st := newTestStore(t)
+	sentinel := "TESTSENTINEL-do-not-leak-1234567890"
+	leaked := seedRequest(t, st, func(r *store.Request) {
+		r.ReqHeaders = `{"X-Api-Key":["` + sentinel + `"],"Content-Type":["application/json"]}`
+	})
+
+	var lines []string
+	checkRedaction(context.Background(), st, func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly one logged line, got %d: %v", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], sentinel) {
+		t.Errorf("log line does not name the leaked value: %q", lines[0])
+	}
+	if !strings.Contains(lines[0], fmt.Sprintf("request %d", leaked.ID)) {
+		t.Errorf("log line does not name request %d: %q", leaked.ID, lines[0])
+	}
+}
+
+// TestServeRedactionCheckSilentOnCleanStore is the negative half: a store
+// whose headers are already redacted must log nothing, so the check cannot
+// become noise that gets ignored.
+func TestServeRedactionCheckSilentOnCleanStore(t *testing.T) {
+	st := newTestStore(t)
+	seedRequest(t, st, func(r *store.Request) {
+		r.ReqHeaders = `{"X-Api-Key":["[redacted]"],"Content-Type":["application/json"]}`
+	})
+
+	var lines []string
+	checkRedaction(context.Background(), st, func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+
+	if len(lines) != 0 {
+		t.Errorf("expected no log output for an already-redacted store, got: %v", lines)
 	}
 }
