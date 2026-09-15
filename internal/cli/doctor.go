@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
@@ -130,6 +131,8 @@ func runChecks(cfg *config.Config) []doctorCheck {
 
 	checks = append(checks, doctorCheck{"schema_version", statusPass, "n/a — no migrations table in v1"})
 
+	checks = append(checks, providerHookCheck(cfg))
+
 	// Sink accepted/dropped and consumer last-write age live only in a
 	// running `lens serve` process's memory, so doctor reads them from that
 	// process's dashboard API (br-GI-1-09's GET /api/health). A standalone
@@ -214,6 +217,125 @@ func dirWritable(dir string) bool {
 	f.Close()
 	os.Remove(name)
 	return true
+}
+
+// claudeConfigDir resolves Claude Code's config directory by Claude Code's
+// own precedence, not lens's — config.userHomeDir (internal/config/config.go)
+// resolves $HOME first so lens's own files (config.toml, prices.toml, the
+// database) redirect uniformly in tests, but that is the wrong answer here:
+// Claude Code's documented Windows rule is that ~/.claude means
+// %USERPROFILE%\.claude, not $HOME/.claude. Steps 2-4 are exactly what
+// Node's os.homedir() resolves in the hooks, so this reads the same file
+// they do.
+func claudeConfigDir() string {
+	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
+		return d
+	}
+	if up := os.Getenv("USERPROFILE"); up != "" {
+		return filepath.Join(up, ".claude")
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		return filepath.Join(home, ".claude")
+	}
+	if h, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(h, ".claude")
+	}
+	return ""
+}
+
+// readSettingsBaseURL reads the effective ANTHROPIC_BASE_URL from Claude
+// Code's settings.json. Any read or parse failure, or an absent value,
+// reports not-found rather than propagating an error: settings.json is the
+// plugin's file, and every way it can be missing or broken is a
+// "nothing to check" state for provider_hooks, never a doctor failure.
+func readSettingsBaseURL(path string) (url string, ok bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	var s struct {
+		Env struct {
+			ANTHROPICBaseURL string `json:"ANTHROPIC_BASE_URL"`
+		} `json:"env"`
+	}
+	if err := json.Unmarshal(data, &s); err != nil || s.Env.ANTHROPICBaseURL == "" {
+		return "", false
+	}
+	return s.Env.ANTHROPICBaseURL, true
+}
+
+// readOverlayBaseURL reads the declared ANTHROPIC_BASE_URL from
+// .deepseek-env.json, accepting both shapes br-GI-4-07's JS predicate
+// handles: the sectioned one ({"env": {...}, "settings": {...}}) and the
+// legacy flat one (a bare map of env keys). present is false for an absent,
+// unreadable, or invalid overlay — the caller reads that as "plugin not
+// managing this machine", not an error.
+func readOverlayBaseURL(path string) (declared string, present bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return "", false
+	}
+	if envRaw, ok := raw["env"]; ok {
+		var env struct {
+			ANTHROPICBaseURL string `json:"ANTHROPIC_BASE_URL"`
+		}
+		_ = json.Unmarshal(envRaw, &env)
+		return env.ANTHROPICBaseURL, true
+	}
+	if _, ok := raw["settings"]; ok {
+		return "", true
+	}
+	var flat struct {
+		ANTHROPICBaseURL string `json:"ANTHROPIC_BASE_URL"`
+	}
+	_ = json.Unmarshal(data, &flat)
+	return flat.ANTHROPICBaseURL, true
+}
+
+// providerHookCheck reports whether the plugin hooks (br-GI-4-07) recognize
+// this session's route — the third copy of their predicate, written once,
+// in their clause order: substring on "deepseek" first, then equality with
+// the overlay's declared URL. It can only PASS or WARN, never FAIL: a user
+// with no plugin, no Claude Code, or a deliberately direct setup must still
+// get a clean `doctor` (see liveStatsCheck for the same reasoning applied to
+// a missing `serve`).
+func providerHookCheck(cfg *config.Config) doctorCheck {
+	dir := claudeConfigDir()
+	if dir == "" {
+		return doctorCheck{"provider_hooks", statusPass, "could not resolve a Claude Code config directory — nothing to check"}
+	}
+
+	settingsPath := filepath.Join(dir, "settings.json")
+	effectiveURL, ok := readSettingsBaseURL(settingsPath)
+	if !ok {
+		return doctorCheck{"provider_hooks", statusPass, "no ANTHROPIC_BASE_URL in " + settingsPath + " — plugin not managing this session"}
+	}
+
+	if strings.Contains(effectiveURL, "deepseek") {
+		return doctorCheck{"provider_hooks", statusPass, "peak guard recognizes this route (ANTHROPIC_BASE_URL contains \"deepseek\")"}
+	}
+
+	overlayPath := filepath.Join(dir, ".deepseek-env.json")
+	declaredURL, overlayPresent := readOverlayBaseURL(overlayPath)
+	if !overlayPresent {
+		return doctorCheck{"provider_hooks", statusPass, "no " + overlayPath + " — plugin not managing this machine"}
+	}
+
+	if effectiveURL == declaredURL {
+		return doctorCheck{"provider_hooks", statusPass, "peak guard recognizes this route (declared by " + overlayPath + ")"}
+	}
+
+	if lensURL := "http://" + cfg.ProxyAddr; effectiveURL == lensURL {
+		return doctorCheck{"provider_hooks", statusWarn, fmt.Sprintf(
+			"peak guard will NOT fire: %s points ANTHROPIC_BASE_URL at %s, but %s declares %s",
+			settingsPath, effectiveURL, overlayPath, declaredURL)}
+	}
+
+	return doctorCheck{"provider_hooks", statusPass, "effective ANTHROPIC_BASE_URL does not match the lens proxy address — nothing to check"}
 }
 
 // hostResolves reports whether rawURL's host resolves via DNS. It never

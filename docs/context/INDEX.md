@@ -57,4 +57,6 @@ ADR).
 
 ## Last generated / refreshed
 
-2026-09-15, FRESH mode, whole-repository scope.
+2026-09-15, REFRESH mode, scoped to the GI-4 peak-pricing/hook-integration story (peak-aware
+`pricing.Compute`, the `peak_pricing` warning kind, and doctor's `provider_hooks` check).
+Originally generated 2026-09-15, FRESH mode, whole-repository scope.

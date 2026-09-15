@@ -36,6 +36,18 @@ has not yet extended to a JS test runner).
 - Doctor's live-stats check, both server-up and server-down paths —
   `TestDoctorReportsLiveStatsFromRunningServer`, `TestDoctorWarnsWhenServerNotRunning`
   ([internal/cli/cli_test.go](../../internal/cli/cli_test.go)).
+- Doctor's `provider_hooks` check (whether the plugin hooks recognize this route) — every
+  predicate-clause combination, every no-plugin file state (missing/unreadable/malformed
+  `settings.json` or `.deepseek-env.json`), and `claudeConfigDir`'s
+  `CLAUDE_CONFIG_DIR` > `USERPROFILE` > `HOME` resolver precedence, isolated per test via
+  `t.Setenv` rather than the real machine's config directory
+  ([internal/cli/cli_test.go](../../internal/cli/cli_test.go)).
+- Cost has a time dimension: `pricing.IsPeak`'s weekday/weekend and UTC-boundary correctness,
+  and that `Compute` multiplies each category's rate by two before summing/rounding rather than
+  rounding the off-peak total and doubling it (`TestComputePeakRoundsSumNotTotal`) — see
+  [internal/pricing/pricing_test.go](../../internal/pricing/pricing_test.go). The
+  `peak_pricing` warning that surfaces this on a request row is covered separately in
+  [internal/analyze/analyze_test.go](../../internal/analyze/analyze_test.go).
 - Store's single-writer discipline under concurrency —
   `TestConcurrentInsertsSerialize` ([internal/store/store_test.go](../../internal/store/store_test.go)),
   which runs unconditionally (no `//go:build race` tag). The race-on/race-off test pair

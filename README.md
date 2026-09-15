@@ -100,6 +100,7 @@ request that caused it (`Path`), and a sentence naming what happened.
 | `param_ignored` | info | A parameter DeepSeek accepts and then does nothing with. `Path` names which: `top_k`, `service_tier`, `container`, `mcp_servers`, or a `max_tokens` above the resolved model's known ceiling. |
 | `header_ignored` | info | The `anthropic-beta` request header is ignored for `/messages`. |
 | `upstream_error` | error | The upstream returned an error. Raised here when the error object arrives inside a 200 body (how the Anthropic wire reports overload and invalid requests once a stream has begun), and by the capture pipeline for a transport-level failure — the same kind, because it means the same thing to the reader. |
+| `peak_pricing` | warn | The call landed inside DeepSeek's 01:00-04:00 or 06:00-10:00 UTC (Mon-Fri) peak-pricing window, so `cost_usd` reflects DeepSeek's 2x peak rate rather than the configured off-peak one. |
 | `analyzer_panic` | error | A warning rule itself panicked. The call is still recorded; this row is the rule failing, not the request. It is the only kind raised by the pipeline rather than by a rule. |
 <!-- END warning kinds -->
 
@@ -138,6 +139,19 @@ affected row reads `— (unpriced)`, and `lens stats` reports the unpriced count
 rather than folding it in as zero.
 
 `lens prices --edit` opens the file in `$EDITOR` if you would rather edit it directly.
+
+**Peak pricing.** DeepSeek bills 2x during its peak-pricing window — 01:00–04:00 and 06:00–10:00
+UTC, Monday through Friday. That window and the 2x multiplier are DeepSeek's, not lens's: the
+rates you configure above are the *off-peak* rates, and lens applies the multiplier itself for any
+call whose timestamp falls inside the window. A call priced at peak shows a `cost_usd` that is 2x
+what the same call would cost off-peak, and carries a [`peak_pricing`](#what-was-silently-dropped)
+warning naming the window so the doubled number has an explanation attached.
+
+This needs no plugin. The multiplier and the warning are computed by lens itself from the request's
+own timestamp, so they apply whether or not the
+[optional DeepSeek/Claude Pro plugin hooks](https://github.com/abhisheksarkar30/agentic-ai-artifacts)
+are installed — if you run no plugin at all, the `peak_pricing` warning is your only notice that
+part of a session's spend landed inside the peak window.
 
 ## Sessions
 

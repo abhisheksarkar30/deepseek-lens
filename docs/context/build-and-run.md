@@ -41,7 +41,18 @@ client itself sends.
 | `LENS_MODEL_MAP` | Client-model → DeepSeek-model table | optional |
 | `LENS_MODEL_MAX_TOKENS` | Per-model `max_tokens` ceiling table | optional |
 | `HOME` (read, not `LENS_*`) | Resolves `~/.deepseek-lens/{lens.db,config.toml,prices.toml}` | optional, falls back to `os.UserHomeDir()` |
+| `CLAUDE_CONFIG_DIR` (read, not `LENS_*`) | Locates a *different* home directory — Claude Code's, not lens's | optional |
 | `ANTHROPIC_BASE_URL` (client-side, not read by lens) | What the *client* (Claude Code/Cline) must set to point at the proxy | required by the client, not by `lens` |
+
+`HOME` and `CLAUDE_CONFIG_DIR` answer two unrelated questions and must not be conflated: `HOME`
+locates *lens's own* files (`~/.deepseek-lens/*`), while `CLAUDE_CONFIG_DIR` locates *Claude
+Code's* config directory (`settings.json`, `.deepseek-env.json`), read only by `lens doctor`'s
+`provider_hooks` check to report whether the plugin hooks (a separate, optional repo) recognize
+this route. The two also resolve with different precedence — `claudeConfigDir` tries
+`CLAUDE_CONFIG_DIR`, then `USERPROFILE`, then `HOME`, then `os.UserHomeDir()`, matching Claude
+Code's own documented Windows rule (`~/.claude` means `%USERPROFILE%\.claude`, not `$HOME/.claude`)
+rather than lens's `$HOME`-first `config.userHomeDir` —
+[internal/cli/doctor.go](../../internal/cli/doctor.go).
 
 Config file: `~/.deepseek-lens/config.toml` (flat `key = value` format, not real TOML — see
 [conventions.md](conventions.md)). Price table: `~/.deepseek-lens/prices.toml`, same flat format,

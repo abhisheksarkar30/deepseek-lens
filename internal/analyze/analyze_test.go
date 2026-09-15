@@ -559,3 +559,68 @@ func TestNewRulesFallsBackToDefaults(t *testing.T) {
 		})
 	}
 }
+
+// friPeak and friOff share the fixture date internal/pricing's own boundary
+// tests use (Friday 2026-09-11) — see that package's pricing_test.go comment
+// on why sharing the date is deliberate but detects no drift on its own.
+var (
+	friPeak = time.Date(2026, 9, 11, 7, 0, 0, 0, time.UTC)  // inside the window
+	friOff  = time.Date(2026, 9, 11, 20, 0, 0, 0, time.UTC) // outside it
+	friWknd = time.Date(2026, 9, 12, 7, 0, 0, 0, time.UTC)  // Saturday, same clock hour as friPeak
+)
+
+// TestRulePeakPricing is br-GI-4-03's case list: the rule fires only for a
+// call that was both inside the peak window and actually priced with real
+// spend.
+func TestRulePeakPricing(t *testing.T) {
+	cleanMeta := parse.Meta{ModelRequested: "deepseek-v4-pro"}
+
+	t.Run("peak + priced", func(t *testing.T) {
+		req := &store.Request{StartedAt: friPeak, CostUSD: fp(0.28)}
+		got := Analyze(cleanMeta, parse.Usage{}, req)
+		if len(got) != 1 || got[0].Kind != string(KindPeakPricing) || got[0].Severity != sevWarn {
+			t.Fatalf("got %s, want exactly one warn-severity peak_pricing warning", format(got))
+		}
+	})
+
+	t.Run("peak + unpriced", func(t *testing.T) {
+		req := &store.Request{StartedAt: friPeak, CostUSD: nil}
+		if got := Analyze(cleanMeta, parse.Usage{}, req); len(got) != 0 {
+			t.Errorf("got %s, want no warnings for an unpriced call", format(got))
+		}
+	})
+
+	t.Run("peak + zero-token configured", func(t *testing.T) {
+		req := &store.Request{StartedAt: friPeak, CostUSD: fp(0)}
+		if got := Analyze(cleanMeta, parse.Usage{}, req); len(got) != 0 {
+			t.Errorf("got %s, want no warnings for a real, non-nil $0 cost", format(got))
+		}
+	})
+
+	t.Run("off-peak + priced", func(t *testing.T) {
+		req := &store.Request{StartedAt: friOff, CostUSD: fp(0.28)}
+		if got := Analyze(cleanMeta, parse.Usage{}, req); len(got) != 0 {
+			t.Errorf("got %s, want no warnings off-peak", format(got))
+		}
+	})
+
+	t.Run("weekend + priced", func(t *testing.T) {
+		req := &store.Request{StartedAt: friWknd, CostUSD: fp(0.28)}
+		if got := Analyze(cleanMeta, parse.Usage{}, req); len(got) != 0 {
+			t.Errorf("got %s, want no warnings on a weekend (the window is a weekday rule)", format(got))
+		}
+	})
+
+	t.Run("composes with an existing rule", func(t *testing.T) {
+		meta := parse.Meta{ModelRequested: "deepseek-v4-pro", TopP: fp(0.5)}
+		req := &store.Request{StartedAt: friPeak, CostUSD: fp(0.5)}
+		got := Analyze(meta, parse.Usage{}, req)
+		if len(got) != 2 {
+			t.Fatalf("got %d warnings, want 2:\n%s", len(got), format(got))
+		}
+		if got[0].Kind != string(KindTopPClamped) || got[1].Kind != string(KindPeakPricing) {
+			t.Errorf("got kinds [%q, %q], want [%q, %q] — the rule table's order",
+				got[0].Kind, got[1].Kind, KindTopPClamped, KindPeakPricing)
+		}
+	})
+}

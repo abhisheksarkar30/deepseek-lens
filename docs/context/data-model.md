@@ -64,7 +64,8 @@ enforced in Go:
 - `warnings.kind` — one of the `analyze.Kind` constants (`cache_control_ignored`,
   `budget_tokens_ignored`, `top_p_clamped`, `top_p_below_floor`, `parallel_tool_use_ignored`,
   `model_remapped`, `model_mapping_drift`, `unsupported_content_block`, `param_ignored`,
-  `header_ignored`, `upstream_error`) — see [internal/analyze/kinds.go](../../internal/analyze/kinds.go)
+  `header_ignored`, `upstream_error`, `peak_pricing`) — see
+  [internal/analyze/kinds.go](../../internal/analyze/kinds.go)
   — plus `analyzer_panic`, which the consumer itself attaches (not an `analyze.Kind`) when an
   analyzer panics, see [internal/consumer/consumer.go](../../internal/consumer/consumer.go).
 - `warnings.severity` — `info` / `warn` / `error`, assigned per-rule in

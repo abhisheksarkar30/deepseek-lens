@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/parse"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
 
@@ -44,6 +45,7 @@ var rules = []ruleFunc{
 	ruleMaxTokensExceedsCeiling,
 	ruleHeaderIgnored,
 	ruleUpstreamError,
+	rulePeakPricing,
 }
 
 // ruleCacheControlIgnored: DeepSeek ignores cache_control outright, so a
@@ -245,6 +247,23 @@ func ruleUpstreamError(in ruleInput) []store.Warning {
 		return nil
 	}
 	return []store.Warning{warn(KindUpstreamError, sevError, "upstream returned an error: "+msg, "error")}
+}
+
+// rulePeakPricing names the calls DeepSeek billed at its 2x peak rate, so a
+// doubled cost_usd has an explanation attached rather than looking like
+// unexplained drift. It fires only when the call was actually priced and
+// carried spend: a nil CostUSD is an unpriced call, and a configured model
+// with zero tokens prices to a real, non-nil 0 — neither is something this
+// rule can honestly claim was "billed at peak".
+func rulePeakPricing(in ruleInput) []store.Warning {
+	if in.req.CostUSD == nil || *in.req.CostUSD <= 0 {
+		return nil
+	}
+	if !pricing.IsPeak(in.req.StartedAt) {
+		return nil
+	}
+	return []store.Warning{warn(KindPeakPricing, sevWarn,
+		"this call landed inside DeepSeek's peak-pricing window (01:00-04:00 or 06:00-10:00 UTC, Mon-Fri); cost_usd reflects the 2x peak rate", "")}
 }
 
 // apiError is the error object's shape on the Anthropic-compatible wire:
