@@ -31,11 +31,20 @@ func newTestStore(t *testing.T) *store.Store {
 	return s
 }
 
+// fixedOffPeakStart is a pinned off-peak instant (Friday 2026-09-11, 20:00
+// UTC — same fixture date pricing_test.go's friOff uses) that simpleCall
+// stamps every call with, instead of time.Now(). Once the cost step prices a
+// row at the row's own StartedAt (br-GI-4-02), a time.Now()-derived
+// timestamp would make the exact-cost assertions below flip during
+// DeepSeek's actual peak-pricing window; pinning it off-peak keeps them
+// deterministic at any wall-clock hour.
+var fixedOffPeakStart = time.Date(2026, 9, 11, 20, 0, 0, 0, time.UTC)
+
 // simpleCall returns a well-formed, non-streaming, error-free call — the
 // baseline fixture most tests start from and tweak.
 func simpleCall() *sink.CapturedCall {
 	return &sink.CapturedCall{
-		StartedAt:   time.Now(),
+		StartedAt:   fixedOffPeakStart,
 		TTFB:        2 * time.Millisecond,
 		Duration:    9 * time.Millisecond,
 		Method:      "POST",
@@ -899,6 +908,43 @@ func TestCostStepPricesConfiguredRows(t *testing.T) {
 	}
 }
 
+// TestCostStepPricesAtCallsOwnStartedAt is br-GI-4-02's integration case: the
+// cost step prices each row at that row's own StartedAt, so a call placed
+// inside DeepSeek's peak window costs exactly double the same call placed
+// off-peak.
+func TestCostStepPricesAtCallsOwnStartedAt(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, nil)
+	c.SetPriceTable(pricing.Table{"deepseek-flash": {Input: rate(0.28)}})
+
+	peak := pricedCall("deepseek-flash", 1_000_000)
+	peak.StartedAt = time.Date(2026, 9, 11, 7, 0, 0, 0, time.UTC) // Friday, inside the window
+	off := pricedCall("deepseek-flash", 1_000_000)
+	off.StartedAt = time.Date(2026, 9, 11, 20, 0, 0, 0, time.UTC) // Friday, outside it
+
+	runClosed(t, c, sk, []*sink.CapturedCall{peak, off})
+
+	rows := waitForRows(t, st, 2)
+	var peakCost, offCost *float64
+	for _, r := range rows {
+		if r.StartedAt.Equal(peak.StartedAt) {
+			peakCost = r.CostUSD
+		} else if r.StartedAt.Equal(off.StartedAt) {
+			offCost = r.CostUSD
+		}
+	}
+	if peakCost == nil || offCost == nil {
+		t.Fatalf("peakCost=%v offCost=%v, want both rows found and priced", peakCost, offCost)
+	}
+	if *peakCost != 2**offCost {
+		t.Errorf("peak CostUSD = %v, want exactly 2x off-peak (%v)", *peakCost, *offCost)
+	}
+	if *offCost != 0.28 {
+		t.Errorf("off-peak CostUSD = %v, want 0.28", *offCost)
+	}
+}
+
 // TestCostStepLeavesUnpricedRowsNull is the other half: the shipped table
 // knows the model but has no rates, so cost_usd stays NULL and the source
 // says "unpriced" — never 0, which would read as "this call was free".
@@ -968,7 +1014,13 @@ func TestCostStepTakesEffectWithoutRestart(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	if !sk.Submit(pricedCall("deepseek-flash", 1_000_000)) {
+	// A distinct (still off-peak) StartedAt: simpleCall() now pins every call
+	// to the same instant, so without this the two rows would tie on
+	// started_at and rows[0] would rest on the idx_requests_started_at
+	// rowid-DESC tiebreak rather than genuinely being the later row.
+	second := pricedCall("deepseek-flash", 1_000_000)
+	second.StartedAt = fixedOffPeakStart.Add(time.Hour)
+	if !sk.Submit(second) {
 		t.Fatal("submit dropped")
 	}
 	rows := waitForRows(t, st, 2)

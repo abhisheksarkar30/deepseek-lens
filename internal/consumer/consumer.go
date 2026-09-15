@@ -379,7 +379,7 @@ func (c *Consumer) prepareCall(call *sink.CapturedCall, seen map[string]string) 
 	// model keyed is the upstream-resolved one, which is what the table is
 	// keyed by; an unresolved model is priced as "unknown-model".
 	if c.prices != nil {
-		cost := pricing.Compute(req.ModelResolved, usage, c.prices.Table())
+		cost := pricing.Compute(req.ModelResolved, usage, c.prices.Table(), req.StartedAt)
 		if cost.Amount != nil {
 			dollars := float64(*cost.Amount) / microPerDollar
 			req.CostUSD = &dollars
