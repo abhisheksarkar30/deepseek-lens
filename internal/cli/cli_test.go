@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -680,6 +683,50 @@ func TestDoctorReportsReplayPosture(t *testing.T) {
 	}
 	if !strings.Contains(on.String(), "on —") || !strings.Contains(on.String(), "Origin/Host allowlist") {
 		t.Errorf("doctor should report replay on with the Origin/Host guard named:\n%s", on.String())
+	}
+}
+
+func TestDoctorReportsLiveStatsFromRunningServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/health" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"sink_accepted":7,"sink_dropped":2,"last_write_at":"2026-09-15T12:00:00Z","last_write_age_ms":1500}`)
+	}))
+	defer srv.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath, "--dashboard-addr", srv.Listener.Addr().String()}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "sink accepted=7 dropped=2") {
+		t.Errorf("doctor did not report the live sink counters:\n%s", out)
+	}
+	if !strings.Contains(out, "consumer last write") {
+		t.Errorf("doctor did not report the consumer last-write age:\n%s", out)
+	}
+}
+
+func TestDoctorWarnsWhenServerNotRunning(t *testing.T) {
+	// Bind then close a loopback port so nothing is listening on it.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath, "--dashboard-addr", addr}, &buf); err != nil {
+		t.Fatalf("doctor must not fail when serve is down: %v\n%s", err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "live_stats") || !strings.Contains(buf.String(), "WARN") {
+		t.Errorf("doctor should WARN that live stats are unavailable with no server:\n%s", buf.String())
 	}
 }
 

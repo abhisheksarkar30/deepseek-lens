@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -129,11 +131,12 @@ func runChecks(cfg *config.Config) []doctorCheck {
 	checks = append(checks, doctorCheck{"schema_version", statusPass, "n/a — no migrations table in v1"})
 
 	// Sink accepted/dropped and consumer last-write age live only in a
-	// running `lens serve` process's memory. br-GI-1-09 (not yet landed)
-	// is what will give doctor an HTTP endpoint to read them from; a
-	// standalone doctor run genuinely cannot see them yet.
-	checks = append(checks, doctorCheck{"live_stats", statusWarn,
-		"sink accepted/dropped and consumer last-write age require a running `lens serve` and the dashboard API (br-GI-1-09); unavailable from a standalone doctor run"})
+	// running `lens serve` process's memory, so doctor reads them from that
+	// process's dashboard API (br-GI-1-09's GET /api/health). A standalone
+	// doctor with no serve running must still succeed — reporting that the
+	// observer is down is not a reason to fail the command — which is why
+	// liveStatsCheck WARNs rather than FAILs on a connection failure.
+	checks = append(checks, liveStatsCheck(cfg.DashboardAddr))
 
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
@@ -157,6 +160,44 @@ func runChecks(cfg *config.Config) []doctorCheck {
 	}
 
 	return checks
+}
+
+// liveStatsCheck reports the figures doctor cannot read from the database
+// because they live in the running `lens serve` process's memory: the sink's
+// accepted/dropped counts and the consumer's last-write age. It reads them
+// from the dashboard API's /api/health (br-GI-1-09). When no server is
+// listening — the common case for a standalone doctor run — it returns a
+// WARN, never a FAIL: the command is there to diagnose a broken setup, not to
+// require the observer to be up.
+func liveStatsCheck(dashboardAddr string) doctorCheck {
+	client := &http.Client{Timeout: 750 * time.Millisecond}
+	resp, err := client.Get("http://" + dashboardAddr + "/api/health")
+	if err != nil {
+		return doctorCheck{"live_stats", statusWarn,
+			"no running `lens serve` at " + dashboardAddr + " — sink accepted/dropped and consumer last-write age unavailable"}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return doctorCheck{"live_stats", statusWarn,
+			fmt.Sprintf("%s answered %s, not the /api/health JSON", dashboardAddr, resp.Status)}
+	}
+
+	var h struct {
+		SinkAccepted   uint64     `json:"sink_accepted"`
+		SinkDropped    uint64     `json:"sink_dropped"`
+		LastWriteAt    *time.Time `json:"last_write_at"`
+		LastWriteAgeMs int64      `json:"last_write_age_ms"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+		return doctorCheck{"live_stats", statusWarn,
+			"could not decode /api/health from " + dashboardAddr}
+	}
+	age := "no writes yet"
+	if h.LastWriteAt != nil {
+		age = humanDuration(time.Duration(h.LastWriteAgeMs)*time.Millisecond) + " ago"
+	}
+	return doctorCheck{"live_stats", statusPass,
+		fmt.Sprintf("sink accepted=%d dropped=%d; consumer last write %s", h.SinkAccepted, h.SinkDropped, age)}
 }
 
 // dirWritable reports whether dir exists (creating it if needed) and a
