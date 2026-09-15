@@ -1,7 +1,7 @@
 # GI-4 — Peak-aware costing, and hook integration for a proxy-fronted DeepSeek route
 
 **Status**: converged
-**Version**: 5
+**Version**: 7
 **Issue**: [`GI#4`](https://github.com/abhisheksarkar30/deepseek-lens/issues/4)
 **Branch**: `GI-4-peak-cost-and-hook-integration`, cut from `develop`.
 **Repos touched**: `deepseek-lens` (this repo) and `agentic-ai-artifacts`
@@ -72,7 +72,8 @@ In scope:
    degrades to a passing note when there is no plugin to report on.
 4. User-facing docs on both sides, including that the plugin integration is optional.
 5. Both hooks locate Claude Code's config directory the way Claude Code does — honoring
-   `CLAUDE_CONFIG_DIR` rather than assuming `~/.claude`.
+   `CLAUDE_CONFIG_DIR` when it is set, and otherwise resolving `~/.claude` by the platform's own
+   home rule (`%USERPROFILE%\.claude` on Windows, `$HOME/.claude` on Unix).
 
 Explicitly out of scope:
 
@@ -388,8 +389,15 @@ against a throwaway `HOME` with a pinned clock (this is the pattern to follow, n
   every child process, including the `bash "$guard"` calls.
 - **A relocated-config-directory case**: with the fixture reachable only through
   `CLAUDE_CONFIG_DIR` and the platform home variables pointing elsewhere, both hooks still find
-  the overlay and the settings file. This is the case that pins the fold-in, and it fails against
-  either hook's pre-bead-07 code.
+  the overlay and the settings file. The toggle half is asserted on both sides of the window:
+  off-peak it leaves the lens URL in place *and* emits no `couldn't read` systemMessage (a
+  fold-in-less toggle reads the missing home directory, prints that message at
+  `deepseek-auto-toggle.js:62-70` and returns without writing, so the no-write assertion alone
+  would pass — the absent-message assertion is what makes the case fail), and at peak it removes
+  the overlay and the owned `settings` keys (a fold-in-less toggle removes nothing). The guard
+  half blocks at peak. This is the case that pins the fold-in, and it now fails against either
+  hook's pre-bead-07 code: the toggle's pre-change run reads the missing home directory and acts
+  on nothing, the guard's pre-change run has no overlay read to match the lens URL against.
 
 **Integration / E2E**: deferred to `/develop-tests`. The natural one is the end-to-end claim this
 plan makes — a session routed through lens during a pinned peak window records a `cost_usd`
@@ -458,14 +466,20 @@ reads the file the hooks read rather than the one the Go helper happened to pref
 
 **The plugin's side** (bead 07): `deepseek-auto-toggle.js:28` hardcoded
 `path.join(home, ".claude", "settings.json")`, so for a user with a relocated config directory the
-hook edited a file Claude Code does not read — it appeared to act, and had no effect. The guard is
-the same class of defect once bead 07 gives it an overlay to read. Both now resolve
-`CLAUDE_CONFIG_DIR` first, falling back to the existing platform idiom. *Not a regression*: for
-every user who does not set `CLAUDE_CONFIG_DIR` — the default — both hooks' behaviour is
-byte-identical to today's. *Residual boundary*: the plugin's README documents manual setup steps
-(copying `deepseek-key.ps1` to `~/.claude/`, an absolute `apiKeyHelper` path inside the overlay)
-that remain user-declared literals; a user who relocates their config directory must adjust those
-themselves, and bead 08 says so where it documents the setup.
+hook edited a file Claude Code does not read — it appeared to act, and had no effect. The guard
+had the same class of defect: it built its `~/.claude` path from `${HOME:-$USERPROFILE}` (`:19`),
+which prefers `HOME` and so, on Windows, reads a directory Claude Code never uses. Both hooks now
+resolve `CLAUDE_CONFIG_DIR` first, then Claude Code's own home rule — `os.homedir()` in the JS
+(`USERPROFILE` on Windows, `HOME` elsewhere), `${USERPROFILE:-$HOME}` in the guard — so on the
+unset path both agree with Claude Code and with each other. *Not a regression*: unsetting
+`CLAUDE_CONFIG_DIR` changes nothing wherever the platform home and `HOME` agree — all of Unix, and
+Windows where `HOME` is unset or already equals `%USERPROFILE%`. Where they diverge on Windows the
+guard's path *is* deliberately changed — from the `$HOME` directory Claude Code ignores to
+`%USERPROFILE%\.claude`, the one it reads — which is the point of the fix. *Residual boundary*: the
+plugin's README documents manual setup steps (copying `deepseek-key.ps1` to `~/.claude/`, an
+absolute `apiKeyHelper` path inside the overlay) that remain user-declared literals; a user who
+relocates their config directory must adjust those themselves, and bead 08 says so where it
+documents the setup.
 
 **8.7 Self-review lens** (required by the flywheel): *security* — no auth, secret, or permission
 surface is touched; the hooks read a local config file that already holds no credential (the key
@@ -539,6 +553,38 @@ with a note saying the plugin is not managing this machine.
 
 ## Change History
 
+- **v7 (round-7 review)** — F7.1 (MINOR, correctness): §4.5:277-278, §8.6:463-464 and bead 04:83-84
+  claimed the `provider_hooks` check "reads the same file the hooks do". The claim held for the JS
+  hook only: the bash guard's overlay path `${HOME:-$USERPROFILE}` (`deepseek-peak-guard.sh:19`)
+  preferred `HOME`, so on Windows — where Claude Code means `%USERPROFILE%\.claude` — it read a
+  directory Claude Code ignores, and `doctor` could print `pass` for a route the guard would not
+  recognize. Reviewed and *remedied by behaviour, not wording*: bead 07's spec corrects the guard's
+  fallback to Claude Code's rule,
+  `config_dir="${CLAUDE_CONFIG_DIR:-${USERPROFILE:-$HOME}/.claude}"`, so both hooks resolve the
+  same directory on the unset path. The reviewer's wording remedy (rescope the sentences to the JS
+  hook, add a divergence clause) was declined: it would keep the defect and document it, and rest
+  on the §8.6 caveat F6.1 added rather than delete it. With the fix, §8.6's F6.1 divergence
+  sentence is deleted, §2 item 5 returns to the "locate Claude Code's config directory the way
+  Claude Code does" phrasing (now supportable), §8.6's "existing platform idiom" and "Not a
+  regression" clauses are restated, and every "byte-identical when `CLAUDE_CONFIG_DIR` is unset"
+  claim is rescoped to "identical wherever `HOME` and the platform home agree, deliberately
+  changed where they diverge". Bead 07 gains an Outcome Definition bullet and a mirror-case test
+  (unset `CLAUDE_CONFIG_DIR`, `USERPROFILE` and `HOME` differing) with a platform-precise
+  guard/toggle assertion; bead 04 is verified unchanged. Specified only — the hook line is edited
+  by whoever implements bead 07.
+
+- **v6 (round-6 review)** — F6.1: §2's scope item 5 rescoped to claim only what the hooks actually
+  do — honor `CLAUDE_CONFIG_DIR` when it is set, else fall back to their host language's existing
+  home helper — dropping the unconditional "the way Claude Code does" parity claim, which the
+  guard's `${HOME:-$USERPROFILE}` unset path does not satisfy on Windows. §8.6's residual-boundary
+  paragraph gains one sentence naming that unset-path divergence (JS `os.homedir()` resolves
+  `USERPROFILE` first, bash `${HOME:-$USERPROFILE}` prefers `HOME`) as deliberately preserved, not
+  fixed. No behaviour, bead, or file-list change. F6.2: §7's relocated-config-directory bullet and
+  bead 07's counterpart now pin the toggle's fold-in where a no-op cannot satisfy it — the absence
+  of the `couldn't read` systemMessage off-peak, and a relocated peak case that must remove the
+  overlay and the owned `settings` keys — so the "fails against either hook's pre-change code"
+  claim holds for the toggle half too, and the claim states plainly which half each assertion
+  holds for.
 - **v5 (config-directory fold-in)** — the plugin's matching `CLAUDE_CONFIG_DIR` defect moves from
   *recorded* to *fixed*: §8.6 no longer leaves the toggle hardcoding `~/.claude` with an upgrade
   path, and bead 07 resolves the config directory in both hooks (`CLAUDE_CONFIG_DIR` first, then
