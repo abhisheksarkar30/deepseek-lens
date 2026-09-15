@@ -83,3 +83,11 @@ stopped, which is exactly the failure mode that matters.
 
 - `internal/sink/sink.go` (create)
 - `internal/sink/sink_test.go` (create)
+
+## Review Notes (Phase 5.5, 2026-09-15)
+
+- **OK.** Bounded-time and exact-drop assertions (`accepted == capacity`, `dropped == overflow`) are
+  real, and `TestSubmitAllocs` pins the hot path's allocation behaviour.
+- **WARNING — the "no goroutine leaks" assertion is absent.** The property holds by construction
+  (`Submit` spawns no goroutine), so this is a coverage gap rather than a live risk; a leak test
+  would only guard against a future edit that adds one.
