@@ -15,6 +15,14 @@ none, by design; `internal/web` has none by the same convention, even though `ap
 logic — grouping/formatting helpers such as `groupWarnings`/`groupSessionWarnings` — that convention
 has not yet extended to a JS test runner).
 
+**Verifying a web change without a harness.** Verification is against the assets the *running server*
+returns, not the files on disk: `internal/web` is `go:embed`-ed
+([internal/web/embed.go:10](../../internal/web/embed.go)), so a binary built before the edit keeps
+serving the old assets. The check is therefore three steps, in order — `node --check
+internal/web/app.js` for syntax, a request for `/app.js` or `/style.css` asserting the new markup is
+present in what is served, then a manual eyeball for anything interactive (hover a badge, click a
+session row). No automated check covers the interaction; markup presence is not behaviour.
+
 ## Coverage
 
 **Explicitly covered, by design:**
