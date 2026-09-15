@@ -16,6 +16,7 @@ import (
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/proxy"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/session"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/web"
@@ -54,9 +55,13 @@ func Serve(args []string) error {
 	// list, and consumer.New's Store parameter is already a narrow
 	// interface anything satisfies structurally.
 	pubStore := api.NewPublishingStore(st, broker)
-	// This bead injects a nil SessionResolver, matching br-GI-1-07's own
-	// convention (session resolution lands in br-GI-1-12) — Request.SessionID
-	// simply stays unset until then.
+	// Session grouping (br-GI-1-12): one object is both halves of it — the
+	// pre-insert resolver that names the session a call belongs to, and the
+	// post-insert aggregator that folds the call into that session's totals.
+	// It writes through the bare store, not pubStore: a session's aggregate
+	// moving is not a new call arriving, and the dashboard's SSE feed is a
+	// feed of calls.
+	sess := session.New(st, cfg.SessionGapMinutes)
 	//
 	// The dropped-parameter rule engine (br-GI-1-10) is registered here, not
 	// baked into consumer.New, for the same reason the publishing store is a
@@ -66,7 +71,8 @@ func Serve(args []string) error {
 	// have rewritten bead-07's tests; passing the config-resolved engine in
 	// keeps the flags->rules->rows path explicit, and Analyze stays a pure
 	// function of the config tables it is handed.
-	cons := consumer.New(sk, pubStore, nil, analyze.NewRules(cfg.ModelMap, cfg.ModelMaxTokens))
+	cons := consumer.New(sk, pubStore, sess, analyze.NewRules(cfg.ModelMap, cfg.ModelMaxTokens))
+	cons.SetSessionAggregator(sess)
 	// The cost step (br-GI-1-11) is installed here rather than baked into
 	// consumer.New for the same reason the rules engine above is: it is a
 	// separate pre-insert step, not an analyzer, and br-GI-1-07's tests

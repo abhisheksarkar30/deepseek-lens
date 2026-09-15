@@ -465,12 +465,22 @@ func (s *Store) StatsByCostSource(ctx context.Context, since time.Time) ([]CostS
 	return out, rows.Err()
 }
 
+// sessionColumns is the fixed column order shared by every SELECT against
+// sessions; scanSession's Scan call must list destinations in this order.
+const sessionColumns = `id, prefix_hash, first_seen, last_seen, request_count,
+	total_input_tokens, total_output_tokens, total_cost_usd,
+	priced_count, unpriced_count, model_set, warning_count`
+
 func scanSession(sc rowScanner) (*Session, error) {
 	var sess Session
+	var prefixHash sql.NullString
 	var firstSeen, lastSeen int64
-	if err := sc.Scan(&sess.ID, &firstSeen, &lastSeen, &sess.RequestCount); err != nil {
+	if err := sc.Scan(&sess.ID, &prefixHash, &firstSeen, &lastSeen, &sess.RequestCount,
+		&sess.TotalInputTokens, &sess.TotalOutputTokens, &sess.TotalCostUSD,
+		&sess.PricedCount, &sess.UnpricedCount, &sess.ModelSet, &sess.WarningCount); err != nil {
 		return nil, err
 	}
+	sess.PrefixHash = nullStringPtr(prefixHash)
 	sess.FirstSeen = time.Unix(0, firstSeen).UTC()
 	sess.LastSeen = time.Unix(0, lastSeen).UTC()
 	return &sess, nil
@@ -479,7 +489,7 @@ func scanSession(sc rowScanner) (*Session, error) {
 // ListSessions returns every session, most recently active first.
 func (s *Store) ListSessions(ctx context.Context) ([]*Session, error) {
 	rows, err := s.reader.QueryContext(ctx,
-		"SELECT id, first_seen, last_seen, request_count FROM sessions ORDER BY last_seen DESC")
+		"SELECT "+sessionColumns+" FROM sessions ORDER BY last_seen DESC")
 	if err != nil {
 		return nil, fmt.Errorf("store: list sessions: %w", err)
 	}
@@ -500,7 +510,7 @@ func (s *Store) ListSessions(ctx context.Context) ([]*Session, error) {
 // exist.
 func (s *Store) GetSession(ctx context.Context, id string) (*Session, error) {
 	row := s.reader.QueryRowContext(ctx,
-		"SELECT id, first_seen, last_seen, request_count FROM sessions WHERE id = ?", id)
+		"SELECT "+sessionColumns+" FROM sessions WHERE id = ?", id)
 	sess, err := scanSession(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -511,19 +521,95 @@ func (s *Store) GetSession(ctx context.Context, id string) (*Session, error) {
 	return sess, nil
 }
 
-// UpsertSession inserts sess or, if sess.ID already exists, replaces its
-// first_seen/last_seen/request_count with sess's values. Callers own
-// computing the merged min/max/count before calling — this is a plain
-// replace, not a merge. Writer only.
+// LatestSessionByPrefix returns the most recently active session whose
+// prefix_hash is exactly prefixHash, or sql.ErrNoRows when there is none —
+// br-GI-1-12's rule 2 lookup ("the most recent session with the same
+// meta.PrefixHash"). Pass "" for the null-prefix bucket (rule 3). A
+// header-keyed session stores NULL here, so it can never be found by this
+// lookup whatever its body's prefix hash was.
+func (s *Store) LatestSessionByPrefix(ctx context.Context, prefixHash string) (*Session, error) {
+	row := s.reader.QueryRowContext(ctx,
+		"SELECT "+sessionColumns+" FROM sessions WHERE prefix_hash = ? ORDER BY last_seen DESC LIMIT 1",
+		prefixHash)
+	sess, err := scanSession(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("store: latest session by prefix: %w", err)
+	}
+	return sess, nil
+}
+
+// StatsBySession returns sessions active at or after since, dearest first —
+// `lens stats --by session`'s ranking. It reads the sessions table's own
+// incrementally-maintained totals rather than re-aggregating requests, which
+// is the whole point of maintaining them; the cost order is therefore over
+// each session's priced subtotal, which is what UnpricedCount exists to
+// qualify.
+func (s *Store) StatsBySession(ctx context.Context, since time.Time) ([]*Session, error) {
+	rows, err := s.reader.QueryContext(ctx,
+		"SELECT "+sessionColumns+` FROM sessions WHERE last_seen >= ?
+		 ORDER BY total_cost_usd DESC LIMIT ?`, since.UnixNano(), DefaultLimit)
+	if err != nil {
+		return nil, fmt.Errorf("store: stats by session: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*Session
+	for rows.Next() {
+		sess, err := scanSession(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: stats by session: %w", err)
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+// UpsertSession folds one call into its session row, inserting the row if
+// sess.ID is new. sess carries that one call's contribution, not a running
+// total: RequestCount is 1, FirstSeen/LastSeen are the call's own time, and
+// the token/cost/pricing/model/warning fields are its deltas. The merge is a
+// single SQL statement — every counter is `existing + excluded` — so
+// concurrent readers never see a half-applied update, and first_seen/last_seen
+// are MIN/MAX'd rather than assigned, which makes them monotonic: an
+// out-of-order (older) call can neither move last_seen backwards nor claim to
+// be the session's first call.
+//
+// model_set's distinctness is the one thing SQL does here rather than Go: an
+// already-present model is left alone, an empty incoming model (an
+// unresolved upstream) is ignored, and otherwise the two are appended. Doing
+// it in Go would mean a read-modify-write, i.e. two statements and a window
+// where the row is stale. Writer only.
 func (s *Store) UpsertSession(ctx context.Context, sess *Session) error {
 	_, err := s.writer.ExecContext(ctx, `
-		INSERT INTO sessions (id, first_seen, last_seen, request_count)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO sessions (
+			id, prefix_hash, first_seen, last_seen, request_count,
+			total_input_tokens, total_output_tokens, total_cost_usd,
+			priced_count, unpriced_count, model_set, warning_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-			first_seen = excluded.first_seen,
-			last_seen = excluded.last_seen,
-			request_count = excluded.request_count`,
-		sess.ID, sess.FirstSeen.UnixNano(), sess.LastSeen.UnixNano(), sess.RequestCount)
+			first_seen = MIN(sessions.first_seen, excluded.first_seen),
+			last_seen = MAX(sessions.last_seen, excluded.last_seen),
+			request_count = sessions.request_count + excluded.request_count,
+			total_input_tokens = sessions.total_input_tokens + excluded.total_input_tokens,
+			total_output_tokens = sessions.total_output_tokens + excluded.total_output_tokens,
+			total_cost_usd = sessions.total_cost_usd + excluded.total_cost_usd,
+			priced_count = sessions.priced_count + excluded.priced_count,
+			unpriced_count = sessions.unpriced_count + excluded.unpriced_count,
+			warning_count = sessions.warning_count + excluded.warning_count,
+			model_set = CASE
+				WHEN excluded.model_set = '' THEN sessions.model_set
+				WHEN instr(',' || sessions.model_set || ',', ',' || excluded.model_set || ',') > 0
+					THEN sessions.model_set
+				WHEN sessions.model_set = '' THEN excluded.model_set
+				ELSE sessions.model_set || ',' || excluded.model_set
+			END`,
+		sess.ID, ptrOrNil(sess.PrefixHash), sess.FirstSeen.UnixNano(), sess.LastSeen.UnixNano(),
+		sess.RequestCount,
+		sess.TotalInputTokens, sess.TotalOutputTokens, sess.TotalCostUSD,
+		sess.PricedCount, sess.UnpricedCount, sess.ModelSet, sess.WarningCount)
 	if err != nil {
 		return fmt.Errorf("store: upsert session: %w", err)
 	}

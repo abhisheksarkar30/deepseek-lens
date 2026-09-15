@@ -15,6 +15,7 @@ import (
 	"github.com/abhisheksarkar30/deepseek-lens/internal/analyze"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/parse"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/session"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
@@ -511,7 +512,91 @@ func TestShutdownBound(t *testing.T) {
 	}
 }
 
-// --- cost step (br-GI-1-11) ---
+// --- session grouping (br-GI-1-12) ---
+
+// TestSessionGroupingEndToEnd is the bead's integration case: three captured
+// calls sharing an opening prompt, through the resolver and aggregator wired
+// the way `lens serve` wires them, must land as one sessions row and three
+// requests rows pointing at it.
+func TestSessionGroupingEndToEnd(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	sess := session.New(st, 30)
+	c := New(sk, st, sess)
+	c.SetSessionAggregator(sess)
+
+	runClosed(t, c, sk, []*sink.CapturedCall{simpleCall(), simpleCall(), simpleCall()})
+
+	ctx := context.Background()
+	reqs, err := st.ListRequests(ctx, store.Filter{})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	if len(reqs) != 3 {
+		t.Fatalf("got %d rows, want 3", len(reqs))
+	}
+	if reqs[0].SessionID == nil {
+		t.Fatal("SessionID is unset — the resolver was not wired")
+	}
+	for _, r := range reqs {
+		if r.SessionID == nil || *r.SessionID != *reqs[0].SessionID {
+			t.Errorf("request %d: SessionID = %v, want %q", r.ID, r.SessionID, *reqs[0].SessionID)
+		}
+	}
+
+	sessions, err := st.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(sessions))
+	}
+	s := sessions[0]
+	if s.ID != *reqs[0].SessionID {
+		t.Errorf("session id = %q, want %q", s.ID, *reqs[0].SessionID)
+	}
+	if s.RequestCount != 3 {
+		t.Errorf("RequestCount = %d, want 3", s.RequestCount)
+	}
+	// simpleCall's response reports 10 in / 20 out per call.
+	if s.TotalInputTokens != 30 || s.TotalOutputTokens != 60 {
+		t.Errorf("tokens = (%d, %d), want (30, 60)", s.TotalInputTokens, s.TotalOutputTokens)
+	}
+	if s.UnpricedCount != 3 || s.PricedCount != 0 {
+		t.Errorf("priced/unpriced = %d/%d, want 0/3 (no price table was installed)",
+			s.PricedCount, s.UnpricedCount)
+	}
+	if s.ModelSet != "claude-sonnet-5" {
+		t.Errorf("ModelSet = %q, want %q", s.ModelSet, "claude-sonnet-5")
+	}
+}
+
+// TestSessionSkippedWithoutAggregator keeps the pre-bead behaviour honest: a
+// Consumer built with a resolver but no aggregator still sets SessionID on
+// the row and writes no session row — the two halves of grouping are
+// independently installable.
+func TestSessionSkippedWithoutAggregator(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, session.New(st, 30))
+
+	runClosed(t, c, sk, []*sink.CapturedCall{simpleCall()})
+
+	reqs, err := st.ListRequests(context.Background(), store.Filter{})
+	if err != nil || len(reqs) != 1 {
+		t.Fatalf("ListRequests: %v, len=%d", err, len(reqs))
+	}
+	if reqs[0].SessionID == nil {
+		t.Error("SessionID is unset, want the resolver's id")
+	}
+	sessions, err := st.ListSessions(context.Background())
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("got %d sessions with no aggregator installed, want 0", len(sessions))
+	}
+}
 
 func rate(v float64) *float64 { return &v }
 

@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/parse"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/session"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
 
@@ -308,6 +310,157 @@ func TestLSCostColumnNeverClaimsZero(t *testing.T) {
 	}
 	if !strings.Contains(out, "(unpriced)") {
 		t.Errorf("ls did not name the cost source:\n%s", out)
+	}
+}
+
+// --- sessions ---
+
+// seedSession runs three calls with the same opening prompt through the real
+// resolver, the way the consumer does, and returns the session id they share
+// — plus the three stored requests.
+func seedSession(t *testing.T, st *store.Store) (string, []*store.Request) {
+	t.Helper()
+	res := session.New(st, 30)
+	ctx := context.Background()
+	const prefix = "aaaaaaaaaaaaaaa1"
+
+	var sid string
+	var reqs []*store.Request
+	for i := 0; i < 3; i++ {
+		at := time.Now().Add(-time.Minute).Add(time.Duration(i) * time.Second)
+		sid = res.Resolve(parse.Meta{PrefixHash: prefix}, at)
+		s := sid
+		r := seedRequest(t, st, func(r *store.Request) {
+			r.StartedAt = at
+			r.PrefixHash = prefix
+			r.SessionID = &s
+		})
+		if err := res.RecordCall(ctx, sid, r, 0); err != nil {
+			t.Fatalf("RecordCall: %v", err)
+		}
+		reqs = append(reqs, r)
+	}
+	return sid, reqs
+}
+
+// TestSessionsListsTurnsAndTotals is the bead's CLI integration case: the
+// three calls are one session with three turns and their summed totals.
+func TestSessionsListsTurnsAndTotals(t *testing.T) {
+	st := newTestStore(t)
+	sid, _ := seedSession(t, st)
+
+	sessions, err := st.ListSessions(context.Background())
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].RequestCount != 3 {
+		t.Fatalf("sessions = %+v, want exactly one with 3 turns", sessions)
+	}
+
+	var buf bytes.Buffer
+	if err := runSessions(nil, &buf, st); err != nil {
+		t.Fatalf("runSessions: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "TURNS") || !strings.Contains(out, "COST") {
+		t.Errorf("sessions output missing its header columns:\n%s", out)
+	}
+	rows := dataLines(out)
+	if len(rows) != 1 {
+		t.Fatalf("got %d session rows, want 1:\n%s", len(rows), out)
+	}
+	if !strings.Contains(rows[0], sid) {
+		t.Errorf("session row does not name %q:\n%s", sid, rows[0])
+	}
+	// seedRequest makes each call 100 in / 200 out at $0.01.
+	if !strings.Contains(rows[0], "900") {
+		t.Errorf("session row does not show the 900-token total:\n%s", rows[0])
+	}
+	if !strings.Contains(rows[0], "$0.0300") {
+		t.Errorf("session row does not show the $0.03 total:\n%s", rows[0])
+	}
+}
+
+// TestLSSessionFilterReturnsExactlyThatSession covers `lens ls --session`.
+func TestLSSessionFilterReturnsExactlyThatSession(t *testing.T) {
+	st := newTestStore(t)
+	sid, reqs := seedSession(t, st)
+	seedRequest(t, st, nil) // a call in no session at all
+
+	var buf bytes.Buffer
+	if err := runLS([]string{"--session", sid}, &buf, st); err != nil {
+		t.Fatalf("runLS --session: %v", err)
+	}
+	if got := len(dataLines(buf.String())); got != len(reqs) {
+		t.Fatalf("got %d rows, want %d:\n%s", got, len(reqs), buf.String())
+	}
+
+	buf.Reset()
+	if err := runLS([]string{"--session", "s_1_deadbeef"}, &buf, st); err != nil {
+		t.Fatalf("runLS --session (unknown): %v", err)
+	}
+	if got := len(dataLines(buf.String())); got != 0 {
+		t.Errorf("got %d rows for an unknown session, want 0:\n%s", got, buf.String())
+	}
+}
+
+// TestShowPrintsTheSessionHeaderForASessionId covers `lens show <session>`:
+// the session lookup is tried first, and a numeric argument falls through to
+// the request it names (TestShowIncludesWarningsAndBodies covers that half).
+func TestShowPrintsTheSessionHeaderForASessionId(t *testing.T) {
+	st := newTestStore(t)
+	sid, _ := seedSession(t, st)
+
+	var buf bytes.Buffer
+	if err := runShow([]string{sid}, &buf, st); err != nil {
+		t.Fatalf("runShow %s: %v", sid, err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "id:              "+sid) {
+		t.Errorf("show output does not name the session:\n%s", out)
+	}
+	if !strings.Contains(out, "turns:           3") {
+		t.Errorf("show output does not report the session's turns:\n%s", out)
+	}
+	if !strings.Contains(out, "$0.0300") {
+		t.Errorf("show output does not report the session's cost:\n%s", out)
+	}
+	if !strings.Contains(out, "lens ls --session "+sid) {
+		t.Errorf("show output does not point at the session's calls:\n%s", out)
+	}
+}
+
+// TestStatsBySessionRanksByCost pins the --by session split and its
+// mixed-pricing labelling: a session whose total covers only some of its
+// calls says how many it does not.
+func TestStatsBySessionRanksByCost(t *testing.T) {
+	st := newTestStore(t)
+	sid, _ := seedSession(t, st)
+	// A second session whose unpriced call is worth more than the first's
+	// total; a bare "$" would claim the ranking covered it.
+	unpriced := seedRequest(t, st, func(r *store.Request) {
+		r.CostUSD = nil
+		r.PrefixHash = "bbbbbbbbbbbbbbb2"
+	})
+	if err := st.UpsertSession(context.Background(), &store.Session{
+		ID: "s_2_bbbbbbbb", FirstSeen: unpriced.StartedAt, LastSeen: unpriced.StartedAt, RequestCount: 1,
+	}); err != nil {
+		t.Fatalf("UpsertSession: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := runStats([]string{"--since", "24h", "--by", "session"}, &buf, st); err != nil {
+		t.Fatalf("runStats --by session: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "session split:") || !strings.Contains(out, "SESSION") {
+		t.Fatalf("runStats --by session did not render a session breakdown:\n%s", out)
+	}
+	if !strings.Contains(out, sid) {
+		t.Errorf("session split does not list %q:\n%s", sid, out)
+	}
+	if !strings.Contains(out, "1 unpriced") {
+		t.Errorf("session split does not name the unpriced call:\n%s", out)
 	}
 }
 

@@ -82,11 +82,12 @@ type Stats struct {
 // New and run it with Run; there is exactly one Run goroutine per Consumer,
 // matching the store's single-writer discipline (CLAUDE.md).
 type Consumer struct {
-	sink      *sink.Sink
-	store     Store
-	resolver  SessionResolver
-	analyzers []Analyzer
-	prices    PriceTable
+	sink       *sink.Sink
+	store      Store
+	resolver   SessionResolver
+	aggregator SessionAggregator
+	analyzers  []Analyzer
+	prices     PriceTable
 
 	processed     atomic.Uint64
 	failed        atomic.Uint64
@@ -95,9 +96,13 @@ type Consumer struct {
 }
 
 // New builds a Consumer that drains sk and writes through st. resolver may
-// be nil (this bead injects nil — Request.SessionID stays unset). analyzers
-// run, in order, after every insert; the slice is empty by default. A price
-// table is installed separately with SetPriceTable.
+// be nil, in which case Request.SessionID stays unset for every call.
+// analyzers run, in order, after every insert; the slice is empty by
+// default. A price table and a session aggregator are installed separately
+// with SetPriceTable and SetSessionAggregator, for the same reason: both are
+// separate pipeline steps rather than analyzers, and the beads that
+// introduced them could not have them baked into New without rewriting the
+// tests of the beads before them.
 func New(sk *sink.Sink, st Store, resolver SessionResolver, analyzers ...Analyzer) *Consumer {
 	return &Consumer{sink: sk, store: st, resolver: resolver, analyzers: analyzers}
 }
@@ -107,6 +112,13 @@ func New(sk *sink.Sink, st Store, resolver SessionResolver, analyzers ...Analyze
 // which is what br-GI-1-07's tests do — cost is a separate pre-insert step,
 // not an Analyzer, so it is not part of New's variadic.
 func (c *Consumer) SetPriceTable(pt PriceTable) { c.prices = pt }
+
+// SetSessionAggregator installs the post-insert step that folds each call's
+// tokens, cost, and warning count into its session's totals (br-GI-1-12).
+// Leaving it unset is legal and leaves the sessions table untouched, which
+// is what every pre-bead test does. One *session.Resolver satisfies both
+// this and SessionResolver, so `lens serve` installs the same object twice.
+func (c *Consumer) SetSessionAggregator(sa SessionAggregator) { c.aggregator = sa }
 
 // Stats returns a snapshot of the consumer's counters.
 func (c *Consumer) Stats() Stats {
@@ -249,10 +261,11 @@ func (c *Consumer) processCall(ctx context.Context, call *sink.CapturedCall) {
 	c.doProcessCall(ctx, call)
 }
 
-// doProcessCall runs the bead's fixed 9-step pipeline for one call:
-// ExtractMeta -> ExtractUsage -> build store.Request -> resolve session ->
-// cost step -> InsertRequest -> run analyzers -> synthesize an upstream_error
-// warning if call.Err != nil -> InsertWarnings.
+// doProcessCall runs the bead's fixed pipeline for one call: ExtractMeta ->
+// ExtractUsage -> build store.Request -> resolve session -> cost step ->
+// InsertRequest -> run analyzers -> synthesize an upstream_error warning if
+// call.Err != nil -> InsertWarnings -> fold the call into its session's
+// totals.
 func (c *Consumer) doProcessCall(ctx context.Context, call *sink.CapturedCall) {
 	meta := parse.ExtractMeta(call.ReqBody, call.ReqHeaders)
 	usage, _ := parse.ExtractUsage(call.RespBody, call.RespHeaders.Get("Content-Type"))
@@ -298,7 +311,6 @@ func (c *Consumer) doProcessCall(ctx context.Context, call *sink.CapturedCall) {
 	}
 
 	// Resolve session before insert: SessionID is a column on the row.
-	// This bead injects a nil resolver, so this is a no-op seam for now.
 	if c.resolver != nil {
 		if sid := c.resolver.Resolve(meta, time.Now()); sid != "" {
 			req.SessionID = &sid
@@ -343,12 +355,22 @@ func (c *Consumer) doProcessCall(ctx context.Context, call *sink.CapturedCall) {
 			CreatedAt: time.Now(),
 		})
 	}
-	if len(warnings) == 0 {
-		return
+	if len(warnings) > 0 {
+		if err := c.store.InsertWarnings(ctx, id, warnings); err != nil {
+			c.failed.Add(1)
+			log.Printf("consumer: insert warnings failed for request %d: %v", id, err)
+		}
 	}
-	if err := c.store.InsertWarnings(ctx, id, warnings); err != nil {
-		c.failed.Add(1)
-		log.Printf("consumer: insert warnings failed for request %d: %v", id, err)
+
+	// Session aggregates go last, and go through a step that is not the
+	// Store: warningCount is only final here, and the tokens/cost it also
+	// folds in are on req by now. A failure is logged without counting a
+	// failed call — the row this call was about is already committed, so
+	// calling the call itself failed would be a lie.
+	if c.aggregator != nil && req.SessionID != nil {
+		if err := c.aggregator.RecordCall(ctx, *req.SessionID, req, len(warnings)); err != nil {
+			log.Printf("consumer: record session aggregate failed for call %s: %v", call.ID, err)
+		}
 	}
 }
 

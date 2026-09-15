@@ -279,17 +279,35 @@ func (a *api) listWarnings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) listSessions(w http.ResponseWriter, r *http.Request) {
-	// store.ListSessions takes no Filter (no limit param to honor) — every
-	// row it returns comes from UpsertSession, which nothing calls until
-	// br-GI-1-12 wires session resolution, so this is a placeholder in
-	// practice (always empty) today, exactly as the bead describes, without
-	// a special-cased stub handler.
+	// store.ListSessions takes no Filter (no limit param to honor): every row
+	// it returns is maintained incrementally by store.UpsertSession, which
+	// br-GI-1-12's consumer step calls once per captured call. The aggregates
+	// on each row therefore need no work here.
 	sessions, err := a.store.ListSessions(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, sessions)
+}
+
+// sessionDetail is /api/sessions/{id}'s response shape: the session's own
+// fields (promoted from the embedded pointer, matching requestDetail) plus
+// the calls that make it up and every warning any of them raised.
+type sessionDetail struct {
+	*store.Session
+	// Calls is the session's calls in chronological order — the order the run
+	// actually happened in. A session is one activity with N turns in it, so
+	// the dashboard's running total only means anything read in that
+	// direction. store.ListRequests returns newest first, so this is reversed
+	// here rather than growing an ORDER BY parameter the store does not have.
+	Calls []*store.Request `json:"calls"`
+	// Warnings is the union of every warning raised across the session's
+	// calls, one entry per occurrence. Grouping them into one line per kind
+	// is the dashboard's job (see this package's New doc comment) — but the
+	// union has to be assembled here, because only the server knows which
+	// requests belong to the session.
+	Warnings []*store.Warning `json:"warnings"`
 }
 
 func (a *api) getSession(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +321,38 @@ func (a *api) getSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, sess)
+
+	// One query for the session's calls, then one for the newest
+	// store.DefaultLimit warnings filtered down to those calls' ids — the
+	// same trade getRequest and internal/cli's show/ls already take, rather
+	// than adding a per-session warning lookup to store.go.
+	calls, err := a.store.ListRequests(r.Context(), store.Filter{SessionID: id})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	reversed := make([]*store.Request, len(calls))
+	for i, c := range calls {
+		reversed[len(calls)-1-i] = c
+	}
+
+	inSession := make(map[int64]bool, len(calls))
+	for _, c := range calls {
+		inSession[c.ID] = true
+	}
+	all, err := a.store.ListWarnings(r.Context(), store.Filter{Limit: store.DefaultLimit})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var warnings []*store.Warning
+	for _, wn := range all {
+		if inSession[wn.RequestID] {
+			warnings = append(warnings, wn)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, sessionDetail{Session: sess, Calls: reversed, Warnings: warnings})
 }
 
 // stream is the SSE endpoint: it subscribes to the broker and forwards every

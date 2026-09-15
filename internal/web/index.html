@@ -77,12 +77,40 @@
   </section>
 
   <section id="view-sessions" class="view" hidden>
-    <p class="hint">Session drill-down lands in a later release; this is the raw session list.</p>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Session</th><th>First Seen</th><th>Last Seen</th><th>Requests</th></tr></thead>
+        <thead>
+          <tr>
+            <th>Session</th><th>Started</th><th>Duration</th><th>Turns</th>
+            <th>Tokens</th><th>Cost</th><th>&#9888;</th>
+          </tr>
+        </thead>
         <tbody id="sessions-body"></tbody>
       </table>
+    </div>
+    <div id="session-detail" class="detail-panel" hidden>
+      <button id="session-detail-close" class="tab" type="button">Close</button>
+      <h3 id="session-detail-title"></h3>
+      <dl class="detail-grid" id="session-detail-summary"></dl>
+      <h3>Warnings raised in this session</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Kind</th><th>Severity</th><th>Turns</th><th>Site</th><th>Detail</th></tr></thead>
+          <tbody id="session-warnings"></tbody>
+        </table>
+      </div>
+      <h3>Calls in order</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th><th>Time</th><th>Duration</th><th>Model</th><th>In/Out</th>
+              <th>Cost</th><th>Running total</th><th>&#9888;</th>
+            </tr>
+          </thead>
+          <tbody id="session-calls"></tbody>
+        </table>
+      </div>
     </div>
   </section>
 </main>

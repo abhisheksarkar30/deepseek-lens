@@ -178,6 +178,133 @@ func TestGetRequestIncludesWarnings(t *testing.T) {
 	}
 }
 
+// sessionDetailJSON is the wire shape these tests assert on, rather than
+// sessionDetail itself: a test that decodes into the struct whose promoted
+// embedded pointer supplies the fields would pass whether or not the JSON
+// actually carries them.
+type sessionDetailJSON struct {
+	ID       string          `json:"ID"`
+	Calls    []store.Request `json:"calls"`
+	Warnings []store.Warning `json:"warnings"`
+}
+
+// TestGetSessionListsCallsChronologically is the bead's API integration case:
+// the drill-down must show the session's calls in the order the run actually
+// happened, not newest-first like /api/requests, because that is the only
+// order a running total reads in.
+func TestGetSessionListsCallsChronologically(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	const sid = "s_1_aaaaaaaa"
+	base := time.Now().Add(-10 * time.Minute)
+
+	var ids []int64
+	for i := 0; i < 3; i++ {
+		at := base.Add(time.Duration(i) * time.Minute)
+		r := seedRequest(t, st, func(r *store.Request) {
+			r.StartedAt = at
+			s := sid
+			r.SessionID = &s
+		})
+		ids = append(ids, r.ID)
+	}
+	if err := st.InsertWarnings(ctx, ids[0], []store.Warning{
+		{Kind: "cache_control_ignored", Severity: "warn", Path: "system[0]", Detail: "dropped", CreatedAt: time.Now()},
+	}); err != nil {
+		t.Fatalf("InsertWarnings: %v", err)
+	}
+	if err := st.InsertWarnings(ctx, ids[2], []store.Warning{
+		{Kind: "param_ignored", Severity: "warn", Path: "top_k", Detail: "dropped", CreatedAt: time.Now()},
+	}); err != nil {
+		t.Fatalf("InsertWarnings: %v", err)
+	}
+	ph := "aaaaaaaaaaaaaaa1"
+	if err := st.UpsertSession(ctx, &store.Session{
+		ID: sid, PrefixHash: &ph, FirstSeen: base, LastSeen: base.Add(2 * time.Minute),
+		RequestCount: 3, TotalInputTokens: 300, TotalOutputTokens: 600,
+	}); err != nil {
+		t.Fatalf("UpsertSession: %v", err)
+	}
+
+	handler, _, _, _ := newTestAPI(t, st)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid, nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	got := decodeJSON[sessionDetailJSON](t, rr.Body)
+
+	if got.ID != sid {
+		t.Errorf("ID = %q, want %q", got.ID, sid)
+	}
+	if len(got.Calls) != 3 {
+		t.Fatalf("got %d calls, want 3", len(got.Calls))
+	}
+	for i, c := range got.Calls {
+		if c.ID != ids[i] {
+			t.Errorf("call %d: id = %d, want %d", i, c.ID, ids[i])
+		}
+		if i > 0 && c.StartedAt.Before(got.Calls[i-1].StartedAt) {
+			t.Errorf("call %d (%v) is older than call %d (%v)", i, c.StartedAt, i-1, got.Calls[i-1].StartedAt)
+		}
+	}
+	// The union of everything raised across the session, in either order.
+	if len(got.Warnings) != 2 {
+		t.Fatalf("got %d warnings, want 2 (the union across the session)", len(got.Warnings))
+	}
+	kinds := map[string]bool{}
+	for _, w := range got.Warnings {
+		kinds[w.Kind] = true
+	}
+	if !kinds["cache_control_ignored"] || !kinds["param_ignored"] {
+		t.Errorf("warnings = %+v, want one of each kind", got.Warnings)
+	}
+}
+
+// TestListSessionsServesTheAggregates covers GET /api/sessions: the rows the
+// dashboard's session table reads, with the totals UpsertSession maintains.
+func TestListSessionsServesTheAggregates(t *testing.T) {
+	st := newTestStore(t)
+	const sid = "s_1_aaaaaaaa"
+	if err := st.UpsertSession(context.Background(), &store.Session{
+		ID: sid, FirstSeen: time.Now().Add(-time.Minute), LastSeen: time.Now(),
+		RequestCount: 3, TotalInputTokens: 300, TotalOutputTokens: 600,
+		PricedCount: 2, UnpricedCount: 1, TotalCostUSD: 0.03,
+		ModelSet: "deepseek-flash", WarningCount: 4,
+	}); err != nil {
+		t.Fatalf("UpsertSession: %v", err)
+	}
+
+	handler, _, _, _ := newTestAPI(t, st)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	got := decodeJSON[[]*store.Session](t, rr.Body)
+	if len(got) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(got))
+	}
+	s := got[0]
+	if s.ID != sid || s.RequestCount != 3 || s.WarningCount != 4 {
+		t.Errorf("session = %+v, want id %q with 3 turns and 4 warnings", s, sid)
+	}
+	if s.UnpricedCount != 1 || s.PricedCount != 2 {
+		t.Errorf("priced/unpriced = %d/%d, want 2/1", s.PricedCount, s.UnpricedCount)
+	}
+}
+
+func TestGetSessionNotFound(t *testing.T) {
+	st := newTestStore(t)
+	handler, _, _, _ := newTestAPI(t, st)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/sessions/s_1_deadbeef", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+}
+
 func TestGetRequestNotFound(t *testing.T) {
 	st := newTestStore(t)
 	handler, _, _, _ := newTestAPI(t, st)

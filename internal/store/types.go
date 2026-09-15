@@ -70,13 +70,33 @@ type Warning struct {
 }
 
 // Session groups requests correlated by SessionHeader/PrefixHash and an
-// inactivity gap (br-GI-1-07). ID is the session's correlation key, not a
+// inactivity gap (br-GI-1-07/12). ID is the session's correlation key, not a
 // surrogate — it's what Request.SessionID points at.
+//
+// The totals from TotalInputTokens down are maintained incrementally by
+// UpsertSession, one call at a time (br-GI-1-12), so the session list is
+// O(1) per call rather than an aggregate over the requests table on every
+// read. UnpricedCount is the session's share of br-GI-1-11's mixed-pricing
+// rule: a session whose total covers only some of its calls must say so.
 type Session struct {
-	ID           string
-	FirstSeen    time.Time
-	LastSeen     time.Time
-	RequestCount int
+	ID string
+	// PrefixHash is the correlation key this session was resolved from, and
+	// its nil-ness distinguishes the three ways a session can be keyed: nil =
+	// an explicit x-lens-session header, "" = the null-prefix bucket for
+	// unparseable bodies, anything else = a parse.PrefixHash. See
+	// schema.sql's sessions table for why that matters.
+	PrefixHash *string
+	FirstSeen  time.Time
+	LastSeen   time.Time
+
+	RequestCount      int
+	TotalInputTokens  int64
+	TotalOutputTokens int64
+	TotalCostUSD      float64
+	PricedCount       int
+	UnpricedCount     int
+	ModelSet          string // comma-joined distinct upstream (model_resolved) names
+	WarningCount      int
 }
 
 // Filter narrows ListRequests and ListWarnings. Only the fields relevant to

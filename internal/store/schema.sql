@@ -40,12 +40,29 @@ CREATE TABLE IF NOT EXISTS requests (
 CREATE INDEX IF NOT EXISTS idx_requests_started_at ON requests(started_at);
 CREATE INDEX IF NOT EXISTS idx_requests_session_id ON requests(session_id);
 
+-- prefix_hash is the session's correlation key, and its NULL-ness is
+-- load-bearing (br-GI-1-12): NULL means the session was keyed by an explicit
+-- x-lens-session header, '' means it is the null-prefix bucket for calls
+-- whose body did not parse, and anything else is the parse.PrefixHash it was
+-- resolved from. `prefix_hash = ?` therefore never matches a header-keyed
+-- session, which is what keeps "header on one call, absent on the other"
+-- from grouping.
 CREATE TABLE IF NOT EXISTS sessions (
-    id            TEXT PRIMARY KEY,
-    first_seen    INTEGER NOT NULL,
-    last_seen     INTEGER NOT NULL,
-    request_count INTEGER NOT NULL DEFAULT 0
+    id                  TEXT PRIMARY KEY,
+    prefix_hash         TEXT,
+    first_seen          INTEGER NOT NULL,
+    last_seen           INTEGER NOT NULL,
+    request_count       INTEGER NOT NULL DEFAULT 0,
+    total_input_tokens  INTEGER NOT NULL DEFAULT 0,
+    total_output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_cost_usd      REAL NOT NULL DEFAULT 0,
+    priced_count        INTEGER NOT NULL DEFAULT 0,
+    unpriced_count      INTEGER NOT NULL DEFAULT 0,
+    model_set           TEXT NOT NULL DEFAULT '',
+    warning_count       INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE INDEX IF NOT EXISTS idx_sessions_prefix_hash ON sessions(prefix_hash);
 
 CREATE TABLE IF NOT EXISTS warnings (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

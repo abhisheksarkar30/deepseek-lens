@@ -19,6 +19,7 @@ var commands = map[string]func([]string) error{
 	"show":     cli.Show,
 	"tail":     cli.Tail,
 	"stats":    cli.Stats,
+	"sessions": cli.Sessions,
 	"warnings": cli.Warnings,
 	"export":   cli.Export,
 	"prices":   cli.Prices,

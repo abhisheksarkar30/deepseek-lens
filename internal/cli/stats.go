@@ -29,6 +29,7 @@ type statsJSON struct {
 	Summary        *store.Summary    `json:"summary"`
 	ByModel        []store.ModelStat `json:"by_model"`
 	ByDay          []store.DayStat   `json:"by_day"`
+	BySession      []*store.Session  `json:"by_session,omitempty"`
 	WarningsByKind map[string]int    `json:"warnings_by_kind"`
 	MeanDurationMs float64           `json:"mean_duration_ms"`
 }
@@ -36,13 +37,13 @@ type statsJSON struct {
 func runStats(args []string, w io.Writer, st *store.Store) error {
 	fs := flag.NewFlagSet("stats", flag.ContinueOnError)
 	since := fs.String("since", "24h", "time window: a Go duration (e.g. 24h, 30m) or RFC3339 timestamp")
-	by := fs.String("by", "model", "breakdown section: model or day")
+	by := fs.String("by", "model", "breakdown section: model, day, or session")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *by != "model" && *by != "day" {
-		return fmt.Errorf("--by: invalid value %q (want model or day)", *by)
+	if *by != "model" && *by != "day" && *by != "session" {
+		return fmt.Errorf("--by: invalid value %q (want model, day, or session)", *by)
 	}
 	sinceTime, err := parseSince(*since)
 	if err != nil {
@@ -61,6 +62,15 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 	byDay, err := st.StatsByDay(ctx, sinceTime)
 	if err != nil {
 		return fmt.Errorf("stats by day: %w", err)
+	}
+	// Only fetched when asked for: the session ranking reads the sessions
+	// table's own running totals, so there is nothing to compute speculatively.
+	var bySession []*store.Session
+	if *by == "session" {
+		bySession, err = st.StatsBySession(ctx, sinceTime)
+		if err != nil {
+			return fmt.Errorf("stats by session: %w", err)
+		}
 	}
 
 	// ponytail: mean duration is sampled from up to store.DefaultLimit of
@@ -93,7 +103,7 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 
 	if *jsonOut {
 		return json.NewEncoder(w).Encode(statsJSON{
-			Since: sinceTime, Summary: summary, ByModel: byModel, ByDay: byDay,
+			Since: sinceTime, Summary: summary, ByModel: byModel, ByDay: byDay, BySession: bySession,
 			WarningsByKind: byKind, MeanDurationMs: meanMs,
 		})
 	}
@@ -120,6 +130,23 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 			rows = append(rows, []string{k, fmt.Sprintf("%d", byKind[k])})
 		}
 		fmt.Fprint(w, table([]string{"KIND", "COUNT"}, rows, 0))
+	}
+
+	if *by == "session" {
+		if len(bySession) > 0 {
+			fmt.Fprintln(w, "\nsession split:")
+			rows := make([][]string, 0, len(bySession))
+			for _, s := range bySession {
+				rows = append(rows, []string{
+					s.ID,
+					strconv.Itoa(s.RequestCount),
+					fmt.Sprintf("%s/%s", humanTokens(s.TotalInputTokens), humanTokens(s.TotalOutputTokens)),
+					costCell(s.TotalCostUSD, s.RequestCount, s.UnpricedCount),
+				})
+			}
+			fmt.Fprint(w, table([]string{"SESSION", "TURNS", "IN/OUT TOK", "COST"}, rows, 0))
+		}
+		return nil
 	}
 
 	if *by == "day" {

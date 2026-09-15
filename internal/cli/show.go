@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -44,12 +45,26 @@ func runShow(args []string, w io.Writer, st *store.Store) error {
 	if fs.NArg() < 1 {
 		return errors.New("usage: lens show <id>")
 	}
-	id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid request id %q: %w", fs.Arg(0), err)
-	}
+	arg := fs.Arg(0)
 
 	ctx := context.Background()
+	// Session first, then request. The argument is tried as a session id
+	// regardless of its shape — not sniffed for the "s_" prefix — so an
+	// explicit x-lens-session id (whatever the user chose to call it) works
+	// too; a numeric argument misses the session lookup and falls through to
+	// the request it names. One rule, no format coupling between the two.
+	if sess, err := st.GetSession(ctx, arg); err == nil {
+		sessionHeader(w, sess)
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("session %s: %w", arg, err)
+	}
+
+	id, err := strconv.ParseInt(arg, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid request id %q: %w", arg, err)
+	}
+
 	r, err := st.GetRequest(ctx, id)
 	if err != nil {
 		return fmt.Errorf("request %d: %w", id, err)
