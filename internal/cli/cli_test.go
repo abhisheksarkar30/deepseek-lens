@@ -848,6 +848,11 @@ func TestProviderHooksNoConfigDirAtAllPasses(t *testing.T) {
 	if c.Status != statusPass {
 		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
 	}
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v\n%s", err, buf.String())
+	}
 }
 
 func TestProviderHooksNoSettingsFilePasses(t *testing.T) {
@@ -855,6 +860,11 @@ func TestProviderHooksNoSettingsFilePasses(t *testing.T) {
 	c := providerHookCheck(lensCfg())
 	if c.Status != statusPass {
 		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v\n%s", err, buf.String())
 	}
 }
 
@@ -876,6 +886,11 @@ func TestProviderHooksUnreadableSettingsPasses(t *testing.T) {
 	if c.Status != statusPass {
 		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
 	}
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v\n%s", err, buf.String())
+	}
 }
 
 func TestProviderHooksSettingsIsDirectoryPasses(t *testing.T) {
@@ -889,6 +904,11 @@ func TestProviderHooksSettingsIsDirectoryPasses(t *testing.T) {
 	if c.Status != statusPass {
 		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
 	}
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v\n%s", err, buf.String())
+	}
 }
 
 func TestProviderHooksSettingsWithNoEnvBlockPasses(t *testing.T) {
@@ -899,6 +919,11 @@ func TestProviderHooksSettingsWithNoEnvBlockPasses(t *testing.T) {
 	c := providerHookCheck(lensCfg())
 	if c.Status != statusPass {
 		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v\n%s", err, buf.String())
 	}
 }
 
@@ -912,6 +937,11 @@ func TestProviderHooksEnvBlockWithNoBaseURLPasses(t *testing.T) {
 	c := providerHookCheck(lensCfg())
 	if c.Status != statusPass {
 		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v\n%s", err, buf.String())
 	}
 }
 
@@ -928,6 +958,11 @@ func TestProviderHooksMalformedOverlayJSONPasses(t *testing.T) {
 	c := providerHookCheck(lensCfg())
 	if c.Status != statusPass {
 		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v\n%s", err, buf.String())
 	}
 }
 
@@ -950,6 +985,11 @@ func TestProviderHooksUnreadableOverlayPasses(t *testing.T) {
 	if c.Status != statusPass {
 		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
 	}
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v\n%s", err, buf.String())
+	}
 }
 
 func TestProviderHooksSectionedOverlayShapePasses(t *testing.T) {
@@ -966,6 +1006,11 @@ func TestProviderHooksSectionedOverlayShapePasses(t *testing.T) {
 	c := providerHookCheck(lensCfg())
 	if c.Status != statusPass {
 		t.Errorf("status = %s, want PASS: %s", c.Status, c.Detail)
+	}
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v\n%s", err, buf.String())
 	}
 }
 
