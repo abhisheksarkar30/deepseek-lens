@@ -69,12 +69,22 @@ type Store interface {
 	InsertWarnings(ctx context.Context, reqID int64, warnings []store.Warning) error
 }
 
+// batchInserter is an optional extension of Store: a store that writes a
+// whole flush's requests as one transaction (br-GI-1-07's "writes are grouped
+// into a transaction"). *store.Store implements it, and the publishing
+// decorator forwards it, so a flush of N calls commits once instead of N
+// times. A fake that omits it — or a batch transaction that fails — falls
+// back to per-call inserts, so one bad row can never cost the whole batch.
+type batchInserter interface {
+	InsertRequests(ctx context.Context, reqs []*store.Request) error
+}
+
 // Stats is a snapshot of Consumer's counters, safe to read concurrently
 // with Run — doctor and the dashboard poll it from another goroutine.
 type Stats struct {
 	Processed   uint64
 	Failed      uint64
-	Flushes     uint64 // number of batch flushes issued; « Processed under load is how batching is verified.
+	Flushes     uint64 // number of batch flushes issued; each is one store transaction (write count stays « Processed under load).
 	LastWriteAt time.Time
 }
 
@@ -235,38 +245,66 @@ func (c *Consumer) drainRemaining(ch <-chan *sink.CapturedCall, batch *[]*sink.C
 	}
 }
 
-// flushBatch processes every call in batch and counts the flush itself —
-// the batching test asserts Stats().Flushes stays well below the call
-// count, which is what actually demonstrates batching happened (row count
-// must still equal call count 1:1, so it can't be measured by counting
-// InsertRequest calls).
+// flushBatch writes one drained batch. Each call's request row is built
+// first, then the whole batch's rows are written as one store transaction
+// (br-GI-1-07's "writes are grouped into a transaction"), so a flush of N
+// calls commits once instead of N times. The per-call post-insert work stays
+// per call, after the commit: analyzer warnings attach to a row by id, and
+// the session aggregator writes through the same single writer connection as
+// the batch, so it cannot run while that transaction is open.
 func (c *Consumer) flushBatch(ctx context.Context, batch []*sink.CapturedCall) {
 	c.flushes.Add(1)
+
+	pend := make([]pendingCall, 0, len(batch))
+	// seen memoizes the session ids this flush has already chosen, keyed the
+	// way the resolver keys a call (its explicit header, else the body prefix
+	// hash). Every call in a flush is resolved before any is inserted, so
+	// without the memo several calls of one run would each mint a fresh session
+	// — the resolver's rule-2 lookup reads the *committed* sessions table and
+	// nothing of this flush is committed yet. A flush spans at most
+	// batchQuietWait, always well inside the resolver's window, so a repeat of
+	// a key inside one flush is always the same session.
+	seen := make(map[string]string)
 	for _, call := range batch {
-		c.processCall(ctx, call)
+		if p, ok := c.prepareCall(call, seen); ok {
+			pend = append(pend, p)
+		}
+	}
+	c.insertBatch(ctx, pend)
+	for _, p := range pend {
+		if p.req.ID == 0 {
+			continue // its insert failed and was already counted; nothing to attach to.
+		}
+		c.finishCall(ctx, p)
 	}
 }
 
-// processCall is the per-call boundary error containment applies at: a
-// panic anywhere in the pipeline for one call (not just in an analyzer) is
-// recovered, logged once, and counted as failed, so it can never take the
-// whole consumer down.
-func (c *Consumer) processCall(ctx context.Context, call *sink.CapturedCall) {
+// pendingCall carries one call between the two halves of the fixed pipeline:
+// the pre-insert half builds req and keeps the parsed meta/usage the
+// analyzers need; the post-insert half runs once the batch transaction has
+// committed and req.ID is set.
+type pendingCall struct {
+	call  *sink.CapturedCall
+	meta  parse.Meta
+	usage parse.Usage
+	req   *store.Request
+}
+
+// prepareCall runs the pre-insert half of the pipeline for one call:
+// ExtractMeta/ExtractUsage -> build the row -> resolve session -> cost step.
+// seen is the flush's session memo (see flushBatch). A panic anywhere in this
+// half is recovered, logged, and counted failed — the same containment
+// processCall used to give the whole pipeline — and reported as ok=false so
+// the call is dropped from the batch rather than inserted half-built.
+func (c *Consumer) prepareCall(call *sink.CapturedCall, seen map[string]string) (p pendingCall, ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			c.failed.Add(1)
 			log.Printf("consumer: panic processing call %s: %v", call.ID, r)
+			ok = false
 		}
 	}()
-	c.doProcessCall(ctx, call)
-}
 
-// doProcessCall runs the bead's fixed pipeline for one call: ExtractMeta ->
-// ExtractUsage -> build store.Request -> resolve session -> cost step ->
-// InsertRequest -> run analyzers -> synthesize an upstream_error warning if
-// call.Err != nil -> InsertWarnings -> fold the call into its session's
-// totals.
-func (c *Consumer) doProcessCall(ctx context.Context, call *sink.CapturedCall) {
 	meta := parse.ExtractMeta(call.ReqBody, call.ReqHeaders)
 	usage, _ := parse.ExtractUsage(call.RespBody, call.RespHeaders.Get("Content-Type"))
 	// ExtractUsage's error only ever reports a parsed SSE "error" event —
@@ -316,10 +354,20 @@ func (c *Consumer) doProcessCall(ctx context.Context, call *sink.CapturedCall) {
 		req.ErrorText = &errText
 	}
 
-	// Resolve session before insert: SessionID is a column on the row.
+	// Resolve session before insert: SessionID is a column on the row. A key
+	// this flush already resolved reuses its id (the memo documented on
+	// flushBatch) rather than paying the store lookup that cannot yet see it.
 	if c.resolver != nil {
-		if sid := c.resolver.Resolve(meta, time.Now()); sid != "" {
+		key := "p:" + meta.PrefixHash
+		if meta.SessionHeader != "" {
+			key = "h:" + meta.SessionHeader
+		}
+		if id, hit := seen[key]; hit {
+			sid := id
 			req.SessionID = &sid
+		} else if sid := c.resolver.Resolve(meta, time.Now()); sid != "" {
+			req.SessionID = &sid
+			seen[key] = sid
 		}
 	}
 
@@ -339,32 +387,117 @@ func (c *Consumer) doProcessCall(ctx context.Context, call *sink.CapturedCall) {
 		req.CostSource = &src
 	}
 
-	id, err := c.store.InsertRequest(ctx, req)
+	return pendingCall{call: call, meta: meta, usage: usage, req: req}, true
+}
+
+// insertBatch writes every prepared call's row, grouping them into one store
+// transaction when the store supports it (batchInserter). A store without
+// that method (a test fake) — or a batch transaction that fails — falls back
+// to per-call InsertRequest calls, so one bad row can never cost the rest of
+// the batch (the bead's per-call error containment). A row's success is
+// recorded by its non-zero req.ID.
+//
+// The store write carries the same per-call panic containment the rest of the
+// pipeline does (br-GI-1-07: "error containment is the point of this bead";
+// the consumer must never die on a store failure). Before the batch split the
+// write ran inside processCall's recover; insertGrouped/insertOne restore that
+// boundary here.
+func (c *Consumer) insertBatch(ctx context.Context, pend []pendingCall) {
+	if len(pend) == 0 {
+		return
+	}
+	reqs := make([]*store.Request, len(pend))
+	for i := range pend {
+		reqs[i] = pend[i].req
+	}
+
+	if bi, batchable := c.store.(batchInserter); batchable {
+		if err := c.insertGrouped(ctx, bi, reqs); err == nil {
+			c.processed.Add(uint64(len(reqs)))
+			c.lastWriteAtNs.Store(time.Now().UnixNano())
+			return
+		}
+		// The batch transaction rolled back (or its write panicked); clear any
+		// ids it assigned and retry row by row so one bad row is the only
+		// casualty.
+		for _, r := range reqs {
+			r.ID = 0
+		}
+	}
+
+	for i := range pend {
+		c.insertOne(ctx, pend[i].call, pend[i].req)
+	}
+}
+
+// insertGrouped runs the store's grouped write, turning a panic into an error
+// so the caller takes the same per-row fallback an ordinary batch error does.
+// Without this a panic in InsertRequests would escape insertBatch → flushBatch
+// → Run and kill the single consumer goroutine, silently stopping capture —
+// the failure mode the bead exists to prevent.
+func (c *Consumer) insertGrouped(ctx context.Context, bi batchInserter, reqs []*store.Request) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("store batch insert panicked: %v", r)
+		}
+	}()
+	return bi.InsertRequests(ctx, reqs)
+}
+
+// insertOne writes one call's row with its own recover, the per-call boundary
+// processCall gave the whole pipeline before the batch split: a panic in this
+// call's store write is logged once and counted failed, and the rest of the
+// batch's rows still land.
+func (c *Consumer) insertOne(ctx context.Context, call *sink.CapturedCall, r *store.Request) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			c.failed.Add(1)
+			log.Printf("consumer: panic inserting call %s: %v", call.ID, rec)
+		}
+	}()
+
+	id, err := c.store.InsertRequest(ctx, r)
 	if err != nil {
 		c.failed.Add(1)
 		log.Printf("consumer: insert request failed for call %s: %v", call.ID, err)
 		return
 	}
+	r.ID = id
 	c.processed.Add(1)
 	c.lastWriteAtNs.Store(time.Now().UnixNano())
+}
+
+// finishCall runs the post-insert half of the pipeline for one call whose row
+// is committed: the registered analyzers, an `upstream_error` warning when
+// call.Err != nil, the warnings write, and finally the session fold. Like
+// processCall before it, a panic anywhere in this work for one call is
+// recovered, logged once, and counted failed — it never takes the consumer
+// down.
+func (c *Consumer) finishCall(ctx context.Context, p pendingCall) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.failed.Add(1)
+			log.Printf("consumer: panic processing call %s: %v", p.call.ID, r)
+		}
+	}()
 
 	var warnings []store.Warning
 	for _, a := range c.analyzers {
-		warnings = append(warnings, c.runAnalyzer(a, meta, usage, req)...)
+		warnings = append(warnings, c.runAnalyzer(a, p.meta, p.usage, p.req)...)
 	}
-	if call.Err != nil {
+	if p.call.Err != nil {
 		warnings = append(warnings, store.Warning{
-			RequestID: id,
+			RequestID: p.req.ID,
 			Kind:      "upstream_error",
 			Severity:  "error",
-			Detail:    call.Err.Error(),
+			Detail:    p.call.Err.Error(),
 			CreatedAt: time.Now(),
 		})
 	}
 	if len(warnings) > 0 {
-		if err := c.store.InsertWarnings(ctx, id, warnings); err != nil {
+		if err := c.store.InsertWarnings(ctx, p.req.ID, warnings); err != nil {
 			c.failed.Add(1)
-			log.Printf("consumer: insert warnings failed for request %d: %v", id, err)
+			log.Printf("consumer: insert warnings failed for request %d: %v", p.req.ID, err)
 		}
 	}
 
@@ -373,9 +506,9 @@ func (c *Consumer) doProcessCall(ctx context.Context, call *sink.CapturedCall) {
 	// folds in are on req by now. A failure is logged without counting a
 	// failed call — the row this call was about is already committed, so
 	// calling the call itself failed would be a lie.
-	if c.aggregator != nil && req.SessionID != nil {
-		if err := c.aggregator.RecordCall(ctx, *req.SessionID, req, len(warnings)); err != nil {
-			log.Printf("consumer: record session aggregate failed for call %s: %v", call.ID, err)
+	if c.aggregator != nil && p.req.SessionID != nil {
+		if err := c.aggregator.RecordCall(ctx, *p.req.SessionID, p.req, len(warnings)); err != nil {
+			log.Printf("consumer: record session aggregate failed for call %s: %v", p.call.ID, err)
 		}
 	}
 }

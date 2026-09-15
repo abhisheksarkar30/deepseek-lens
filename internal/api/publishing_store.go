@@ -58,3 +58,17 @@ func (p *PublishingStore) InsertWarnings(ctx context.Context, reqID int64, warni
 	p.broker.Publish(Event{Type: "warnings", ID: reqID, Warnings: warnings})
 	return nil
 }
+
+// InsertRequests is the batched counterpart of InsertRequest (br-GI-1-07's
+// grouped-flush write): the wrapped store commits every row in one
+// transaction, and this publishes a {type:"request", id} event per committed
+// row, so a grouped flush still feeds the dashboard's live view.
+func (p *PublishingStore) InsertRequests(ctx context.Context, reqs []*store.Request) error {
+	if err := p.Store.InsertRequests(ctx, reqs); err != nil {
+		return err
+	}
+	for _, r := range reqs {
+		p.broker.Publish(Event{Type: "request", ID: r.ID})
+	}
+	return nil
+}

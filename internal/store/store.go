@@ -144,10 +144,11 @@ type rowScanner interface {
 	Scan(dest ...interface{}) error
 }
 
-// InsertRequest inserts r and sets r.ID to the assigned row id. Writer only
-// — see the package doc.
-func (s *Store) InsertRequest(ctx context.Context, r *Request) (int64, error) {
-	res, err := s.writer.ExecContext(ctx, insertRequestSQL,
+// requestArgs returns the positional values insertRequestSQL binds, in
+// insertColumns order — the one place the column list and the bound values
+// are kept in step, shared by InsertRequest and InsertRequests.
+func requestArgs(r *Request) []interface{} {
+	return []interface{}{
 		r.StartedAt.UnixNano(), r.TTFB.Nanoseconds(), r.Duration.Nanoseconds(),
 		r.Method, r.Path, r.RemoteAddr, r.Status,
 		r.ReqHeaders, r.RespHeaders, r.ReqBody, r.RespBody,
@@ -155,7 +156,13 @@ func (s *Store) InsertRequest(ctx context.Context, r *Request) (int64, error) {
 		ptrOrNil(r.StopReason), r.ModelRequested, r.ModelResolved, ptrOrNil(r.ErrorText),
 		ptrOrNil(r.SessionHeader), ptrOrNil(r.SessionID), ptrOrNil(r.CostUSD), ptrOrNil(r.CostSource),
 		ptrOrNil(r.ReplayOf), ptrOrNil(r.ReplayEdits), r.PrefixHash,
-	)
+	}
+}
+
+// InsertRequest inserts r and sets r.ID to the assigned row id. Writer only
+// — see the package doc.
+func (s *Store) InsertRequest(ctx context.Context, r *Request) (int64, error) {
+	res, err := s.writer.ExecContext(ctx, insertRequestSQL, requestArgs(r)...)
 	if err != nil {
 		return 0, fmt.Errorf("store: insert request: %w", err)
 	}
@@ -165,6 +172,37 @@ func (s *Store) InsertRequest(ctx context.Context, r *Request) (int64, error) {
 	}
 	r.ID = id
 	return id, nil
+}
+
+// InsertRequests inserts every request in reqs as one transaction and sets
+// each r.ID to the row it was assigned. It is the batched form of
+// InsertRequest — br-GI-1-07's "writes are grouped into a transaction": a
+// flush of N calls commits once instead of N times, which is what keeps
+// SQLite write amplification low under agentic load. The batch is
+// all-or-nothing: if any row fails the transaction rolls back and the caller
+// can retry the rows one by one. Writer only.
+func (s *Store) InsertRequests(ctx context.Context, reqs []*Request) error {
+	if len(reqs) == 0 {
+		return nil
+	}
+	tx, err := s.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: insert requests: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, r := range reqs {
+		res, err := tx.ExecContext(ctx, insertRequestSQL, requestArgs(r)...)
+		if err != nil {
+			return fmt.Errorf("store: insert requests: %w", err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("store: insert requests: last insert id: %w", err)
+		}
+		r.ID = id
+	}
+	return tx.Commit()
 }
 
 // InsertWarnings inserts warnings for reqID as one transaction. Writer only.

@@ -381,10 +381,138 @@ func TestFailingStore(t *testing.T) {
 	}
 }
 
-func TestBatchingReducesFlushCount(t *testing.T) {
+// failBatchStore wraps a real Store and implements the consumer's optional
+// batchInserter, failing the first InsertRequests call before delegating. It
+// exists to exercise the batch-failure → per-row fallback in insertBatch:
+// failNStore does not implement InsertRequests, so it takes the no-batch path
+// and never reaches that branch.
+type failBatchStore struct {
+	*store.Store
+	first bool // the consumer goroutine is the only writer of this field
+}
+
+func (s *failBatchStore) InsertRequests(ctx context.Context, reqs []*store.Request) error {
+	if !s.first {
+		s.first = true
+		return errors.New("injected batch failure")
+	}
+	return s.Store.InsertRequests(ctx, reqs)
+}
+
+// TestBatchFailureFallsBackToPerRow is br-GI-1-07's "failing store (injected
+// error on the first call) → the consumer continues", at the batch level: when
+// a batch transaction fails, every row is retried individually, so no call is
+// lost and none is counted failed.
+func TestBatchFailureFallsBackToPerRow(t *testing.T) {
 	st := newTestStore(t)
+	fs := &failBatchStore{Store: st}
+	sk := sink.New(16)
+	c := New(sk, fs, nil)
+
+	runClosed(t, c, sk, []*sink.CapturedCall{simpleCall(), simpleCall(), simpleCall()})
+
+	reqs, err := st.ListRequests(context.Background(), store.Filter{})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	if len(reqs) != 3 {
+		t.Fatalf("got %d rows, want 3 (the failed batch was retried per row)", len(reqs))
+	}
+
+	stats := c.Stats()
+	if stats.Processed != 3 {
+		t.Errorf("Processed = %d, want 3", stats.Processed)
+	}
+	if stats.Failed != 0 {
+		t.Errorf("Failed = %d, want 0 (the per-row fallback recovered every row)", stats.Failed)
+	}
+}
+
+// panicStore panics on its first write on both paths — the grouped batch
+// (InsertRequests) and the per-row fallback (InsertRequest). It proves
+// insertBatch contains a store-write panic the way the rest of the pipeline
+// does (br-GI-1-07: "error containment is the point of this bead"): before the
+// round-1 batch split this write ran inside processCall's recover, so a
+// panicking store killed the consumer goroutine and capture silently stopped.
+type panicStore struct {
+	*store.Store
+	batchPanicked bool // the consumer goroutine is the only writer of these fields
+	rowPanicked   bool
+}
+
+func (s *panicStore) InsertRequests(ctx context.Context, reqs []*store.Request) error {
+	if !s.batchPanicked {
+		s.batchPanicked = true
+		panic("injected batch panic")
+	}
+	return s.Store.InsertRequests(ctx, reqs)
+}
+
+func (s *panicStore) InsertRequest(ctx context.Context, r *store.Request) (int64, error) {
+	if !s.rowPanicked {
+		s.rowPanicked = true
+		panic("injected row panic")
+	}
+	return s.Store.InsertRequest(ctx, r)
+}
+
+func TestStorePanicIsContained(t *testing.T) {
+	st := newTestStore(t)
+	ps := &panicStore{Store: st}
+	sk := sink.New(16)
+	c := New(sk, ps, nil)
+
+	// An unrecovered panic here would propagate out of Run (called
+	// synchronously by runClosed) and fail the test outright — which is the
+	// point: the batched write panics, the fallback's first row panics, and
+	// the remaining rows still land.
+	runClosed(t, c, sk, []*sink.CapturedCall{simpleCall(), simpleCall(), simpleCall()})
+
+	reqs, err := st.ListRequests(context.Background(), store.Filter{})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("got %d rows, want 2 (two rows survived the panics)", len(reqs))
+	}
+	stats := c.Stats()
+	if stats.Processed != 2 {
+		t.Errorf("Processed = %d, want 2", stats.Processed)
+	}
+	if stats.Failed != 1 {
+		t.Errorf("Failed = %d, want 1 (the panicking row only)", stats.Failed)
+	}
+}
+
+// countingStore wraps a real Store and counts every write that actually
+// reaches it: one per grouped batch transaction, one per single insert. It is
+// how the batching test measures the real write count instead of trusting the
+// consumer's own Flushes counter.
+type countingStore struct {
+	*store.Store
+	batches atomic.Uint64 // InsertRequests calls — one SQL transaction each
+	singles atomic.Uint64 // InsertRequest calls
+}
+
+func (s *countingStore) InsertRequests(ctx context.Context, reqs []*store.Request) error {
+	s.batches.Add(1)
+	return s.Store.InsertRequests(ctx, reqs)
+}
+
+func (s *countingStore) InsertRequest(ctx context.Context, r *store.Request) (int64, error) {
+	s.singles.Add(1)
+	return s.Store.InsertRequest(ctx, r)
+}
+
+// TestBatchingGroupsWritesIntoOneTransaction is br-GI-1-07's batching case:
+// 200 calls submitted rapidly must all land as rows, and the number of writes
+// that reach the store must be materially below 200 — the asserted property
+// is that the batch is grouped into a transaction, not merely that it works.
+func TestBatchingGroupsWritesIntoOneTransaction(t *testing.T) {
+	st := newTestStore(t)
+	cs := &countingStore{Store: st}
 	sk := sink.New(4096)
-	c := New(sk, st, nil)
+	c := New(sk, cs, nil)
 
 	const n = 200
 	calls := make([]*sink.CapturedCall, n)
@@ -401,12 +529,16 @@ func TestBatchingReducesFlushCount(t *testing.T) {
 		t.Fatalf("got %d rows, want %d", len(reqs), n)
 	}
 
-	stats := c.Stats()
-	if stats.Flushes == 0 {
-		t.Fatal("Flushes = 0, want at least 1")
+	writes := cs.batches.Load() + cs.singles.Load()
+	if writes == 0 {
+		t.Fatal("no writes reached the store, want at least one batch")
 	}
-	if stats.Flushes >= n {
-		t.Fatalf("Flushes = %d, want materially below %d — batching did not happen", stats.Flushes, n)
+	if writes >= n {
+		t.Fatalf("write count = %d (%d batch transactions + %d single inserts), want materially below %d — the batch was not grouped into a transaction",
+			writes, cs.batches.Load(), cs.singles.Load(), n)
+	}
+	if singles := cs.singles.Load(); singles != 0 {
+		t.Errorf("single inserts = %d, want 0 when the store supports a batch transaction", singles)
 	}
 }
 

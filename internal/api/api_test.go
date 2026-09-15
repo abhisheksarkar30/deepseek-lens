@@ -587,6 +587,69 @@ func TestStreamDeliversPublishedEvent(t *testing.T) {
 	}
 }
 
+// TestPublishingStoreInsertRequests covers the glue round-1 added so a grouped
+// flush still feeds the dashboard's live feed (br-GI-1-09: "a request through
+// the proxy appears in the live feed"): InsertRequests commits every row of a
+// batch through the wrapped store and publishes exactly one {type:"request",
+// id} per committed row. TestStreamDeliversPublishedEvent publishes to the
+// broker directly and so never exercises this decorator.
+func TestPublishingStoreInsertRequests(t *testing.T) {
+	st := newTestStore(t)
+	broker := NewBroker()
+	events, unsub := broker.Subscribe()
+	defer unsub()
+	ps := NewPublishingStore(st, broker)
+
+	reqs := make([]*store.Request, 3)
+	for i := range reqs {
+		reqs[i] = &store.Request{
+			StartedAt:      time.Now().Add(-time.Minute),
+			Method:         "POST",
+			Path:           "/v1/messages",
+			RemoteAddr:     "127.0.0.1:1234",
+			Status:         200,
+			ReqHeaders:     `{}`,
+			RespHeaders:    `{}`,
+			ReqBody:        []byte(`{}`),
+			RespBody:       []byte(`{}`),
+			ModelRequested: "deepseek-chat",
+			ModelResolved:  "deepseek-chat",
+			PrefixHash:     "abc123",
+		}
+	}
+
+	if err := ps.InsertRequests(context.Background(), reqs); err != nil {
+		t.Fatalf("InsertRequests: %v", err)
+	}
+
+	for _, r := range reqs {
+		if r.ID == 0 {
+			t.Fatalf("row %+v was not assigned an id — the batch did not commit", r)
+		}
+		select {
+		case e := <-events:
+			if e.Type != "request" || e.ID != r.ID {
+				t.Fatalf("event = %+v, want {request %d}", e, r.ID)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("no SSE event published for committed row %d", r.ID)
+		}
+	}
+	select {
+	case e := <-events:
+		t.Fatalf("extra event %+v published, want exactly one per committed row", e)
+	default:
+	}
+
+	rows, err := st.ListRequests(context.Background(), store.Filter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	if len(rows) != len(reqs) {
+		t.Fatalf("got %d rows, want %d (every batch row committed)", len(rows), len(reqs))
+	}
+}
+
 // TestStreamSlowClientIsolation exercises the broker's drop-slow-clients
 // policy with a real dashboard client on one side (an actual HTTP SSE
 // connection through api.stream) and a deliberately-never-drained broker
