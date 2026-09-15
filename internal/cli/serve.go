@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/abhisheksarkar30/deepseek-lens/internal/analyze"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/api"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
@@ -55,7 +56,16 @@ func Serve(args []string) error {
 	// This bead injects a nil SessionResolver, matching br-GI-1-07's own
 	// convention (session resolution lands in br-GI-1-12) — Request.SessionID
 	// simply stays unset until then.
-	cons := consumer.New(sk, pubStore, nil)
+	//
+	// The dropped-parameter rule engine (br-GI-1-10) is registered here, not
+	// baked into consumer.New, for the same reason the publishing store is a
+	// decorator: consumer.New already takes its analyzers as arguments, and
+	// br-GI-1-07's tests construct Consumers that assert exact warning counts
+	// on bodies those rules legitimately fire on. Defaulting them in would
+	// have rewritten bead-07's tests; passing the config-resolved engine in
+	// keeps the flags->rules->rows path explicit, and Analyze stays a pure
+	// function of the config tables it is handed.
+	cons := consumer.New(sk, pubStore, nil, analyze.NewRules(cfg.ModelMap, cfg.ModelMaxTokens))
 
 	proxySrv, err := proxy.NewServer(cfg, sk)
 	if err != nil {

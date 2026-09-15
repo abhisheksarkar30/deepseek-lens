@@ -180,8 +180,8 @@ func (s *Store) InsertWarnings(ctx context.Context, reqID int64, warnings []Warn
 
 	for _, w := range warnings {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO warnings (request_id, kind, severity, message, created_at) VALUES (?, ?, ?, ?, ?)`,
-			reqID, w.Kind, w.Severity, w.Message, w.CreatedAt.UnixNano(),
+			`INSERT INTO warnings (request_id, kind, severity, detail, path, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			reqID, w.Kind, w.Severity, w.Detail, w.Path, w.CreatedAt.UnixNano(),
 		); err != nil {
 			return fmt.Errorf("store: insert warnings: %w", err)
 		}
@@ -500,7 +500,7 @@ func (s *Store) UpsertSession(ctx context.Context, sess *Session) error {
 func scanWarning(sc rowScanner) (*Warning, error) {
 	var w Warning
 	var createdAt int64
-	if err := sc.Scan(&w.ID, &w.RequestID, &w.Kind, &w.Severity, &w.Message, &createdAt); err != nil {
+	if err := sc.Scan(&w.ID, &w.RequestID, &w.Kind, &w.Severity, &w.Detail, &w.Path, &createdAt); err != nil {
 		return nil, err
 	}
 	w.CreatedAt = time.Unix(0, createdAt).UTC()
@@ -530,7 +530,7 @@ func (s *Store) ListWarnings(ctx context.Context, f Filter) ([]*Warning, error) 
 		args = append(args, f.Since.UnixNano())
 	}
 
-	query := "SELECT id, request_id, kind, severity, message, created_at FROM warnings"
+	query := "SELECT id, request_id, kind, severity, detail, path, created_at FROM warnings"
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/abhisheksarkar30/deepseek-lens/internal/analyze"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/parse"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
@@ -62,6 +63,59 @@ func runClosed(t *testing.T, c *Consumer, sk *sink.Sink, calls []*sink.CapturedC
 	defer cancel()
 	if err := c.Run(ctx); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+}
+
+// TestDropDetectionEndToEnd is br-GI-1-10's integration case: the rule
+// engine registered the way `lens serve` registers it, over a request that
+// actually carries cache_control, must land in the warnings table linked to
+// the request it came from.
+func TestDropDetectionEndToEnd(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, nil, analyze.NewRules("", ""))
+
+	call := simpleCall()
+	call.ReqHeaders = http.Header{"Content-Type": {"application/json"}}
+	call.ReqHeaders.Set("anthropic-beta", "prompt-caching-2024-07-31")
+	call.ReqBody = []byte(`{"model":"claude-sonnet-5","max_tokens":1024,"top_k":5,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`)
+
+	runClosed(t, c, sk, []*sink.CapturedCall{call})
+
+	reqs, err := st.ListRequests(context.Background(), store.Filter{})
+	if err != nil || len(reqs) != 1 {
+		t.Fatalf("ListRequests: %v, len=%d", err, len(reqs))
+	}
+
+	warnings, err := st.ListWarnings(context.Background(), store.Filter{})
+	if err != nil {
+		t.Fatalf("ListWarnings: %v", err)
+	}
+	byKind := map[string]*store.Warning{}
+	for _, wn := range warnings {
+		byKind[wn.Kind] = wn
+		if wn.RequestID != reqs[0].ID {
+			t.Errorf("warning %q: RequestID = %d, want %d", wn.Kind, wn.RequestID, reqs[0].ID)
+		}
+		if wn.CreatedAt.IsZero() || wn.CreatedAt.Year() < 2000 {
+			t.Errorf("warning %q: CreatedAt = %v, want it stamped", wn.Kind, wn.CreatedAt)
+		}
+	}
+
+	cc, ok := byKind["cache_control_ignored"]
+	if !ok {
+		t.Fatalf("no cache_control_ignored warning; got %d warnings", len(warnings))
+	}
+	if !strings.Contains(cc.Detail, "messages[0].content[0]") {
+		t.Errorf("cache_control Detail = %q, want it to name the site", cc.Detail)
+	}
+	if cc.Path != "messages[0].content[0]" {
+		t.Errorf("cache_control Path = %q, want the offending site", cc.Path)
+	}
+	for _, kind := range []string{"param_ignored", "header_ignored"} {
+		if _, ok := byKind[kind]; !ok {
+			t.Errorf("no %s warning; got %d warnings", kind, len(warnings))
+		}
 	}
 }
 
@@ -235,8 +289,8 @@ func TestPanickingAnalyzer(t *testing.T) {
 		if w.Kind != "analyzer_panic" {
 			t.Errorf("Kind = %q, want analyzer_panic", w.Kind)
 		}
-		if !strings.Contains(w.Message, "panicAnalyzer") {
-			t.Errorf("Message = %q, want it to name panicAnalyzer", w.Message)
+		if !strings.Contains(w.Detail, "panicAnalyzer") {
+			t.Errorf("Detail = %q, want it to name panicAnalyzer", w.Detail)
 		}
 	}
 }
@@ -250,7 +304,7 @@ func (warningAnalyzer) Analyze(_ parse.Meta, _ parse.Usage, req *store.Request) 
 		RequestID: req.ID,
 		Kind:      "test_rule",
 		Severity:  "info",
-		Message:   "always fires",
+		Detail:    "always fires",
 		CreatedAt: time.Now(),
 	}}
 }

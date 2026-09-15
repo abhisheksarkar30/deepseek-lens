@@ -14,6 +14,27 @@ import (
 	"strings"
 )
 
+// DefaultModelMap is the built-in client-model → DeepSeek-model table
+// (br-GI-1-10). It lives here, not in internal/analyze, because DeepSeek
+// changing its mapping is a recoverable event only if the user can edit the
+// table without a code change — see the plan's risk 6.
+//
+// Format: comma-separated "prefix:target" pairs, matched case-insensitively
+// on prefix, first match wins. A "*" prefix is the catch-all that serves any
+// client model the table does not otherwise recognize (its target is what
+// the unrecognized-model warning names).
+const DefaultModelMap = "opus:deepseek-v4-pro,sonnet:deepseek-flash,haiku:deepseek-flash,*:deepseek-flash"
+
+// DefaultModelMaxTokens is the built-in per-DeepSeek-model max_tokens
+// ceiling (br-GI-1-10's "max_tokens exceeds the model's ceiling, if known"
+// rule), same "model:ceiling" comma-separated format. A model absent from
+// this table simply skips the rule.
+//
+// ponytail: best-effort placeholder ceilings pending real DeepSeek
+// documentation; the point of the rule is that a nonsensical max_tokens is
+// visibly capped, so the exact figures matter less than their being editable.
+const DefaultModelMaxTokens = "deepseek-v4-pro:64000,deepseek-flash:32000"
+
 // Config is the effective, fully-resolved configuration for lens.
 type Config struct {
 	ProxyAddr         string
@@ -26,6 +47,8 @@ type Config struct {
 	Capture           bool
 	SessionGapMinutes int
 	ReplayEnabled     bool
+	ModelMap          string // client-model → DeepSeek-model table; see DefaultModelMap
+	ModelMaxTokens    string // DeepSeek-model → max_tokens ceiling; see DefaultModelMaxTokens
 }
 
 // Default returns the built-in defaults.
@@ -41,6 +64,8 @@ func Default() *Config {
 		Capture:           true,
 		SessionGapMinutes: 30,
 		ReplayEnabled:     false,
+		ModelMap:          DefaultModelMap,
+		ModelMaxTokens:    DefaultModelMaxTokens,
 	}
 }
 
@@ -84,6 +109,8 @@ var fieldsByEnv = map[string]string{
 	"LENS_CAPTURE":             "Capture",
 	"LENS_SESSION_GAP_MINUTES": "SessionGapMinutes",
 	"LENS_REPLAY_ENABLED":      "ReplayEnabled",
+	"LENS_MODEL_MAP":           "ModelMap",
+	"LENS_MODEL_MAX_TOKENS":    "ModelMaxTokens",
 }
 
 func envKV() map[string]string {
@@ -155,6 +182,10 @@ func applyKV(cfg *Config, kv map[string]string) error {
 			cfg.SessionGapMinutes, err = strconv.Atoi(val)
 		case "ReplayEnabled":
 			cfg.ReplayEnabled, err = strconv.ParseBool(val)
+		case "ModelMap":
+			cfg.ModelMap = val
+		case "ModelMaxTokens":
+			cfg.ModelMaxTokens = val
 		default:
 			return fmt.Errorf("unknown key %q", key)
 		}
@@ -180,6 +211,8 @@ func applyFlags(cfg *Config, args []string) error {
 	fs.BoolVar(&cfg.Capture, "capture", cfg.Capture, "enable capture")
 	fs.IntVar(&cfg.SessionGapMinutes, "session-gap-minutes", cfg.SessionGapMinutes, "minutes of inactivity before a new session")
 	fs.BoolVar(&cfg.ReplayEnabled, "replay", cfg.ReplayEnabled, "enable the replay endpoint")
+	fs.StringVar(&cfg.ModelMap, "model-map", cfg.ModelMap, "client-model to DeepSeek-model map, e.g. \"opus:deepseek-v4-pro,*:deepseek-flash\"")
+	fs.StringVar(&cfg.ModelMaxTokens, "model-max-tokens", cfg.ModelMaxTokens, "per-DeepSeek-model max_tokens ceiling, e.g. \"deepseek-v4-pro:64000\"")
 	return fs.Parse(args)
 }
 

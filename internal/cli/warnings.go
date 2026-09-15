@@ -88,9 +88,9 @@ func runWarnings(args []string, w io.Writer, st *store.Store) error {
 		fmt.Fprintln(w)
 		drows := make([][]string, 0, len(all))
 		for _, wn := range all {
-			drows = append(drows, []string{fmt.Sprintf("%d", wn.RequestID), wn.Kind, wn.Severity, relTime(wn.CreatedAt, now), wn.Message})
+			drows = append(drows, []string{fmt.Sprintf("%d", wn.RequestID), wn.Kind, wn.Severity, relTime(wn.CreatedAt, now), wn.Path, warnSite(wn)})
 		}
-		fmt.Fprint(w, table([]string{"REQUEST", "KIND", "SEVERITY", "AGE", "MESSAGE"}, drows, 0))
+		fmt.Fprint(w, table([]string{"REQUEST", "KIND", "SEVERITY", "AGE", "PATH", "DETAIL"}, drows, 0))
 	}
 	return nil
 }

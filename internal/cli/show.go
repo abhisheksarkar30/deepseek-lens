@@ -86,7 +86,7 @@ func runShow(args []string, w io.Writer, st *store.Store) error {
 		fmt.Fprintln(w, "  (none)")
 	}
 	for _, wn := range warnings {
-		fmt.Fprintf(w, "  [%s] %s: %s\n", wn.Severity, wn.Kind, wn.Message)
+		fmt.Fprintf(w, "  [%s] %s: %s\n", wn.Severity, wn.Kind, warnSite(wn))
 	}
 
 	fmt.Fprintf(w, "\nrequest headers:\n%s\n", indentBlock(prettyJSON(r.ReqHeaders)))
@@ -95,6 +95,15 @@ func runShow(args []string, w io.Writer, st *store.Store) error {
 	fmt.Fprintf(w, "\nresponse body:\n%s\n", renderBody(r.RespBody, *full))
 
 	return nil
+}
+
+// warnSite renders a warning's Detail with the site it applies to prefixed
+// when the analyzer could name one.
+func warnSite(wn *store.Warning) string {
+	if wn.Path == "" {
+		return wn.Detail
+	}
+	return wn.Path + ": " + wn.Detail
 }
 
 // prettyJSON re-indents s if it parses as JSON, else returns it unchanged.

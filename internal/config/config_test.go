@@ -113,6 +113,8 @@ AllowRemote = true
 Capture = false
 SessionGapMinutes = 15
 ReplayEnabled = true
+ModelMap = "opus:deepseek-v4-pro,*:deepseek-flash"
+ModelMaxTokens = "deepseek-v4-pro:1"
 `)
 
 	cfg, err := Load(nil)
@@ -130,6 +132,8 @@ ReplayEnabled = true
 		Capture:           false,
 		SessionGapMinutes: 15,
 		ReplayEnabled:     true,
+		ModelMap:          "opus:deepseek-v4-pro,*:deepseek-flash",
+		ModelMaxTokens:    "deepseek-v4-pro:1",
 	}
 	if *cfg != *want {
 		t.Errorf("Load() = %+v, want %+v", *cfg, *want)

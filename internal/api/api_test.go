@@ -158,7 +158,7 @@ func TestGetRequestIncludesWarnings(t *testing.T) {
 	st := newTestStore(t)
 	r := seedRequest(t, st, nil)
 	if err := st.InsertWarnings(context.Background(), r.ID, []store.Warning{
-		{Kind: "cache_control_ignored", Severity: "warning", Message: "dropped", CreatedAt: time.Now()},
+		{Kind: "cache_control_ignored", Severity: "warning", Detail: "dropped", CreatedAt: time.Now()},
 	}); err != nil {
 		t.Fatalf("InsertWarnings: %v", err)
 	}
@@ -221,12 +221,12 @@ func TestListWarningsFilteredByKind(t *testing.T) {
 	r1 := seedRequest(t, st, nil)
 	r2 := seedRequest(t, st, nil)
 	if err := st.InsertWarnings(context.Background(), r1.ID, []store.Warning{
-		{Kind: "cache_control_ignored", Severity: "warning", Message: "a", CreatedAt: time.Now()},
+		{Kind: "cache_control_ignored", Severity: "warning", Detail: "a", CreatedAt: time.Now()},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.InsertWarnings(context.Background(), r2.ID, []store.Warning{
-		{Kind: "upstream_error", Severity: "error", Message: "b", CreatedAt: time.Now()},
+		{Kind: "upstream_error", Severity: "error", Detail: "b", CreatedAt: time.Now()},
 	}); err != nil {
 		t.Fatal(err)
 	}

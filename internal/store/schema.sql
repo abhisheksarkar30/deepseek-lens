@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS warnings (
     request_id INTEGER NOT NULL,
     kind       TEXT NOT NULL,
     severity   TEXT NOT NULL,
-    message    TEXT NOT NULL,
+    detail     TEXT NOT NULL,
+    path       TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL
 );
 

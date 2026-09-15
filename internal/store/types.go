@@ -49,14 +49,23 @@ type Request struct {
 }
 
 // Warning is one analyzer finding attached to a Request (e.g. a dropped
-// parameter, per CLAUDE.md). Kind/Severity/Message are free-form strings
-// owned by whichever analyzer bead (br-GI-1-09/10) produces them.
+// parameter, per CLAUDE.md). Kind/Severity/Detail are free-form strings
+// owned by whichever analyzer bead (br-GI-1-10) produces them; Path names
+// the offending site inside the request (e.g. "thinking.budget_tokens",
+// "tools[0]", "anthropic-beta"), or "" when there is no single natural one —
+// same dotted/bracket style as parse.Meta.CacheControlSites.
+//
+// No json tags: this type crosses the API and the SSE broker with Go's
+// default capitalized field names, matching store.Request's existing
+// convention (so the wire field is "Detail", and internal/web/app.js reads
+// it as such).
 type Warning struct {
 	ID        int64
 	RequestID int64
 	Kind      string
 	Severity  string
-	Message   string
+	Detail    string
+	Path      string
 	CreatedAt time.Time
 }
 

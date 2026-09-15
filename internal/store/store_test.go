@@ -294,9 +294,9 @@ func TestWarningsRoundTrip(t *testing.T) {
 	}
 
 	warnings := []Warning{
-		{Kind: "dropped_param", Severity: "warn", Message: "top_k dropped", CreatedAt: time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)},
-		{Kind: "dropped_param", Severity: "warn", Message: "top_p dropped", CreatedAt: time.Date(2026, 1, 2, 3, 0, 1, 0, time.UTC)},
-		{Kind: "unsupported_block", Severity: "error", Message: "document block", CreatedAt: time.Date(2026, 1, 2, 3, 0, 2, 0, time.UTC)},
+		{Kind: "dropped_param", Severity: "warn", Detail: "top_k dropped", CreatedAt: time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)},
+		{Kind: "dropped_param", Severity: "warn", Detail: "top_p dropped", CreatedAt: time.Date(2026, 1, 2, 3, 0, 1, 0, time.UTC)},
+		{Kind: "unsupported_block", Severity: "error", Detail: "document block", CreatedAt: time.Date(2026, 1, 2, 3, 0, 2, 0, time.UTC)},
 	}
 	if err := s.InsertWarnings(ctx, id, warnings); err != nil {
 		t.Fatalf("InsertWarnings: %v", err)
@@ -322,8 +322,8 @@ func TestWarningsRoundTrip(t *testing.T) {
 	if len(filtered) != 1 {
 		t.Fatalf("ListWarnings filtered by kind: got %d want 1", len(filtered))
 	}
-	if filtered[0].Message != "document block" {
-		t.Errorf("filtered warning: got %q want %q", filtered[0].Message, "document block")
+	if filtered[0].Detail != "document block" {
+		t.Errorf("filtered warning: got %q want %q", filtered[0].Detail, "document block")
 	}
 }
 
@@ -395,7 +395,7 @@ func TestFilterOnlyWarned(t *testing.T) {
 		t.Fatalf("InsertRequest(warned): %v", err)
 	}
 	if err := s.InsertWarnings(ctx, warnedID, []Warning{
-		{Kind: "k", Severity: "warn", Message: "m", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{Kind: "k", Severity: "warn", Detail: "m", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}); err != nil {
 		t.Fatalf("InsertWarnings: %v", err)
 	}
@@ -560,7 +560,7 @@ func TestPurgeOlderThan(t *testing.T) {
 		t.Fatalf("InsertRequest(old): %v", err)
 	}
 	if err := s.InsertWarnings(ctx, oldID, []Warning{
-		{Kind: "k", Severity: "warn", Message: "m", CreatedAt: old.StartedAt},
+		{Kind: "k", Severity: "warn", Detail: "m", CreatedAt: old.StartedAt},
 	}); err != nil {
 		t.Fatalf("InsertWarnings: %v", err)
 	}

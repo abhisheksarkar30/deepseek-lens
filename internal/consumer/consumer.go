@@ -301,7 +301,7 @@ func (c *Consumer) doProcessCall(ctx context.Context, call *sink.CapturedCall) {
 			RequestID: id,
 			Kind:      "upstream_error",
 			Severity:  "error",
-			Message:   call.Err.Error(),
+			Detail:    call.Err.Error(),
 			CreatedAt: time.Now(),
 		})
 	}
@@ -325,7 +325,7 @@ func (c *Consumer) runAnalyzer(a Analyzer, meta parse.Meta, usage parse.Usage, r
 				RequestID: req.ID,
 				Kind:      "analyzer_panic",
 				Severity:  "error",
-				Message:   fmt.Sprintf("%T panicked: %v", a, r),
+				Detail:    fmt.Sprintf("%T panicked: %v", a, r),
 				CreatedAt: time.Now(),
 			}}
 		}

@@ -97,7 +97,7 @@ func TestLSWarnFilter(t *testing.T) {
 	warned := seedRequest(t, st, nil)
 	seedRequest(t, st, nil) // unwarned
 	if err := st.InsertWarnings(context.Background(), warned.ID, []store.Warning{
-		{Kind: "dropped_param", Severity: "warn", Message: "top_k dropped", CreatedAt: time.Now()},
+		{Kind: "dropped_param", Severity: "warn", Detail: "top_k dropped", CreatedAt: time.Now()},
 	}); err != nil {
 		t.Fatalf("InsertWarnings: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestShowIncludesWarningsAndBodies(t *testing.T) {
 	st := newTestStore(t)
 	r := seedRequest(t, st, nil)
 	if err := st.InsertWarnings(context.Background(), r.ID, []store.Warning{
-		{Kind: "dropped_param", Severity: "warn", Message: "top_k dropped", CreatedAt: time.Now()},
+		{Kind: "dropped_param", Severity: "warn", Detail: "top_k dropped", CreatedAt: time.Now()},
 	}); err != nil {
 		t.Fatalf("InsertWarnings: %v", err)
 	}
@@ -240,13 +240,13 @@ func TestWarningsGroupsByKindAndDetail(t *testing.T) {
 	r2 := seedRequest(t, st, nil)
 	ctx := context.Background()
 	if err := st.InsertWarnings(ctx, r1.ID, []store.Warning{
-		{Kind: "dropped_param", Severity: "warn", Message: "top_k dropped", CreatedAt: time.Now()},
-		{Kind: "dropped_param", Severity: "warn", Message: "top_p dropped", CreatedAt: time.Now()},
+		{Kind: "dropped_param", Severity: "warn", Detail: "top_k dropped", CreatedAt: time.Now()},
+		{Kind: "dropped_param", Severity: "warn", Detail: "top_p dropped", CreatedAt: time.Now()},
 	}); err != nil {
 		t.Fatalf("InsertWarnings r1: %v", err)
 	}
 	if err := st.InsertWarnings(ctx, r2.ID, []store.Warning{
-		{Kind: "unsupported_block", Severity: "error", Message: "document block", CreatedAt: time.Now()},
+		{Kind: "unsupported_block", Severity: "error", Detail: "document block", CreatedAt: time.Now()},
 	}); err != nil {
 		t.Fatalf("InsertWarnings r2: %v", err)
 	}
