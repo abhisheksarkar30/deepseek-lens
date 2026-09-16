@@ -278,6 +278,10 @@ td.price-cell input {
 }
 .danger:disabled { opacity: 0.5; cursor: not-allowed; }
 
+#settings-older-than-action, #settings-unpriced-action { margin-top: 12px; }
+#settings-older-than-confirm button, #settings-unpriced-confirm button { margin-right: 8px; }
+#settings-older-than-result, #settings-unpriced-result { margin-top: 8px; font-size: 0.85rem; }
+
 svg#stats-chart {
   width: 100%;
   height: auto;
