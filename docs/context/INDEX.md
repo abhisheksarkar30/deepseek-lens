@@ -57,12 +57,27 @@ ADR).
 
 ## Last generated / refreshed
 
-2026-09-16, REFRESH mode, scoped to the GI-9 dashboard-affordance fix in
+2026-09-16, REFRESH mode, scoped to the GI-15 pagination story (`GI-15-pagination` branch) — the
+pagination contract on the three list routes (`?limit`/`?offset`, and the `X-Total-Count`/`X-Limit`/
+`X-Offset` **response headers**, with `X-Limit` reporting the *applied* page size), the new
+unpaginated `GET /api/warnings/summary` route, the `idx_warnings_kind_severity_created_at` index and
+the `WarningGroup` type, and the extract-and-run technique for exercising `app.js` logic without a
+harness (`api-surface.md`, `data-model.md`, `testing-and-quality.md`).
+
+That refresh also corrected pre-existing drift it landed on rather than only GI-15's own changes:
+`api-surface.md`'s per-route line citations had shifted, `data-model.md` claimed the `warnings`
+foreign key was *not* enforced (it is — the DSN sets `foreign_keys(ON)`), and several `store.go`
+line references were stale. See the GI-15 PR description for the full list.
+
+Notes from earlier refreshes: the `warnBadge` caveat below is now resolved — `warnBadge` exists in
+[internal/web/app.js:44](../../internal/web/app.js) on this branch, so the GI-9 fix has landed.
+
+Previously: 2026-09-16, scoped to the GI-9 dashboard-affordance fix in
 [PR #10](https://github.com/abhisheksarkar30/deepseek-lens/pull/10) — the accessible-name rule for
 warning badges and how a web change is verified without a harness (`conventions.md`,
 `testing-and-quality.md`). Documentation was written against the `GI-9-fix-warning-badge-affordance`
-branch, which was unmerged at refresh time: on `develop` the `⚠` spans are still inlined and
-`warnBadge` does not exist.
+branch, which was unmerged at refresh time: on `develop` the `⚠` spans were still inlined and
+`warnBadge` did not exist.
 
 Previously: 2026-09-15, scoped to the GI-4 peak-pricing/hook-integration story (peak-aware
 `pricing.Compute`, the `peak_pricing` warning kind, and doctor's `provider_hooks` check).

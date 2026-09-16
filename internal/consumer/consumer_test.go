@@ -783,7 +783,7 @@ func TestSessionGroupingEndToEnd(t *testing.T) {
 		}
 	}
 
-	sessions, err := st.ListSessions(ctx)
+	sessions, err := st.ListSessions(ctx, store.Filter{})
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
@@ -828,7 +828,7 @@ func TestSessionSkippedWithoutAggregator(t *testing.T) {
 	if reqs[0].SessionID == nil {
 		t.Error("SessionID is unset, want the resolver's id")
 	}
-	sessions, err := st.ListSessions(context.Background())
+	sessions, err := st.ListSessions(context.Background(), store.Filter{})
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}

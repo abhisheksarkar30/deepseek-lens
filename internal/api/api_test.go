@@ -757,3 +757,248 @@ func TestStreamSlowClientIsolation(t *testing.T) {
 		t.Fatalf("stalled subscriber accumulated all %d events unbounded, want it dropped once its buffer filled", n)
 	}
 }
+
+// GI-15 (br-GI-15-04): GET /api/warnings/summary — the groups the warning
+// inbox renders, counted in SQL over the whole matching set.
+
+// seedWarningsAt hangs warnings off one fresh request, so each call to it
+// gets its own row to attach them to.
+func seedWarningsAt(t *testing.T, st *store.Store, warnings []store.Warning) {
+	t.Helper()
+	r := seedRequest(t, st, nil)
+	if err := st.InsertWarnings(context.Background(), r.ID, warnings); err != nil {
+		t.Fatalf("InsertWarnings: %v", err)
+	}
+}
+
+// groupByKey indexes a summary by "kind|severity", failing on a duplicate —
+// one entry per pair is the whole contract.
+func groupByKey(t *testing.T, groups []store.WarningGroup) map[string]store.WarningGroup {
+	t.Helper()
+	m := map[string]store.WarningGroup{}
+	for _, g := range groups {
+		key := g.Kind + "|" + g.Severity
+		if _, dup := m[key]; dup {
+			t.Errorf("group %s appears twice — the summary must be one entry per (kind, severity)", key)
+		}
+		m[key] = g
+	}
+	return m
+}
+
+func summaryGroups(t *testing.T, h http.Handler, query string) []store.WarningGroup {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/warnings/summary"+query, nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/warnings/summary%s: status = %d, want 200: %s", query, rr.Code, rr.Body.String())
+	}
+	return decodeJSON[[]store.WarningGroup](t, rr.Body)
+}
+
+// TestWarningsSummaryCountsPastTheListCap is the regression test this bead
+// exists for. The dashboard used to group the rows it had fetched, which is
+// at most store.DefaultLimit of them, so a kind that fired more often than
+// that reported a count that was simply wrong — no error, no signal to the
+// user, just a number that was too low. Counting in SQL over the whole table
+// is what fixes it.
+//
+// The seed is DefaultLimit+1 rather than a round number: below the cap, a
+// correct count and a truncated one are indistinguishable, so a smaller
+// fixture would pass against the very behavior this guards against.
+func TestWarningsSummaryCountsPastTheListCap(t *testing.T) {
+	st := newTestStore(t)
+	base := time.Now().Add(-time.Hour)
+	warnings := make([]store.Warning, store.DefaultLimit+1)
+	for i := range warnings {
+		warnings[i] = store.Warning{
+			Kind: "cache_control_ignored", Severity: "warn",
+			Detail:    fmt.Sprintf("dropped %d", i),
+			CreatedAt: base.Add(time.Duration(i) * time.Second),
+		}
+	}
+	seedWarningsAt(t, st, warnings)
+	handler, _, _, _ := newTestAPI(t, st)
+
+	got := summaryGroups(t, handler, "")
+	if len(got) != 1 {
+		t.Fatalf("got %d groups, want 1: %+v", len(got), got)
+	}
+	if got[0].Count != store.DefaultLimit+1 {
+		t.Errorf("group count = %d, want the true seeded total %d — the summary is being "+
+			"computed over a capped row set rather than the whole table", got[0].Count, store.DefaultLimit+1)
+	}
+	if want := base.Add(time.Duration(store.DefaultLimit) * time.Second); !got[0].LastSeen.Equal(want) {
+		t.Errorf("LastSeen = %v, want %v (the group's max created_at)", got[0].LastSeen, want)
+	}
+}
+
+func TestWarningsSummaryGroupingShape(t *testing.T) {
+	st := newTestStore(t)
+	base := time.Now().Add(-time.Hour)
+	seedWarningsAt(t, st, []store.Warning{
+		{Kind: "alpha", Severity: "warn", Detail: "a1", CreatedAt: base},
+		{Kind: "alpha", Severity: "warn", Detail: "a2", CreatedAt: base.Add(time.Second)},
+		{Kind: "alpha", Severity: "error", Detail: "a3", CreatedAt: base.Add(2 * time.Second)},
+		{Kind: "beta", Severity: "warn", Detail: "b1", CreatedAt: base.Add(3 * time.Second)},
+	})
+	handler, _, _, _ := newTestAPI(t, st)
+
+	got := groupByKey(t, summaryGroups(t, handler, ""))
+	if len(got) != 3 {
+		t.Fatalf("got %d groups, want 3 (one per distinct kind/severity pair): %v", len(got), got)
+	}
+	for key, want := range map[string]struct {
+		count    int
+		lastSeen time.Time
+	}{
+		"alpha|warn":  {2, base.Add(time.Second)},
+		"alpha|error": {1, base.Add(2 * time.Second)},
+		"beta|warn":   {1, base.Add(3 * time.Second)},
+	} {
+		g, ok := got[key]
+		if !ok {
+			t.Errorf("no group for %s", key)
+			continue
+		}
+		if g.Count != want.count {
+			t.Errorf("%s: count = %d, want %d", key, g.Count, want.count)
+		}
+		if !g.LastSeen.Equal(want.lastSeen) {
+			t.Errorf("%s: LastSeen = %v, want %v", key, g.LastSeen, want.lastSeen)
+		}
+	}
+}
+
+func TestWarningsSummaryOrdering(t *testing.T) {
+	st := newTestStore(t)
+	now := time.Now()
+	seedWarningsAt(t, st, []store.Warning{
+		// "rare" fires once; the other three tie at two, so the tiebreak
+		// (kind, then severity) is what decides their order.
+		{Kind: "rare", Severity: "warn", CreatedAt: now},
+		{Kind: "zulu", Severity: "warn", CreatedAt: now},
+		{Kind: "zulu", Severity: "warn", CreatedAt: now},
+		{Kind: "bravo", Severity: "error", CreatedAt: now},
+		{Kind: "bravo", Severity: "error", CreatedAt: now},
+		{Kind: "bravo", Severity: "warn", CreatedAt: now},
+		{Kind: "bravo", Severity: "warn", CreatedAt: now},
+	})
+	handler, _, _, _ := newTestAPI(t, st)
+
+	got := summaryGroups(t, handler, "")
+	want := []string{"bravo|error", "bravo|warn", "zulu|warn", "rare|warn"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d groups, want %d: %+v", len(got), len(want), got)
+	}
+	for i, key := range want {
+		if gotKey := got[i].Kind + "|" + got[i].Severity; gotKey != key {
+			t.Errorf("group %d = %s, want %s — groups must come back highest count first, "+
+				"ties broken by kind then severity", i, gotKey, key)
+		}
+	}
+}
+
+func TestWarningsSummaryFiltersNarrow(t *testing.T) {
+	st := newTestStore(t)
+	old := time.Now().Add(-48 * time.Hour)
+	recent := time.Now().Add(-time.Minute)
+	seedWarningsAt(t, st, []store.Warning{
+		{Kind: "alpha", Severity: "warn", CreatedAt: old},
+		{Kind: "alpha", Severity: "warn", CreatedAt: old},
+		{Kind: "alpha", Severity: "warn", CreatedAt: recent},
+	})
+	seedWarningsAt(t, st, []store.Warning{
+		{Kind: "beta", Severity: "warn", CreatedAt: recent},
+		{Kind: "beta", Severity: "error", CreatedAt: recent},
+	})
+	handler, _, _, _ := newTestAPI(t, st)
+
+	// ?kind= narrows to alpha, and the count still covers the whole filtered
+	// set — 3, not just however many rows a page would have held.
+	byKind := groupByKey(t, summaryGroups(t, handler, "?kind=alpha"))
+	if len(byKind) != 1 {
+		t.Fatalf("?kind=alpha returned %d groups, want 1: %v", len(byKind), byKind)
+	}
+	if g := byKind["alpha|warn"]; g.Count != 3 {
+		t.Errorf("?kind=alpha: count = %d, want 3", g.Count)
+	}
+
+	bySeverity := groupByKey(t, summaryGroups(t, handler, "?severity=error"))
+	if len(bySeverity) != 1 {
+		t.Fatalf("?severity=error returned %d groups, want 1: %v", len(bySeverity), bySeverity)
+	}
+	if g := bySeverity["beta|error"]; g.Count != 1 {
+		t.Errorf("?severity=error: count = %d, want 1", g.Count)
+	}
+
+	bySince := groupByKey(t, summaryGroups(t, handler, "?since=1h"))
+	g, ok := bySince["alpha|warn"]
+	if !ok {
+		t.Fatalf("?since=1h dropped alpha entirely, want its one in-window warning: %v", bySince)
+	}
+	if g.Count != 1 {
+		t.Errorf("?since=1h: alpha count = %d, want 1 — the window must exclude the two older warnings", g.Count)
+	}
+}
+
+// TestWarningsSummaryRouteCoexistence asserts on what each route returns, not
+// on the mux's route table. /api/warnings is a prefix pattern that also
+// matches /api/warnings/summary, so the failure worth guarding against is the
+// summary URL quietly falling through and serving a bare warning array where
+// the dashboard expects groups.
+func TestWarningsSummaryRouteCoexistence(t *testing.T) {
+	st := newTestStore(t)
+	now := time.Now()
+	seedWarningsAt(t, st, []store.Warning{
+		{Kind: "alpha", Severity: "warn", Detail: "a1", CreatedAt: now},
+		{Kind: "alpha", Severity: "warn", Detail: "a2", CreatedAt: now},
+	})
+	handler, _, _, _ := newTestAPI(t, st)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/warnings/summary", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("summary status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var asGroups []store.WarningGroup
+	if err := json.Unmarshal(rr.Body.Bytes(), &asGroups); err != nil {
+		t.Fatalf("summary body does not decode as []WarningGroup (%v): %s", err, rr.Body.String())
+	}
+	if len(asGroups) != 1 || asGroups[0].Kind != "alpha" || asGroups[0].Count != 2 {
+		t.Errorf("summary returned %+v, want one alpha group of 2", asGroups)
+	}
+
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/warnings", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var asWarnings []*store.Warning
+	if err := json.Unmarshal(rr.Body.Bytes(), &asWarnings); err != nil {
+		t.Fatalf("/api/warnings no longer decodes as []*Warning (%v): %s", err, rr.Body.String())
+	}
+	if len(asWarnings) != 2 {
+		t.Errorf("/api/warnings returned %d rows, want the 2 raw warnings", len(asWarnings))
+	} else if asWarnings[0].Detail == "" {
+		t.Errorf("/api/warnings returned a group-shaped row — the summary route shadowed the list route")
+	}
+}
+
+// TestWarningsSummaryHasNoPaginationHeaders: the summary is deliberately
+// unpaginated, and br-GI-15-05's fetchPage keys off exactly these headers. If
+// they ever show up here, the dashboard starts paging a route that cannot
+// honor an offset.
+func TestWarningsSummaryHasNoPaginationHeaders(t *testing.T) {
+	st := newTestStore(t)
+	seedWarningsAt(t, st, []store.Warning{{Kind: "alpha", Severity: "warn", CreatedAt: time.Now()}})
+	handler, _, _, _ := newTestAPI(t, st)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/warnings/summary", nil))
+	for _, name := range []string{"X-Total-Count", "X-Limit", "X-Offset"} {
+		if got := rr.Header().Get(name); got != "" {
+			t.Errorf("summary response carries %s: %q — this route must stay unpaginated", name, got)
+		}
+	}
+}

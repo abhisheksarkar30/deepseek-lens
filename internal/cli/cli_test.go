@@ -353,7 +353,7 @@ func TestSessionsListsTurnsAndTotals(t *testing.T) {
 	st := newTestStore(t)
 	sid, _ := seedSession(t, st)
 
-	sessions, err := st.ListSessions(context.Background())
+	sessions, err := st.ListSessions(context.Background(), store.Filter{})
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}

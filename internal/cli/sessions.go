@@ -33,7 +33,7 @@ func runSessions(args []string, w io.Writer, st *store.Store) error {
 		return err
 	}
 
-	sessions, err := st.ListSessions(context.Background())
+	sessions, err := st.ListSessions(context.Background(), store.Filter{})
 	if err != nil {
 		return fmt.Errorf("sessions: list sessions: %w", err)
 	}

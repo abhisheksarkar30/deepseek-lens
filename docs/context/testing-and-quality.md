@@ -12,8 +12,12 @@
 
 As of this doc's generation, `go test ./...` is green across every package with tests (`cmd/lens` has
 none, by design; `internal/web` has none by the same convention, even though `app.js` does carry real
-logic — grouping/formatting helpers such as `groupWarnings`/`groupSessionWarnings` — that convention
-has not yet extended to a JS test runner).
+logic — formatting/rendering helpers such as `groupSessionWarnings`
+([internal/web/app.js:567](../../internal/web/app.js)), `renderPager`
+([internal/web/app.js:481](../../internal/web/app.js)) — that convention has not yet extended to a JS
+test runner. The pager is shared by the sessions table and the warnings drill-down, so its
+boundary arithmetic (edge disablement, the `X–Y of Z` label) is the one piece of `app.js` logic with
+more than a couple of branches).
 
 **Verifying a web change without a harness.** Verification is against the assets the *running server*
 returns, not the files on disk: `internal/web` is `go:embed`-ed
@@ -22,6 +26,15 @@ serving the old assets. The check is therefore three steps, in order — `node -
 internal/web/app.js` for syntax, a request for `/app.js` or `/style.css` asserting the new markup is
 present in what is served, then a manual eyeball for anything interactive (hover a badge, click a
 session row). No automated check covers the interaction; markup presence is not behaviour.
+
+Because that third step is manual and the pager's logic is not markup, GI-15 also drove it from a
+throwaway Node script that **extracts `renderPager` out of the shipped `app.js`** (rather than
+restating it) and runs it against stub containers — catching, for instance, a page past the end
+rendering a backwards `201-120 of 120` range. Such a script is deliberately not committed: the
+no-JS-harness convention above still holds, and the script was scratch verification for one change,
+not a suite. Under real timers the same script can also exercise the debounce and generation-counter
+patterns, which is the only way to see a last-issued-wins guard actually discard a slow earlier
+response.
 
 ## Coverage
 

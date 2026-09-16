@@ -35,9 +35,13 @@ type Store interface {
 	StatsByModel(ctx context.Context, since time.Time) ([]store.ModelStat, error)
 	StatsByDay(ctx context.Context, since time.Time) ([]store.DayStat, error)
 	StatsByCostSource(ctx context.Context, since time.Time) ([]store.CostSourceStat, error)
-	ListSessions(ctx context.Context) ([]*store.Session, error)
+	ListSessions(ctx context.Context, f store.Filter) ([]*store.Session, error)
 	GetSession(ctx context.Context, id string) (*store.Session, error)
 	ListWarnings(ctx context.Context, f store.Filter) ([]*store.Warning, error)
+	CountRequests(ctx context.Context, f store.Filter) (int, error)
+	CountWarnings(ctx context.Context, f store.Filter) (int, error)
+	CountSessions(ctx context.Context) (int, error)
+	WarningSummary(ctx context.Context, f store.Filter) ([]store.WarningGroup, error)
 }
 
 type api struct {
@@ -64,8 +68,9 @@ type api struct {
 // /api/* (including the /api/stream SSE endpoint) plus assets served from
 // the embedded internal/web filesystem at every other path. Handlers are
 // thin per the bead: parse query params into a store.Filter, call st, encode
-// JSON — no business logic here (grouping, e.g. for the warning inbox, is
-// the dashboard JS's job).
+// JSON — no business logic here. Grouping that has to be correct over the
+// whole table (the warning inbox's per-kind totals) therefore lives in SQL,
+// in store.WarningSummary, and is served by /api/warnings/summary.
 //
 // proxyHandler is the one write path this package owns: POST
 // /api/requests/{id}/replay re-issues a captured request through it, so the
@@ -80,6 +85,10 @@ func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, asset
 	mux.HandleFunc("/api/requests/{id}", methodGet(a.getRequest))
 	mux.HandleFunc("POST /api/requests/{id}/replay", a.replay)
 	mux.HandleFunc("/api/stats", methodGet(a.stats))
+	// Registered before /api/warnings, which as a prefix pattern would
+	// otherwise also match this path. Go's ServeMux prefers the more
+	// specific pattern either way; the order here is for the reader.
+	mux.HandleFunc("/api/warnings/summary", methodGet(a.warningsSummary))
 	mux.HandleFunc("/api/warnings", methodGet(a.listWarnings))
 	mux.HandleFunc("/api/sessions", methodGet(a.listSessions))
 	mux.HandleFunc("/api/sessions/{id}", methodGet(a.getSession))
@@ -127,6 +136,54 @@ func parseLimit(r *http.Request) (int, error) {
 	return n, nil
 }
 
+// parseOffset reads ?offset, defaulting to 0. A negative offset is rejected
+// rather than clamped, mirroring parseLimit — so no handler ever needs to
+// resolve an effective offset: absent → 0 *is* the effective offset.
+func parseOffset(r *http.Request) (int, error) {
+	s := r.URL.Query().Get("offset")
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid offset %q: want a non-negative integer", s)
+	}
+	return n, nil
+}
+
+// effectiveLimit resolves the page size the store will actually apply, so a
+// handler can report it while the store's own clamp is out of reach. The
+// duplication of store's Limit <= 0 → DefaultLimit rule is deliberate: a
+// header that disagrees with the rows on screen is worse than one line of
+// arithmetic in two places.
+func effectiveLimit(limit int) int {
+	if limit <= 0 {
+		return store.DefaultLimit
+	}
+	return limit
+}
+
+// writePageHeaders sets the pagination metadata that rides on response
+// headers rather than in the body, so list responses stay the bare JSON
+// arrays every existing consumer already decodes.
+//
+// It must run before writeJSON, which calls WriteHeader — headers set after
+// that are silently dropped, and the bug would surface only as three missing
+// headers in a browser.
+//
+// limit is the EFFECTIVE page size, not the requested one. The two differ
+// whenever ?limit is absent: that parses to 0, which the store clamps to
+// DefaultLimit, so the response must say 1000 rather than 0. A header-driven
+// consumer computes nextOffset = offset + X-Limit, and the raw 0 would leave
+// it stuck on page 1 forever with no error to explain why. Callers pass
+// effectiveLimit(limit); offsets need no such resolution.
+func writePageHeaders(w http.ResponseWriter, total, limit, offset int) {
+	h := w.Header()
+	h.Set("X-Total-Count", strconv.Itoa(total))
+	h.Set("X-Limit", strconv.Itoa(limit))
+	h.Set("X-Offset", strconv.Itoa(offset))
+}
+
 // parseSinceParam reads ?since as a Go duration ("24h") or an RFC3339
 // timestamp, mirroring internal/cli's parseSince. Absent means the zero
 // Time, which every store method already treats as "since the beginning of
@@ -163,6 +220,11 @@ func (a *api) listRequests(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	offset, err := parseOffset(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	since, err := parseSinceParam(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -181,6 +243,7 @@ func (a *api) listRequests(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := store.Filter{
 		Limit:      limit,
+		Offset:     offset,
 		Since:      since,
 		SessionID:  q.Get("session"),
 		Model:      q.Get("model"),
@@ -193,6 +256,14 @@ func (a *api) listRequests(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// The same filter, so the total counts exactly the set the page was
+	// drawn from — CountRequests ignores Limit/Offset itself.
+	total, err := a.store.CountRequests(r.Context(), f)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writePageHeaders(w, total, effectiveLimit(limit), offset)
 	writeJSON(w, http.StatusOK, reqs)
 }
 
@@ -611,8 +682,47 @@ func (a *api) stats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// warningsSummary serves the warning inbox's groups: one entry per distinct
+// (kind, severity), with a count taken over the entire matching set.
+//
+// The count has to come from SQL and not from a page of rows, because
+// grouping and pagination do not compose — a page of N rows cannot yield a
+// correct global per-kind total, however large N is. This is what fixes the
+// latent undercount: the dashboard used to group at most DefaultLimit raw
+// rows, so any kind with more occurrences than that reported a wrong count.
+//
+// There is deliberately no limit or offset, and none should be added. A
+// GROUP BY result set is bounded by the number of distinct (kind, severity)
+// pairs, not by row count, so it cannot grow with the table — and a
+// paginated summary would put the UI right back where this ticket found it,
+// unable to state a true group total. The *query* is unbounded, since
+// counting correctly means scanning every warning; br-GI-15-01's covering
+// index is what keeps that scan cheap.
+func (a *api) warningsSummary(w http.ResponseWriter, r *http.Request) {
+	since, err := parseSinceParam(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	q := r.URL.Query()
+	// No Limit/Offset: the request carries none and the store reads none.
+	groups, err := a.store.WarningSummary(r.Context(), store.Filter{
+		Since: since, Kind: q.Get("kind"), Severity: q.Get("severity"),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, groups)
+}
+
 func (a *api) listWarnings(w http.ResponseWriter, r *http.Request) {
 	limit, err := parseLimit(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	offset, err := parseOffset(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -623,26 +733,53 @@ func (a *api) listWarnings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	f := store.Filter{Limit: limit, Since: since, Kind: q.Get("kind"), Severity: q.Get("severity")}
+	f := store.Filter{
+		Limit: limit, Offset: offset, Since: since,
+		Kind: q.Get("kind"), Severity: q.Get("severity"),
+	}
 
 	warnings, err := a.store.ListWarnings(r.Context(), f)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, warnings)
-}
-
-func (a *api) listSessions(w http.ResponseWriter, r *http.Request) {
-	// store.ListSessions takes no Filter (no limit param to honor): every row
-	// it returns is maintained incrementally by store.UpsertSession, which
-	// br-GI-1-12's consumer step calls once per captured call. The aggregates
-	// on each row therefore need no work here.
-	sessions, err := a.store.ListSessions(r.Context())
+	total, err := a.store.CountWarnings(r.Context(), f)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	writePageHeaders(w, total, effectiveLimit(limit), offset)
+	writeJSON(w, http.StatusOK, warnings)
+}
+
+func (a *api) listSessions(w http.ResponseWriter, r *http.Request) {
+	limit, err := parseLimit(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	offset, err := parseOffset(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Every row store.ListSessions returns is maintained incrementally by
+	// store.UpsertSession, which br-GI-1-12's consumer step calls once per
+	// captured call. The aggregates on each row therefore need no work here.
+	sessions, err := a.store.ListSessions(r.Context(), store.Filter{Limit: limit, Offset: offset})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// CountSessions takes no Filter: sessions have no filterable column, so
+	// the total is simply the whole table.
+	total, err := a.store.CountSessions(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writePageHeaders(w, total, effectiveLimit(limit), offset)
 	writeJSON(w, http.StatusOK, sessions)
 }
 
@@ -659,9 +796,8 @@ type sessionDetail struct {
 	Calls []*store.Request `json:"calls"`
 	// Warnings is the union of every warning raised across the session's
 	// calls, one entry per occurrence. Grouping them into one line per kind
-	// is the dashboard's job (see this package's New doc comment) — but the
-	// union has to be assembled here, because only the server knows which
-	// requests belong to the session.
+	// is the dashboard's job — but the union has to be assembled here,
+	// because only the server knows which requests belong to the session.
 	Warnings []*store.Warning `json:"warnings"`
 }
 

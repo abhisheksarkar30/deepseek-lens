@@ -81,3 +81,9 @@ CREATE TABLE IF NOT EXISTS warnings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_warnings_request_id ON warnings(request_id);
+
+-- Covering index for WarningSummary's GROUP BY kind, severity: that query
+-- must scan the whole warnings table (that is the point — it has to see past
+-- the DefaultLimit cap ListWarnings applies), and this turns the scan into an
+-- index scan that also satisfies MAX(created_at) without touching the table.
+CREATE INDEX IF NOT EXISTS idx_warnings_kind_severity_created_at ON warnings(kind, severity, created_at);
