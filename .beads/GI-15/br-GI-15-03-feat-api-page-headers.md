@@ -110,3 +110,32 @@ the offset arithmetic, and the browser dashboard is not yet such a consumer at t
 - `internal/api/api.go` (modify — `parseOffset`, `writePageHeaders`, the three handlers, the
   removed stale comment)
 - `internal/api/api_test.go` (modify — the cases above)
+
+## Review Notes
+
+**Deviation (OK).** The tests went into `internal/api/pagination_test.go` (9 cases) rather than into
+`api_test.go`, matching what br-GI-15-01 did on the store side.
+
+**Verified live, not only in tests.** Against a fresh `go build` on a throwaway port and temp DB:
+
+```
+GET /api/requests                       → X-Total-Count: 0  X-Limit: 1000  X-Offset: 0
+GET /api/warnings                       → X-Total-Count: 0  X-Limit: 1000  X-Offset: 0
+GET /api/sessions                       → X-Total-Count: 0  X-Limit: 1000  X-Offset: 0
+GET /api/requests?limit=25&offset=0     → X-Limit: 25
+GET /api/sessions?limit=7               → X-Limit: 7
+GET /api/requests?offset=-1             → 400
+```
+
+The `X-Limit: 1000` on an absent `?limit` is this bead's whole reason to exist, confirmed on the
+wire on all three routes rather than inferred from `effectiveLimit`'s source.
+
+**One case the bead allowed me to cover indirectly.** "`/api/sessions` now caps: seed more than
+`DefaultLimit` sessions" is prohibitively slow to seed at the API layer; `TestListSessionsDefaultClamp`
+covers the store-side clamp and `TestPageHeaderLimitIsEffective` covers the header value on all three
+routes, which is what the bead's parenthetical sanctions.
+
+**Accepted, not fixed.** `List*` and `Count*` are two independent queries, so a row inserted between
+them can make `X-Total-Count` one higher than the page was drawn from. The bead considered and
+declined a `BEGIN DEFERRED` read transaction; no transaction was added. The dashboard handles the
+consequence rather than the server preventing it — see br-GI-15-05's `emptyHint`.

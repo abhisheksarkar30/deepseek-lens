@@ -122,3 +122,26 @@ filterable column.
 - `internal/cli/sessions.go` (modify — call-site fixup)
 - `internal/consumer/consumer_test.go` (modify — two call-site fixups)
 - `internal/cli/cli_test.go` (modify — call-site fixup)
+
+## Review Notes
+
+**Verified.** `PublishingStore` needed no edit, as predicted — it embeds `*store.Store` and
+overrides only write methods, so it inherits the new signature (`grep ListSessions
+internal/api/publishing_store.go` is empty). All five call sites pass `store.Filter{}` and nothing
+else, which is this bead's "do not pre-empt br-GI-15-03" condition. The comment `Filter`'s doc block
+completes in two steps exactly as the split-comment note planned: br-GI-15-01 wrote the three
+readers that existed then, this bead adds `ListSessions` and `CountSessions`, and the sentence now
+names all four readers and all three counts.
+
+**Behavior change, restated because it is the one a reviewer will want to weigh.**
+`lens sessions` silently went from "every session" to "the first 1000, newest first". Accepted by the
+plan, recorded in the bead, and not hidden: no flag was added, and the output change is the price of
+the only unbounded read in the store becoming bounded like its siblings. 1000 sessions is far past
+what a single-developer tool reaches before the cap matters.
+
+**Verified by the suite rather than by inspection.** `go test ./...` green *is* the assertion that
+every `internal/cli` and `internal/consumer` call site was updated — a missed one is a build
+failure, not a silent wrong answer. It passes.
+
+**Deviation (OK).** Same as br-GI-15-01: the test cases live in `internal/store/pagination_test.go`,
+not `store_test.go`.

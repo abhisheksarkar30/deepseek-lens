@@ -155,3 +155,27 @@ assertion → manual browser check). Specific checks:
 
 - `internal/web/app.js` (modify — `loadWarnings`, `renderWarningGroups`, `showWarningDetail`, the SSE
   `warnings` handler, `showView`, `state`; delete `groupWarnings` and `warningsCache`)
+
+## Review Notes
+
+**Verified in the served bytes, not the working tree.** A fresh `go build`'s `/app.js` contains 2
+occurrences of `/api/warnings/summary`, 4 of `warningsFetchSeq`, and **0** of `groupWarnings` — the
+`go:embed` trap is that a stale binary would happily serve the deleted function and the new route
+would look unreachable.
+
+**The SSE path and the tab switch can both be in flight at once, and only one guard covers it.**
+`showView` clears a pending debounce timer before calling `loadWarnings`, which stops a queued fire
+from doubling the fetch — but `clearTimeout` is a no-op on a timer that already fired, so it is not
+single-flight. The generation counter inside `loadWarnings` is what actually covers the overlap.
+Both are commented at their sites so the next reader does not mistake the `clearTimeout` for the
+guard.
+
+**`renderWarningGroups` reads capitalized keys** (`g.Kind`/`g.Severity`/`g.Count`/`g.LastSeen`) —
+`WarningGroup` carries no json tags, per the repo's convention for types crossing the API/SSE broker,
+so the lowercase names would run fine and render every cell `undefined`. The comment above the
+function says so, and br-GI-15-01's `TestWarningGroupWireKeysAreCapitalized` fails loudly at the
+store if anyone adds tags later.
+
+**The undercount fix is visible end-to-end.** With 1300 warnings of one kind seeded, the summary
+table reports 1300 where the removed client-side grouping over a capped `ListWarnings` result would
+have reported 1000.

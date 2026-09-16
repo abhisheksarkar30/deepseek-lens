@@ -142,3 +142,28 @@ verification is the project's documented three-step web-change process, in order
   additions, `loadSessions`)
 - `internal/web/index.html` (modify — pager markup and its anchor for the sessions table)
 - `internal/web/style.css` (modify — pager classes)
+
+## Review Notes
+
+**A real bug was found and fixed by the harness, in `renderPager`.** With `total=120, limit=50,
+offset=200` the label rendered **"201–120 of 120"** — a backwards range directly above a "nothing on
+this page" row. Fixed by clamping `first` to `total` as well as `last`. This is exactly the accepted
+`X-Total-Count` staleness br-GI-15-03 declined to prevent server-side, so the client has to render
+it sanely rather than the server having to make it unreachable.
+
+**How it was verified.** `node --check` for syntax, then asserted against the bytes a *fresh* `go
+build` **serves** — not the files on disk, because `internal/web` is `go:embed`-ed and a
+pre-existing binary keeps serving old assets. Both pager containers, all three generation counters,
+and the absence of `groupWarnings` were asserted in the served `app.js`; `groupWarnings` returns 0
+occurrences. Then the boundary arithmetic and the two race patterns were driven from a throwaway
+Node script that **extracts `renderPager` out of the shipped source** rather than restating it, so
+the check cannot drift from production code. That script is deliberately not committed — the
+no-JS-harness convention still holds, and it was scratch verification for one change.
+
+**`fetchPage` defaults `items` to `[]`** because the store encodes an empty result as `null` (every
+list method declares `var out []T`), which would otherwise blow up every caller's `.map`. Found by
+reading the store, not by hitting it.
+
+**Ordering note.** The page-size select's `change` handler resets the offset to 0. Keeping it would
+strand a user on page 3 *of 25-row pages* at item 200 — a page they never chose, reading as missing
+data. The bead's outcome list did not name this case; it is the one addition.

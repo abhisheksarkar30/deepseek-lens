@@ -169,3 +169,25 @@ tab open.
   list queries, `CountRequests`, `CountWarnings`, `WarningSummary`, the `store.go:683` comment)
 - `internal/store/schema.sql` (modify — `idx_warnings_kind_severity_created_at`)
 - `internal/store/store_test.go` (modify — the cases above)
+
+## Review Notes
+
+**Deviation (OK).** The tests went into a new `internal/store/pagination_test.go` rather than into
+`store_test.go` as this bead's file list says. Same package, same coverage — but `store_test.go` is
+already 27K and everything this bead adds belongs to one concern, so the separate file keeps both
+readable. br-GI-15-02's sessions cases went there too.
+
+**Verified.** Every test case in the specifications exists and asserts what was asked:
+`TestListRequestsOffsetWindows` compares id *sets* for disjointness rather than lengths;
+`TestListRequestsPagingIsTotal`/`TestListWarningsPagingIsTotal` seed identical timestamps and assert
+every id appears exactly once (they pass against tiebreaker-less code if the timestamps differ, so
+the fixture is the load-bearing part); `TestWarningSummaryCountsPastTheListCap` seeds past
+`DefaultLimit` and is the one test that fails against the client-side grouping this story removes;
+`TestWarningGroupWireKeysAreCapitalized` pins the wire contract br-GI-15-06 depends on.
+
+**Two decisions worth recording.** `clampOffset` is unreachable from the API — br-GI-15-03's
+`parseOffset` rejects a negative offset with 400 before the store sees it. It stays because the
+store is a public package with non-HTTP callers, and the bead asked for the same belt-and-braces
+clamp `Limit <= 0` already had. And `requestWhere` returns `("", nil)` for an unconstrained filter,
+so `CountRequests` degenerates to a bare `SELECT COUNT(*)`. That is the intended path, not a
+missed case.

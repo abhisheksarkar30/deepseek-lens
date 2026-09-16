@@ -150,9 +150,9 @@ const state = {
   warningsDebounceTimer: null,
   warningsFetchSeq: 0,
   // warningDetailPage is the warnings drill-down's window, and
-  // warningDetailFetchSeq its last-issued-wins guard. Same shapes as the
-  // sessions pair above; the limit starts at a PAGE_SIZES option for the same
-  // reason.
+  // warningDetailFetchSeq its last-issued-wins guard. Same shape as the
+  // sessionsPage/sessionsFetchSeq pair below; the limit starts at a PAGE_SIZES
+  // option for the same reason.
   warningDetailPage: { limit: 50, offset: 0 },
   warningDetailFetchSeq: 0,
   feedRowLimit: 200,

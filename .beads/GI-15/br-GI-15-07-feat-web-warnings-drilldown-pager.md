@@ -95,3 +95,28 @@ check). Specific checks:
 
 **Note (added during implementation)**: step 2 needs markup, so `index.html` is a file this bead
 touches. `style.css` is not — `.pager` and its children already exist from br-GI-15-05.
+
+## Review Notes
+
+**A real bug was caught in self-review before commit, and it was the exact bug this bead exists to
+prevent.** `renderWarningGroups` still called `showWarningDetail(kind, severity)` with two arguments,
+so `resetOffset` would be `undefined` and a group switch would **never** reset the offset — leaving
+the drill-down on page 25 of a group with 3 rows. Fixed with an explicit `true` at the click site
+plus a comment. The harness now asserts the third argument is present, so a future edit that drops
+it fails a check rather than silently re-introducing the empty table.
+
+**Verified against the shipped source, not a restatement of it.** The throwaway checker extracts
+`renderPager` out of the real `app.js` and drives it against stub containers: label `1–50 of 1300` on
+page 1, `1251–1300 of 1300` on the last page with Next disabled, `1300–1300 of 1300` (not `1301–`)
+one page past the end. Under real timers it then exercises both races — a slow group-A fetch losing
+to a fast group-B fetch started after it, and a slow earlier Next losing to a later one — and asserts
+only the later response renders. 16 checks, all passing.
+
+**`warningDetailPage.limit` starts at 50**, the same value br-GI-15-06 used, chosen from
+`PAGE_SIZES` so the select always has a matching option. The drill-down therefore now fetches 50 rows
+per page instead of 1000 — the pager is what makes that safe, since the title takes its total from
+`X-Total-Count` rather than from the rows in hand.
+
+**One addition beyond the bead's text**: the shared `renderPager` is invoked rather than a second
+pager being written, so the sessions table and the drill-down cannot disagree on the boundary
+arithmetic.

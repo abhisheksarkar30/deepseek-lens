@@ -74,3 +74,39 @@ staleness compounds silently across stories.
 - `docs/context/testing-and-quality.md` (modify — drop the `groupWarnings` reference)
 - `docs/context/INDEX.md` (modify — refresh date)
 - any other `docs/context/*.md` the refresh genuinely flags as changed
+
+## Review Notes
+
+**The refresh stayed scoped.** Four files changed and no others; every other module doc came back
+"No changes needed." This bead's "treat any other file the skill wants to change as a finding, not an
+expected edit" held — no fifth file was edited.
+
+**All four cross-checks pass.** The documented route list matches the `mux.Handle*` block; the
+`types.go` enumeration in `data-model.md` lists all nine exported types in
+`internal/store/types.go` (`Request`, `Warning`, `WarningGroup`, `Session`, `Filter`, `Summary`,
+`ModelStat`, `DayStat`, `CostSourceStat`) — the exhaustive list the bead flagged as the failure mode;
+the documented `X-Limit` value matches the effective-limit rule verified live against a running
+server; and a grep sweep found no doc claiming a `limit`/`offset` on `/api/warnings/summary` or an
+envelope-shaped list body.
+
+**Three pre-existing errors were corrected, not passed over.** These are *not* GI-15's changes — the
+skill landed on the rows and they disagreed with the code:
+
+1. `api-surface.md`'s per-route line citations had drifted from the real handler ranges.
+2. `data-model.md` claimed the `warnings` foreign key was "(no enforced FK constraint)". It **is**
+   enforced: the DSN sets `_pragma=foreign_keys(ON)` (`store.go:43`), confirmed empirically — an
+   insert with a bad `request_id` fails with `FOREIGN KEY constraint failed (19)`. Corrected, along
+   with the note that `PurgeOlderThan` deletes warnings explicitly anyway rather than leaning on the
+   cascade.
+3. Several `store.go` line references had shifted.
+
+**One deliberate non-edit.** `docs/planning/GI-15-pagination.md` still describes `groupWarnings`
+throughout. That is correct — the plan is the design record for a story that deletes it, and
+"the plan says we removed X" is not a stale claim. Context docs were left clean of it; the plan was
+not touched.
+
+**One thing considered and left alone.** GI-15's new tests are not added to
+`testing-and-quality.md`'s curated "Explicitly covered, by design" list. That list is not exhaustive
+by construction — it selects tests that encode a non-obvious guarantee — and the pager's boundary
+arithmetic is already described in the "Verifying a web change without a harness" paragraph
+immediately above it.

@@ -93,3 +93,27 @@ depends on it.
 - `internal/api/api.go` (modify — `warningsSummary` handler, route registration, the two doc
   comments)
 - `internal/api/api_test.go` (modify — the cases above)
+
+## Review Notes
+
+**File list matched exactly** — the 6 cases went into `api_test.go`, not a new file, because this
+bead's work is a new route rather than a new concern layered on existing ones.
+
+**Both stale comments retargeted, verified in the committed source.** `New`'s doc comment now reads
+"...no business logic here. Grouping that has to be correct over the whole table (the warning
+inbox's per-kind totals) therefore lives in SQL, in store.WarningSummary, and is served by
+/api/warnings/summary" — the grouping *owner* moved, the "handlers stay thin" principle it was
+attached to did not. `sessionDetail.Warnings` keeps its true claim ("Grouping them into one line per
+kind is the dashboard's job") and drops the `(see this package's New doc comment)` pointer that the
+edit above would have left dangling.
+
+**Route coexistence verified on the wire**, since the bead called it out as the failure that would
+ship silently: `/api/warnings/summary` returns the group array and `/api/warnings` still returns the
+raw warning array, asserted on response content in `TestWarningsSummaryRouteCoexistence` rather than
+on the mux table. Confirmed live as well — the summary carries **no** `X-Total-Count`/`X-Limit`/
+`X-Offset`, which is the assertion that keeps br-GI-15-05's `fetchPage` from ever being pointed at
+it.
+
+**The undercount fix is demonstrated end-to-end**, not just asserted: seeding 1300 warnings of one
+kind into a temp DB returns a summary group with `Count: 1300`, where the client-side grouping this
+story removes would have reported 1000.
