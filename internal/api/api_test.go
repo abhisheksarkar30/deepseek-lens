@@ -80,9 +80,10 @@ func newTestAPI(t *testing.T, st Store) (*api, *sink.Sink, *consumer.Consumer, *
 	sk := sink.New(16)
 	cons := consumer.New(sk, nil, nil) // Run is never called in most tests; Stats() is fine on a fresh Consumer.
 	broker := NewBroker()
-	// No proxy handler and replay off: these tests cover the read-only API, and
-	// the replay route (br-GI-1-13) is exercised in internal/replay, where a
-	// real proxy and a recording upstream can be wired up.
+	// No proxy handler and replay off: these tests cover the routes that only
+	// read, plus prices_test.go's POST /api/prices cases; the replay route
+	// (br-GI-1-13) is exercised in internal/replay, where a real proxy and a
+	// recording upstream can be wired up.
 	return New(st, sk, cons, broker, testAssets, nil, false), sk, cons, broker
 }
 

@@ -119,7 +119,7 @@ func (a *api) SetRetention(days int, purge RetentionPurger) {
 // call site.
 func (a *api) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.mux.ServeHTTP(w, r) }
 
-// New builds the dashboard's http.Handler: the read-only JSON API under
+// New builds the dashboard's http.Handler: a mostly-read JSON API under
 // /api/* (including the /api/stream SSE endpoint) plus assets served from
 // the embedded internal/web filesystem at every other path. Handlers are
 // thin per the bead: parse query params into a store.Filter, call st, encode
@@ -127,11 +127,12 @@ func (a *api) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.mux.ServeHTT
 // whole table (the warning inbox's per-kind totals) therefore lives in SQL,
 // in store.WarningSummary, and is served by /api/warnings/summary.
 //
-// proxyHandler is the one write path this package owns: POST
-// /api/requests/{id}/replay re-issues a captured request through it, so the
-// replay is proxied, teed and recorded by exactly the code that handles live
-// traffic. Passing nil disables the route entirely, which is what the read-only
-// tests of beads before this one do.
+// Two routes write: POST /api/requests/{id}/replay re-issues a captured
+// request through proxyHandler, so the replay is proxied, teed and recorded
+// by exactly the code that handles live traffic; POST /api/prices writes
+// the price file through the seam SetPricing wires (pricing.Save, D1).
+// Passing a nil proxyHandler disables replay entirely, which is what the
+// tests of beads before replay's own do.
 func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, assets fs.FS, proxyHandler http.Handler, replayEnabled bool) *api {
 	a := &api{store: st, sink: sk, consumer: cons, broker: broker, proxyHandler: proxyHandler, replayEnabled: replayEnabled}
 
@@ -150,6 +151,7 @@ func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, asset
 	mux.HandleFunc("/api/stream", methodGet(a.stream))
 	mux.HandleFunc("/api/health", methodGet(a.health))
 	mux.HandleFunc("/api/prices", methodGet(a.getPrices))
+	mux.HandleFunc("POST /api/prices", a.setPrices)
 	mux.Handle("/", http.FileServer(http.FS(assets)))
 	a.mux = mux
 	return a
@@ -157,8 +159,9 @@ func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, asset
 
 // methodGet rejects every method but GET with a JSON 405 before h runs. The
 // dashboard's read endpoints are otherwise unauthenticated on the strength of
-// being read-only and loopback-bound; the one route that is neither is
-// registered separately, with its own guard and its own method — see replay.
+// being read-only and loopback-bound; the routes that write are registered
+// separately, each behind replayOriginReject and its own method — see
+// replay and setPrices.
 func methodGet(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -388,10 +391,11 @@ const (
 	replayPollInterval = 25 * time.Millisecond
 )
 
-// replay is POST /api/requests/{id}/replay: the project's only billable,
-// state-changing route, and therefore the only one not covered by the read-only
-// dashboard's "no auth on loopback" rationale (br-GI-1-13, plan §security
-// self-review).
+// replay is POST /api/requests/{id}/replay: the project's only billable
+// route. It is one of the dashboard's write routes (alongside POST
+// /api/prices), none of which are covered by the read-GET dashboard's "no
+// auth on loopback" rationale (br-GI-1-13, plan §security self-review) —
+// each instead sits behind replayOriginReject.
 //
 // Its guard is two controls, neither a credential, and both are applied before
 // anything is sent — a rejected request is rejected without a single byte

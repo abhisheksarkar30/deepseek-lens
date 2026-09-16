@@ -204,9 +204,9 @@ type requestDetail struct {
 	Warnings []*store.Warning `json:"warnings"`
 }
 
-// getRequestDetail reads one request through the read-only API. Reusing the
-// read endpoint rather than opening the database is what keeps `lens replay`
-// free of any local write path at all.
+// getRequestDetail reads one request through GET /api/requests/{id}, a
+// read-only endpoint. Reusing it rather than opening the database is what
+// keeps `lens replay` free of any local write path at all.
 func getRequestDetail(client *http.Client, base string, id int64) (*requestDetail, error) {
 	u := fmt.Sprintf("%s/api/requests/%d", base, id)
 	res, err := client.Get(u)
