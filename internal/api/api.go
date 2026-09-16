@@ -152,6 +152,8 @@ func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, asset
 	mux.HandleFunc("/api/health", methodGet(a.health))
 	mux.HandleFunc("/api/prices", methodGet(a.getPrices))
 	mux.HandleFunc("POST /api/prices", a.setPrices)
+	mux.HandleFunc("/api/retention", methodGet(a.getRetention))
+	mux.HandleFunc("POST /api/purge", a.postPurge)
 	mux.Handle("/", http.FileServer(http.FS(assets)))
 	a.mux = mux
 	return a
