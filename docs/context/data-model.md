@@ -109,11 +109,13 @@ treating NULL/empty interchangeably — see [workflows.md](workflows.md)'s sessi
   transaction, falling back to per-row `InsertRequest` calls if the batch fails, so one bad row never
   costs the rest — [internal/store/store.go:196-218](../../internal/store/store.go).
 - **Reads are windowed, counts are not**: every list method takes a `Filter` whose `Limit`/`Offset`
-  bound only the rows returned, while the matching `Count*` method reads the same predicates and
-  ignores the window — a total that shrank to the page size would defeat the count. Both take their
-  predicates from one shared where-builder (`requestWhere` at
-  [internal/store/store.go:320](../../internal/store/store.go), `warningWhere` at
-  [internal/store/store.go:746](../../internal/store/store.go)) so the two can never drift. Every
+  bound only the rows returned, while the count of that same set is never windowed — a total that
+  shrank to the page size would defeat the count. On the two filtered lists, `/api/requests` and
+  `/api/warnings`, the `Count*` partner reads the same predicates and takes them from one shared
+  where-builder (`requestWhere` at [internal/store/store.go:320](../../internal/store/store.go),
+  `warningWhere` at [internal/store/store.go:746](../../internal/store/store.go)) so the two can never
+  drift; sessions have no filterable column, so `ListSessions` windows the whole table on
+  `last_seen DESC, id DESC` and `CountSessions` counts it with no `Filter` at all. Every
   list `ORDER BY` ends in `id DESC` so the sort is total: the consumer batch-inserts, so equal
   timestamps are normal and an unstable sort would make pages overlap or skip rows.
 - **Body capture policy**: `req_body`/`resp_body` are capped at `BodyCapBytes` (default 262144) per

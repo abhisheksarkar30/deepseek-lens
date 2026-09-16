@@ -44,9 +44,14 @@ routes as bare JSON arrays keeps working unchanged.
 Request params: `?limit=<n>&offset=<n>`, both optional. Absent `?limit` parses to `0`, which
 `store.Filter` treats as "use `store.DefaultLimit`" (**1000**, see
 [internal/store/store.go:32](../../internal/store/store.go)) — never unbounded. A negative `limit` or
-`offset` is rejected with **400** rather than clamped. Each handler passes the *same*
-`store.Filter` to its list call and its `Count*` call, so the total and the page can never describe
-two different sets ([internal/api/api.go:127-188](../../internal/api/api.go)).
+`offset` is rejected with **400** rather than clamped. On the two filtered routes — `/api/requests`
+and `/api/warnings` — the handler passes the *same* `store.Filter` to its list call and its `Count*`
+call, so the total and the page can never describe two different sets. `/api/sessions` has no
+filterable column: its list call takes the window, but `CountSessions` takes no filter at all and
+returns the whole table, so there is no filter for the total and the page to disagree on
+([internal/api/api.go:254-261](../../internal/api/api.go),
+[internal/api/api.go:741-746](../../internal/api/api.go),
+[internal/api/api.go:770-777](../../internal/api/api.go)).
 
 > **`X-Limit` is the applied page size, not the requested one.** When `?limit` is absent the request
 > carries `0` but the store applies `DefaultLimit`, so the header reports `1000`, not `0`. A
