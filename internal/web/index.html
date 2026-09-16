@@ -19,6 +19,7 @@
     <button class="tab" data-view="warnings" type="button">Warnings</button>
     <button class="tab" data-view="stats" type="button">Stats</button>
     <button class="tab" data-view="sessions" type="button">Sessions</button>
+    <button class="tab" data-view="settings" type="button">Settings</button>
   </nav>
 </header>
 
@@ -113,6 +114,27 @@
           <tbody id="session-calls"></tbody>
         </table>
       </div>
+    </div>
+  </section>
+
+  <section id="view-settings" class="view" hidden>
+    <h3>Pricing</h3>
+    <p class="hint">Rates are US dollars per 1,000,000 tokens, read from and written to
+      <code id="settings-price-path"></code> — a peak multiplier of
+      <strong id="settings-peak-multiplier"></strong>&times; applies where the upstream signals
+      a peak window. An empty cell means no rate is configured for that field; editing a cell
+      and leaving it blank unsets it.</p>
+    <div id="settings-price-error" class="hint" hidden></div>
+    <div id="settings-price-msg" class="hint" hidden></div>
+    <div id="settings-price-wrap" class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Model</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>Source</th>
+          </tr>
+        </thead>
+        <tbody id="settings-price-body"></tbody>
+      </table>
     </div>
   </section>
 </main>

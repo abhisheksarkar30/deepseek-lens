@@ -143,6 +143,8 @@ tbody tr:hover { background: var(--row-hover); }
   border-radius: 4px;
   font-size: 0.72rem;
   font-weight: 600;
+  background: var(--bg-alt);
+  color: var(--fg-muted);
 }
 .badge.warn { background: var(--sev-warn-bg); color: var(--sev-warn-fg); }
 
@@ -247,6 +249,34 @@ label[for="replay-edits"] { display: block; margin: 10px 0 4px; font-size: 0.85r
 
 .model-bar-row { display: flex; align-items: center; gap: 8px; }
 .model-bar { height: 10px; background: var(--accent); border-radius: 3px; }
+
+/* Settings tab: editable price cells (br-GI-17-09) and the destructive-
+   action treatment (br-GI-17-10's purge controls reuse .danger below, so
+   the two sections share one look for "this deletes data" rather than
+   inventing a second one). */
+td.price-cell { cursor: text; }
+td.price-cell:hover { background: var(--row-hover); }
+td.price-cell input {
+  width: 100%;
+  min-width: 70px;
+  box-sizing: border-box;
+  padding: 2px 4px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.danger {
+  background: var(--sev-error-bg);
+  color: var(--sev-error-fg);
+  border: 1px solid var(--sev-error-fg);
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.danger:disabled { opacity: 0.5; cursor: not-allowed; }
 
 svg#stats-chart {
   width: 100%;

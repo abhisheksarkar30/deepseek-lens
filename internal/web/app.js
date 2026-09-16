@@ -167,6 +167,14 @@ const state = {
   // the replay editor only when it is true: the endpoint answers 403 when
   // replay is off, so the button is inert rather than offered and broken.
   replayEnabled: false,
+  // settingsPrices is GET/POST /api/prices's last-known-good response body —
+  // the source both the table render and an edit's "whole row" POST read
+  // from, so a rejected edit has something to revert to that is not the
+  // value that was just rejected. settingsPriceDirty is the one flag R7
+  // asks for: true from the moment a cell is opened for editing until the
+  // save that follows it resolves successfully.
+  settingsPrices: null,
+  settingsPriceDirty: false,
 };
 
 function bumpTotals(req) {
@@ -195,7 +203,7 @@ function renderTotals() {
 
 // ---- tab navigation ---------------------------------------------------
 
-const views = ["feed", "warnings", "stats", "sessions"];
+const views = ["feed", "warnings", "stats", "sessions", "settings"];
 function showView(name) {
   for (const v of views) {
     document.getElementById("view-" + v).hidden = v !== name;
@@ -215,6 +223,7 @@ function showView(name) {
   }
   if (name === "stats") loadStats();
   if (name === "sessions") loadSessions();
+  if (name === "settings") loadSettings();
 }
 
 document.getElementById("tabs").addEventListener("click", (e) => {
@@ -649,6 +658,172 @@ async function openSession(id) {
 document.getElementById("session-detail-close").addEventListener("click", () => {
   document.getElementById("session-detail").hidden = true;
 });
+
+// ---- settings: pricing (br-GI-17-09) -----------------------------------
+
+// RATE_FIELDS pairs each POST /api/prices "rates" key with its column
+// header — the four rate fields the route takes as one whole-row PATCH-like
+// write (D3), never a per-field endpoint.
+const RATE_FIELDS = [
+  ["input", "Input"],
+  ["output", "Output"],
+  ["cache_read", "Cache read"],
+  ["cache_write", "Cache write"],
+];
+
+async function loadSettings() {
+  const errEl = document.getElementById("settings-price-error");
+  const wrap = document.getElementById("settings-price-wrap");
+  try {
+    const res = await fetch("/api/prices");
+    if (res.status === 503) {
+      // Unwired (no SetPricing in serve.go) is a plain message, not an
+      // empty table — an empty table would read as "no models configured"
+      // rather than "pricing isn't available at all".
+      wrap.hidden = true;
+      errEl.textContent = "Pricing is unavailable on this server.";
+      errEl.hidden = false;
+      return;
+    }
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { msg = (await res.json()).error || msg; } catch (e) { /* ignore */ }
+      throw new Error(msg);
+    }
+    const data = await res.json();
+    errEl.hidden = true;
+    wrap.hidden = false;
+    state.settingsPrices = data;
+    renderSettingsPrices(data);
+  } catch (e) {
+    console.error("loadSettings", e);
+    wrap.hidden = true;
+    errEl.textContent = "Failed to load pricing: " + (e.message || e);
+    errEl.hidden = false;
+  }
+}
+
+// priceSourceBadge follows costBadge's pattern: the glyph — here the source
+// word itself — never carries meaning alone, so title and aria-label always
+// say the same thing a sighted user reads from the badge's colour.
+function priceSourceBadge(source) {
+  const label = `source: ${source}`;
+  const cls = source === "configured" ? "badge" : "badge warn";
+  return `<span class="${cls}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${escapeHtml(source)}</span>`;
+}
+
+// rateCellHTML renders null as a genuinely empty cell (D3's convention: "no
+// rate configured" and "this model is free" are different statements) and 0
+// as the digit "0" — the two must never collapse into the same rendering.
+function rateCellHTML(model, key) {
+  const v = model[key];
+  const display = v === null || v === undefined ? "" : String(v);
+  return `<td class="price-cell" data-field="${key}">${escapeHtml(display)}</td>`;
+}
+
+function renderSettingsPrices(data) {
+  document.getElementById("settings-price-path").textContent = data.path;
+  document.getElementById("settings-peak-multiplier").textContent = data.peak_multiplier;
+  const body = document.getElementById("settings-price-body");
+  body.innerHTML = (data.models || []).map((m) => `<tr data-model="${escapeHtml(m.model)}">
+    <td>${escapeHtml(m.model)}</td>
+    ${RATE_FIELDS.map(([key]) => rateCellHTML(m, key)).join("")}
+    <td>${priceSourceBadge(m.source)}</td>
+  </tr>`).join("") || `<tr><td colspan="6" class="hint">No models configured.</td></tr>`;
+}
+
+function settingsPriceMessage(text) {
+  const el = document.getElementById("settings-price-msg");
+  if (!text) { el.hidden = true; return; }
+  el.textContent = text;
+  el.hidden = false;
+}
+
+// Click-to-edit is delegated on the tbody rather than wired per cell, so a
+// re-render (after every save) never has to re-attach listeners.
+document.getElementById("settings-price-body").addEventListener("click", (e) => {
+  const cell = e.target.closest("td.price-cell");
+  if (!cell || cell.querySelector("input")) return;
+  startEditingPriceCell(cell);
+});
+
+function startEditingPriceCell(cell) {
+  const orig = cell.textContent;
+  cell.dataset.orig = orig;
+  cell.innerHTML = `<input type="text" inputmode="decimal" value="${escapeHtml(orig)}">`;
+  const input = cell.querySelector("input");
+  input.focus();
+  input.select();
+  state.settingsPriceDirty = true;
+
+  let finished = false;
+  const finish = (commit) => {
+    if (finished) return; // Enter then blur on the same input would otherwise fire twice
+    finished = true;
+    if (commit) savePriceCell(cell, input.value);
+    else cell.textContent = cell.dataset.orig;
+  };
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); finish(true); }
+    else if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
+// savePriceCell sends the edited field's whole row (D3): the other three
+// rates come from the last-known-good response, not from whatever is
+// currently on screen, so a save can never resend a value the server has
+// not actually confirmed.
+async function savePriceCell(cell, rawValue) {
+  const row = cell.closest("tr");
+  const model = row.dataset.model;
+  const field = cell.dataset.field;
+  const trimmed = rawValue.trim();
+
+  let value = null;
+  if (trimmed !== "") {
+    value = Number(trimmed);
+    if (!Number.isFinite(value)) {
+      cell.textContent = cell.dataset.orig;
+      settingsPriceMessage(`"${trimmed}" is not a number — left unset.`);
+      return;
+    }
+  }
+
+  const known = ((state.settingsPrices || {}).models || []).find((m) => m.model === model) || {};
+  const rates = {
+    input: known.input, output: known.output,
+    cache_read: known.cache_read, cache_write: known.cache_write,
+  };
+  rates[field] = value;
+
+  cell.textContent = trimmed === "" ? "" : String(value);
+  try {
+    const res = await fetch("/api/prices", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, rates }),
+    });
+    let body = {};
+    try { body = await res.json(); } catch (e) { /* keep the default below */ }
+    if (!res.ok) throw new Error(body.error || res.statusText);
+
+    // Re-render from the response, never from local state (R1): this is
+    // what turns a concurrent `lens prices --set` into "the table now shows
+    // the value that won" instead of a UI that silently disagrees with the
+    // file on disk.
+    state.settingsPrices = body;
+    state.settingsPriceDirty = false;
+    settingsPriceMessage("");
+    renderSettingsPrices(body);
+  } catch (e) {
+    // Rejected: leave the table on the server's last-known state, not the
+    // value that was just refused, and say why.
+    state.settingsPriceDirty = true;
+    settingsPriceMessage(`Save failed: ${e.message || e}`);
+    if (state.settingsPrices) renderSettingsPrices(state.settingsPrices);
+  }
+}
 
 // ---- request detail modal ----------------------------------------------
 
