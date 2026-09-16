@@ -149,6 +149,12 @@ const state = {
   // loadWarnings. See both at their use sites.
   warningsDebounceTimer: null,
   warningsFetchSeq: 0,
+  // warningDetailPage is the warnings drill-down's window, and
+  // warningDetailFetchSeq its last-issued-wins guard. Same shapes as the
+  // sessions pair above; the limit starts at a PAGE_SIZES option for the same
+  // reason.
+  warningDetailPage: { limit: 50, offset: 0 },
+  warningDetailFetchSeq: 0,
   feedRowLimit: 200,
   // sessionsPage is the sessions table's window. The limit starts at one of
   // PAGE_SIZES so the select's initial value and the first request's ?limit=
@@ -316,23 +322,38 @@ function renderWarningGroups(groups) {
   </tr>`).join("") || `<tr><td colspan="4" class="hint">No warnings yet.</td></tr>`;
 
   body.querySelectorAll("tr[data-kind]").forEach((row) => {
-    row.addEventListener("click", () => showWarningDetail(row.dataset.kind, row.dataset.severity));
+    // true: switching group starts at the first page. Keeping a deep offset
+    // here would show an empty table for any group smaller than it — a page
+    // that does not exist for that group.
+    row.addEventListener("click", () => showWarningDetail(row.dataset.kind, row.dataset.severity, true));
   });
 }
 
 // The rows have to come from the server: the summary that names the group
-// holds counts, not the warnings themselves. limit=1000 and no pager here —
-// br-GI-15-07 adds the pager and the guard its rapid triggers need.
-async function showWarningDetail(kind, severity) {
+// holds counts, not the warnings themselves. showWarningDetail doubles as the
+// pager's page-change handler, so both entry points share one offset-reset
+// rule — see the comment on resetOffset.
+async function showWarningDetail(kind, severity, resetOffset) {
+  // Last-issued-wins, and for a second reason the counter covers that a
+  // "disable while loading" flag would not: clicking group B while group A's
+  // fetch is still in flight must not let A's rows land in B's table.
+  const seq = ++state.warningDetailFetchSeq;
+  if (resetOffset) state.warningDetailPage.offset = 0;
+
   const panel = document.getElementById("warnings-detail");
   const title = document.getElementById("warnings-detail-title");
   const body = document.getElementById("warnings-detail-body");
+  const { limit, offset } = state.warningDetailPage;
   const q = `kind=${encodeURIComponent(kind)}&severity=${encodeURIComponent(severity)}`;
   try {
-    const page = await fetchPage(`/api/warnings?${q}&limit=1000&offset=0`);
+    const page = await fetchPage(`/api/warnings?${q}&limit=${limit}&offset=${offset}`);
+    if (seq !== state.warningDetailFetchSeq) return;
+    state.warningDetailPage = { limit: page.limit || limit, offset: page.offset };
+
     // X-Total-Count is the group's true global count, which is the point:
     // the old title counted rows in a capped client-side cache, so it
-    // disagreed with the summary table directly above it.
+    // disagreed with the summary table directly above it. It is also the
+    // pager's Z, so the two numbers cannot drift apart.
     title.textContent = `${kind} (${severity}) — ${page.total} occurrence(s)`;
     body.innerHTML = page.items.map((w) => `<tr data-id="${w.RequestID}">
       <td>${w.RequestID}</td>
@@ -340,9 +361,13 @@ async function showWarningDetail(kind, severity) {
       <td>${relTime(w.CreatedAt)}</td>
       <td>${w.Path ? `<code>${escapeHtml(w.Path)}</code>` : ""}</td>
       <td>${escapeHtml(w.Detail)}</td>
-    </tr>`).join("");
+    </tr>`).join("") || `<tr><td colspan="5" class="hint">Nothing on this page.</td></tr>`;
     body.querySelectorAll("tr[data-id]").forEach((row) => {
       row.addEventListener("click", () => openDetail(Number(row.dataset.id)));
+    });
+    renderPager(document.getElementById("warnings-detail-pager"), page, (next) => {
+      state.warningDetailPage = next;
+      showWarningDetail(kind, severity, false);
     });
     panel.hidden = false;
   } catch (e) {

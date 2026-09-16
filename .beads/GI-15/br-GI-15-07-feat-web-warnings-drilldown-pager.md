@@ -90,3 +90,8 @@ check). Specific checks:
 ## Files to Touch
 
 - `internal/web/app.js` (modify — `showWarningDetail`, `state` additions, pager render)
+- `internal/web/index.html` (modify — the `#warnings-detail-pager` container required by step 2; the
+  original list omitted it, but step 2 cannot be implemented without it)
+
+**Note (added during implementation)**: step 2 needs markup, so `index.html` is a file this bead
+touches. `style.css` is not — `.pager` and its children already exist from br-GI-15-05.
