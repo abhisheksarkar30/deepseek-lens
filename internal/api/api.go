@@ -44,11 +44,33 @@ type Store interface {
 	WarningSummary(ctx context.Context, f store.Filter) ([]store.WarningGroup, error)
 }
 
+// RetentionPurger is the write surface the retention/purge routes call —
+// deliberately separate from Store (which stays the narrow read slice
+// documented above), so a purge enters through this seam rather than by
+// widening Store into something that can delete rows.
+//
+// CountPurgeable and CountUnpriced are named for their own predicate each
+// (older-than and the D5 unpriced predicate respectively), because the two
+// preview handlers serve two different WHERE clauses — one Count/Bytes pair
+// cannot produce both eligible_* and unpriced_*. CountPurgeable's oldest/newest
+// are nil when the eligible count is 0 (MIN/MAX over an empty set is SQL
+// NULL). (*store.Store).Vacuum is deliberately not here: it takes an
+// exclusive lock and is CLI-only, never a dashboard action.
+type RetentionPurger interface {
+	PurgeOlderThan(ctx context.Context, cutoff time.Time) (store.PurgeResult, error)
+	PurgeUnpriced(ctx context.Context) (store.PurgeResult, error)
+	CountPurgeable(ctx context.Context, cutoff time.Time) (count int, oldest, newest *time.Time, err error)
+	PurgeableBytes(ctx context.Context, cutoff time.Time) (int64, error)
+	CountUnpriced(ctx context.Context) (int, error)
+	UnpricedBytes(ctx context.Context) (int64, error)
+}
+
 type api struct {
 	store    Store
 	sink     *sink.Sink
 	consumer *consumer.Consumer
 	broker   *Broker
+	mux      *http.ServeMux
 
 	// proxyHandler is the live proxy's own Handler. The replay endpoint sends
 	// through it rather than through a transport of its own, and replayEnabled
@@ -62,7 +84,40 @@ type api struct {
 	// server-side trace at all. Surfaced on /api/health alongside the other
 	// counters.
 	replayRejected atomic.Uint64
+
+	// pricePath is the price-file path GET/POST /api/prices load from and
+	// save to (D1) — a path, not an in-memory table, so the handler cannot
+	// bypass the file the consumer's Loader re-reads. Empty means unwired:
+	// both routes answer 503.
+	pricePath string
+
+	// retentionDays and purge back GET /api/retention and POST /api/purge.
+	// purge == nil means unwired: both routes answer 503, independent of
+	// retentionDays (0 is itself a meaningful "keep forever" value, so it
+	// cannot double as the unwired sentinel).
+	retentionDays int
+	purge         RetentionPurger
 }
+
+// SetPricing wires GET/POST /api/prices to the price file at path. Called
+// from serve.go alongside the other optional-capability setters
+// (SetSessionAggregator, SetPriceTable, SetBodyDecoding); leaving it unset
+// is a supported state (both routes answer 503), not a nil dereference.
+func (a *api) SetPricing(path string) { a.pricePath = path }
+
+// SetRetention wires GET /api/retention and POST /api/purge to purge, with
+// days as the configured retention threshold the preview and the CLI-implied
+// default read. Leaving it unset is a supported state: both routes answer
+// 503 rather than panicking on a nil purge.
+func (a *api) SetRetention(days int, purge RetentionPurger) {
+	a.retentionDays = days
+	a.purge = purge
+}
+
+// ServeHTTP delegates to the stored mux, so *api satisfies http.Handler and
+// Handler: api.New(...) in serve.go keeps compiling with no change at that
+// call site.
+func (a *api) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.mux.ServeHTTP(w, r) }
 
 // New builds the dashboard's http.Handler: the read-only JSON API under
 // /api/* (including the /api/stream SSE endpoint) plus assets served from
@@ -77,7 +132,7 @@ type api struct {
 // replay is proxied, teed and recorded by exactly the code that handles live
 // traffic. Passing nil disables the route entirely, which is what the read-only
 // tests of beads before this one do.
-func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, assets fs.FS, proxyHandler http.Handler, replayEnabled bool) http.Handler {
+func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, assets fs.FS, proxyHandler http.Handler, replayEnabled bool) *api {
 	a := &api{store: st, sink: sk, consumer: cons, broker: broker, proxyHandler: proxyHandler, replayEnabled: replayEnabled}
 
 	mux := http.NewServeMux()
@@ -95,7 +150,8 @@ func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, asset
 	mux.HandleFunc("/api/stream", methodGet(a.stream))
 	mux.HandleFunc("/api/health", methodGet(a.health))
 	mux.Handle("/", http.FileServer(http.FS(assets)))
-	return mux
+	a.mux = mux
+	return a
 }
 
 // methodGet rejects every method but GET with a JSON 405 before h runs. The
@@ -360,7 +416,7 @@ func (a *api) replay(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "replay is disabled: start `lens serve --replay` to enable it")
 		return
 	}
-	if reason := replayOriginReject(r); reason != "" {
+	if reason := replayOriginReject(r, "replay"); reason != "" {
 		a.replayRejected.Add(1)
 		log.Printf("api: replay rejected from %s: %s", r.RemoteAddr, reason)
 		writeError(w, http.StatusForbidden, reason)
@@ -572,10 +628,17 @@ func (a *api) awaitReplayRow(ctx context.Context, origID, afterID int64) (*store
 	}
 }
 
-// replayOriginReject applies the Origin/Host allowlist half of the replay
-// guard. It returns "" when the request may proceed, or the reason to report as
-// a 403. It reads only headers — it never touches the store, the upstream, or
-// the body — so a rejection costs nothing and can send nothing.
+// replayOriginReject applies the Origin/Host allowlist shared by every
+// write route (replay, POST /api/prices, POST /api/purge). It returns ""
+// when the request may proceed, or the reason to report as a 403. It reads
+// only headers — it never touches the store, the upstream, or the body — so
+// a rejection costs nothing and can send nothing.
+//
+// action names the calling route in the rejection message ("replay",
+// "prices", "purge"): the three write routes share this one guard, and
+// without a parameter every rejection would talk about "replay" even when a
+// browser had just hit POST /api/prices — a debugging trap for whoever gets
+// turned away by a guard they don't recognize the name of.
 //
 // Two rejections, both about who can reach this route from a browser:
 //
@@ -601,14 +664,14 @@ func (a *api) awaitReplayRow(ctx context.Context, origID, afterID int64) (*store
 // non-browser client, which for this endpoint means `lens replay` — the
 // deliberate credentialless design in the bead's "Why no secret" (a local
 // process that could forge past this could already read the SQLite file).
-func replayOriginReject(r *http.Request) string {
+func replayOriginReject(r *http.Request, action string) string {
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
 	host = strings.Trim(host, "[]")
 	if !loopbackHost(host) {
-		return fmt.Sprintf("replay requires a loopback Host, got %q", r.Host)
+		return fmt.Sprintf("%s requires a loopback Host, got %q", action, r.Host)
 	}
 
 	origin := r.Header.Get("Origin")
@@ -617,10 +680,10 @@ func replayOriginReject(r *http.Request) string {
 	}
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" {
-		return fmt.Sprintf("replay rejected origin %q: not a usable origin", origin)
+		return fmt.Sprintf("%s rejected origin %q: not a usable origin", action, origin)
 	}
 	if !strings.EqualFold(u.Host, r.Host) {
-		return fmt.Sprintf("replay rejected cross-origin request: origin %q is not this dashboard's own origin %q", origin, r.Host)
+		return fmt.Sprintf("%s rejected cross-origin request: origin %q is not this dashboard's own origin %q", action, origin, r.Host)
 	}
 	return ""
 }
