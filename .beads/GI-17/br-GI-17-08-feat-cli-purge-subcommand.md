@@ -152,10 +152,14 @@ server. WAL plus `busy_timeout` is the same protocol every other external opener
 5. `--unpriced` alone with `retention_days = 0`: **succeeds** — the days guards do not apply.
 6. Each guard test asserts the row count is unchanged afterwards (belt; the pre-`store.Open` assertion
    is braces).
-7. `--dry-run`: reports a count, deletes nothing, and skips `--vacuum`. Sequence the assertions so
-   the skip is observable: purge for real with `--vacuum` and record the file size (it shrinks),
-   then re-run with `--dry-run --vacuum` and assert the size is **unchanged** — a run that merely
-   reports a count would still shrink the file if `--vacuum` were not gated on the dry run.
+7. `--dry-run`: reports a count, deletes nothing, and skips `--vacuum`. The assertion only has force
+   if there are **free pages to reclaim at the moment of the dry run** — and the obvious sequencing
+   (vacuum once, then dry-run and check the size did not change again) has none, because the first
+   `VACUUM` already removed them. That version passes whether or not `--dry-run` gates the vacuum.
+   So: seed a second batch of rows, purge them **without** `--vacuum` (SQLite frees the pages; the
+   file does not shrink), record the size, then run `--dry-run --vacuum` and assert the size is
+   unchanged. Add a control run of `--vacuum` alone on that same state and assert it **does** shrink
+   the file — otherwise the test cannot distinguish "skipped" from "did nothing".
 8. `--yes` gate: without it, no write; with it, the write happens.
 9. `--vacuum`: the DB file shrinks after a purge, and the reported before/after sizes differ.
 10. Both predicates end to end: an aged set and an unpriced set, each selected by its own flag.
@@ -175,3 +179,28 @@ search's cross-check against the map.
 - `docs/context/architecture.md` (modify — `:50`, "Eleven subcommand implementations", per the
   subcommand-inventory search this bead owns)
 - `docs/context/cli-and-tooling.md` (modify — `:6`, "All eleven names are implemented")
+
+---
+
+## Review Notes
+
+**The `--dry-run` skips `--vacuum` test could not fail as first sequenced.** Purging with `--vacuum`
+and then asserting the file does not shrink again on a `--dry-run --vacuum` proves nothing: the first
+run already reclaimed every free page, so the second has nothing to shrink whether or not the vacuum
+is gated. The test now creates reclaimable pages at the moment of the dry run — seed, purge
+**without** `--vacuum`, record the size — and adds a control run of `--vacuum` alone that must
+shrink the file, so "skipped" is distinguishable from "did nothing".
+
+**The pre-`store.Open` assertion in test 1 is the one that pins guard ordering.** Pointing `DBPath`
+at a nonexistent path and asserting the guard's message is not enough on its own — SQLite would
+create the file. The observable is the file's **absence** afterwards: an implementation that opened
+the store before validating leaves a stray `.db` behind and fails there.
+
+**This is the bead to implement guard-tests-first.** All three of the plan's review-round findings
+about thresholds landed in this file's config/threshold seam, and every guard here is one boolean
+away from a whole-table delete — `retention_days` defaults to `0`, so the implied-default refusal is
+the only thing standing between a bare `lens purge` and the user's entire capture file.
+
+**`rg` skips hidden directories by default**, so the `-g '!.beads/GI-*'` exclusions on the
+subcommand-inventory search are belt-and-braces; see br-GI-17-05's note.
+

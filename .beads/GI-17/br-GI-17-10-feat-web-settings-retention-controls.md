@@ -112,3 +112,23 @@ assets, never the files on disk.
 - `internal/web/app.js` (modify — the retention fetch, the two-state render, the confirm gating,
   the purge call, the active-view reload)
 - `internal/web/style.css` (modify — any Data-section styles not already added by br-GI-17-09)
+
+---
+
+## Review Notes
+
+**No defects found in this bead**, and that is worth recording rather than leaving silent — it is the
+only bead in the set that came through review unchanged. Two of its specs are load-bearing and should
+not be softened during implementation:
+
+- **The `days <= 0` state must render the older-than action *absent*, not disabled.** "Retention is
+  off" and "everything is eligible" are the two readings of an unconfigured threshold, and a greyed
+  button still reads as "there is something to purge here".
+- **The unpriced confirm's copy must name its number as the positive-token count.** `StatsByCostSource`
+  has no token condition, so the Stats tab's `unpriced N` is *larger* than what this action deletes.
+  Without the label the two on-screen figures read as a contradiction, and the user is left deciding
+  which number to believe about an irreversible delete.
+
+**VACUUM stays out of the dashboard** (R3): a multi-second ingest-blocking freeze with no feedback is
+the wrong shape for a browser action, and `lens purge --vacuum` is where it belongs.
+

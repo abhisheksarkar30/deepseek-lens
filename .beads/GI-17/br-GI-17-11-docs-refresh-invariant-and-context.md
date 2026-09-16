@@ -3,7 +3,8 @@
 **Plan Reference**: `docs/planning/GI-17-pricing-retention-purge.md` §Design decisions D7, §Risk areas R6
 
 - **Priority**: P1 (high)
-- **Dependencies**: br-GI-17-01 … br-GI-17-10
+- **Dependencies**: br-GI-17-01, br-GI-17-02, br-GI-17-03, br-GI-17-04, br-GI-17-05, br-GI-17-06,
+  br-GI-17-07, br-GI-17-08, br-GI-17-09, br-GI-17-10
 - **Blocks**: none
 
 ## Description
@@ -93,6 +94,30 @@ Also in the class per the plan's R6: `architecture.md` `:54`,
 "Last generated / refreshed" stamp — the stamp is part of the deliverable, since a refresh that does
 not restamp the index is indistinguishable from a stale one.
 
+**The trap: several of those lines are not hits of either search, so the gate cannot see them.**
+This is not hypothetical — it is the same defect the plan already documents for `api.go`'s
+`:78`/`:103`/`:335` (the claim wraps across source lines, so line-based `rg` misses it) and fixes by
+naming those lines **explicitly** in the Modify row. The same treatment is required here. Verified
+by running search 2 exactly as written — it returns 7 hits, and none of these three is among them:
+
+| Line | What it says | Why the search misses it |
+|---|---|---|
+| [api-surface.md:27-28](../../docs/context/api-surface.md#L27-L28) | "All routes except replay are **read-only** and rely on loopback binding for their 'no auth needed' rationale" | The pattern is `read-only (json )?api`; "are read-only" does not match |
+| [architecture.md:55-56](../../docs/context/architecture.md#L55-L56) | "The one / state-changing route, replay, adds its own Origin/Host allowlist" | The claim wraps across two source lines |
+| [security-and-permissions.md:64](../../docs/context/security-and-permissions.md#L64) | "plus the one application-layer guard above" | "the one application-layer guard" is not "the one write route/guard" |
+
+All three are falsified by this ticket — the first two the moment `POST /api/prices` and
+`POST /api/purge` exist. Because the bead's own Outcome Definition makes "each search's
+claim-bearing hit set is empty" the deliverable and its Files to Touch the searches' hit set, a naive
+reading of this bead would let it be marked done with those three lines still asserting a read-only
+API with exactly one state-changing route.
+
+So each of them is a **named line edit**, and Test Specification step 4 gains a companion: for each
+falsified claim the searches cannot see, run an assertion-form pattern with **its own positive
+control** — e.g. `rg -n 'state-changing route'` (positive control `architecture.md:55-56` before the
+change) and `rg -n 'except replay are'` (positive control `api-surface.md:28`). Without the named
+lines and their own controls, an empty search result proves nothing about them.
+
 **4. What this bead does *not* own.**
 
 - **The subcommand-inventory search** is br-GI-17-08's: it registers the twelfth subcommand, so
@@ -142,8 +167,23 @@ asserted:
 2. Confirm each pattern contains `|`, never `\|`.
 3. Edit.
 4. Re-run both searches. Classify every remaining hit as **claim-bearing** (must be empty), a
-   **declared true line**, or a **frozen path**. Any claim-bearing hit that survives is this bead's
-   to fix or to escalate — not to reclassify as a true line to make the set empty.
+   **declared true line**, a **frozen path**, or **the pattern quoting itself**. Any claim-bearing
+   hit that survives is this bead's to fix or to escalate — not to reclassify as a true line to make
+   the set empty.
+
+   On that fourth category: `rg` skips hidden files and directories by default, so `.beads/` is not
+   searched at all and the `-g '!.beads/GI-*'` exclusions are belt-and-braces rather than the thing
+   doing the work. Under `--hidden` the searches *would* match this plan's and these beads' own
+   pattern literals — a bead that quotes the pattern it is gated by is not a claim about the
+   codebase program. Such a hit stays, and it is neither a claim-bearing hit nor a declared true
+   line; saying so now is what keeps step 4 from stalling on one.
+4b. **Then run the named-line controls.** The searches cannot see `api-surface.md:27-28`,
+   `architecture.md:55-56`, or `security-and-permissions.md:64` (see the table above), so an empty
+   search result says nothing about them. For each, run an assertion-form pattern with its own
+   positive control (`rg -n 'state-changing route'` against `architecture.md:55-56`;
+   `rg -n 'except replay are'` against `api-surface.md:28`), demonstrated as a hit *before* the edit,
+   and require the claim-bearing set empty after. Reading the three lines is not a substitute — a
+   line that is not in a gate's result set is exactly the one that gets left behind.
 5. Grep `docs/context/INDEX.md` for the refresh stamp and assert it is today's date.
 6. Cross-check the write-route count in `CLAUDE.md` against the route registrations in
    `internal/api` — the prose against the source of truth, not against itself.
@@ -153,7 +193,39 @@ asserted:
 - `CLAUDE.md` (modify — the single-writer invariant, the one-way data-flow bullet, the write-route
   count)
 - `README.md` (modify — retention, purge, the Settings tab)
-- `docs/context/architecture.md`, `docs/context/api-surface.md`,
-  `docs/context/security-and-permissions.md`, `docs/context/data-model.md`,
-  `docs/context/testing-and-quality.md`, `docs/context/INDEX.md` (modify — the claim-bearing hits
-  the two searches find, plus the refresh stamp)
+- `docs/context/architecture.md` (modify — the claim-bearing hits the searches find, **plus the
+  named line `:55-56`**, which no search sees)
+- `docs/context/api-surface.md` (modify — as above, **plus the named line `:27-28`**)
+- `docs/context/security-and-permissions.md` (modify — as above, **plus the named line `:64`**)
+- `docs/context/data-model.md`, `docs/context/testing-and-quality.md` (modify — the claim-bearing
+  hits the searches find)
+- `docs/context/INDEX.md` (modify — the conditional table and the "Last generated / refreshed" stamp)
+
+---
+
+## Review Notes
+
+**The gate could not see three of the lines the bead itself named as in the class.** This was the
+most consequential finding in the set, because the bead's Outcome Definition makes "each search's
+claim-bearing hit set is empty" the *deliverable* — so a gate blind to three falsified sentences
+would have let the bead be marked done with them still asserting a read-only API with one
+state-changing route:
+
+| Line | Why the search misses it |
+|---|---|
+| `api-surface.md:27-28` "All routes except replay are read-only" | the pattern is `read-only (json )?api`; "are read-only" does not match |
+| `architecture.md:55-56` "The one / state-changing route, replay" | the claim wraps across two source lines |
+| `security-and-permissions.md:64` "the one application-layer guard above" | not "the one write route/guard" |
+
+All three are now **named line edits** with their own assertion-form controls (step 4b), verified by
+running search 2 as written: it returns 7 hits and none of these is among them. This is the same
+mechanism the plan already documents for `api.go`'s `:78`/`:103`/`:335`, applied where it had been
+missed. The lesson is general — a gate's empty result is evidence only about the lines the gate can
+match, and the lines it cannot match are exactly the ones nobody re-reads.
+
+**Two smaller corrections.** The searches' `-g '!.beads/GI-*'` exclusions are no-ops in practice
+(`rg` skips hidden directories), which is fine but needed stating so step 4's classification has a
+category for a hit inside `.beads/GI-17/` — the pattern quoting itself, which neither stays nor is
+claim-bearing. And `Dependencies` now enumerates the ten beads rather than using a range, matching
+`br-GI-15-08`'s form.
+

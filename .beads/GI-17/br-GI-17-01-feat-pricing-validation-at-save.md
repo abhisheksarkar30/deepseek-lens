@@ -66,8 +66,15 @@ partial/empty reads; it does not remove the lost-update race.
 handling ([prices.go:72](../../internal/cli/prices.go#L72),
 [:76](../../internal/cli/prices.go#L76)) and its own `rate < 0` test
 ([prices.go:84](../../internal/cli/prices.go#L84)). Delete both and call the exported checks, so the
-CLI and `Save` share one guard. `--set`'s rejection message then comes from the shared check, which
-is why `prices_test.go`'s message assertions move with it.
+CLI and `Save` share one guard, and `--set`'s rejection message comes from that shared check.
+
+The price CLI tests live in **`internal/cli/cli_test.go`**, not a `prices_test.go` — no such file
+exists. Its four cases (`TestPricesSetWritesTheFileAndPrintsTheUnit`,
+`TestPricesUnsetRevertsToUnpriced`, `TestPricesRejectsBadRateWithoutWriting`,
+`TestPricesPrintsTheShippedTableWithNoFlags`) assert only `err != nil` on rejection, with no
+assertion over the message text, so they keep passing unchanged and there is nothing to "move with"
+the check. What this bead actually adds there is one **new** case asserting the shared check's
+message for a name containing a newline (Outcome §5).
 
 ## Rationale
 
@@ -103,12 +110,27 @@ silent file corruption.
 2. Rate rejections: `NaN`, `+Inf`, `-Inf`, `-1` each return `ErrInvalidRate` via the shared check;
    `0` succeeds and reads back as `0`, distinct from unset.
 3. Round trip: `Save` → `Load` preserves unset fields (`null`) and a bare-model line.
-4. Atomicity: `Save` over an existing file leaves no `.tmp` in the directory and the target content
-   is the new table — assert the directory listing, not just the file.
+4. **Atomicity, asserted through a concurrent reader — not through the directory listing.** The
+   listing check is a trap: the code being replaced is a bare
+   `os.WriteFile(path, …, 0o600)` ([table.go:183](../../internal/pricing/table.go#L183)), which
+   creates no temp file either and does write the new table, so "no `.tmp` in the directory" and
+   "the target content is the new table" are **both already true before the change**. A test made of
+   those two assertions passes against the unfixed code.
+
+   The property that actually distinguishes truncate-in-place from temp-file+rename is the one the
+   plan describes at `:50-57`: a reader landing inside the write window sees an **empty** file, and
+   `parseTable("")` returns an empty table with **no error**
+   ([table.go:81-114](../../internal/pricing/table.go#L81-L114)), so a captured call is silently
+   stored unpriced forever. So observe a reader: seed a valid table, then loop a few hundred times
+   alternating the saved content while a second goroutine repeatedly calls `pricing.Load(path)`;
+   assert every `Load` returns either the old table or the new one — **never an error, and never an
+   empty table**. That fails against `os.WriteFile` and passes against the rename. Keep the "no
+   `.tmp` left behind" check as a cheap secondary assertion (it catches the error-path leak).
 5. `parseTable` rejects a dotted bare model line (`deepseek.v2`).
 
-`internal/cli` (`prices_test.go`): the `--set` rejection-message assertions track the shared check's
-message.
+`internal/cli` (`cli_test.go` — the existing price tests assert only `err != nil`, so they need no
+change): add one case asserting the shared check's message for `--set` with a model name containing
+a newline, and that the file was not written.
 
 ## Files to Touch
 
@@ -117,4 +139,23 @@ message.
   `parseTable` calls the exported check)
 - `internal/pricing/pricing_test.go` (modify — the cases above)
 - `internal/cli/prices.go` (modify — `applySet` drops its inline checks and calls the shared ones)
-- `internal/cli/prices_test.go` (modify — message assertions)
+- `internal/cli/cli_test.go` (modify — one new rejection-message case; there is no
+  `prices_test.go`, and the four existing `TestPrices*` cases assert only `err != nil`)
+
+---
+
+## Review Notes
+
+**The atomicity test could not fail, and that was the bead's whole P0 claim.** Test 4 as first
+written checked that no `.tmp` is left in the directory and that the target holds the new table —
+both of which are *already true* of the `os.WriteFile` this bead replaces. The property that
+distinguishes truncate-in-place from temp-file+rename is only observable from a **concurrent
+reader**, so the test now loops a save against a `pricing.Load` spinning in another goroutine and
+asserts no `Load` ever returns an empty table or an error. `parseTable("")` returning an empty table
+with no error is what makes the broken version fail this test and only this test.
+
+**`internal/cli/prices_test.go` does not exist.** The plan's Modify table names it, and this bead
+copied the row. The price CLI tests live in `cli_test.go` and assert only `err != nil` on rejection —
+no message assertions exist anywhere to "track the shared check". Left uncorrected, the implementer
+would either create a second home for price tests or conclude a test change that is not needed.
+

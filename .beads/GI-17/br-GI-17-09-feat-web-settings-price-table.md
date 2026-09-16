@@ -19,9 +19,15 @@ it rather than in a fifth button.
 - `internal/web/index.html`: a fifth `<button data-view="settings">` in the tab bar
   ([index.html:17-21](../../internal/web/index.html#L17-L21)) and a `<section id="view-settings"
   class="view" hidden>` holding a Pricing section and (in br-GI-17-10) a Data section.
-- `internal/web/app.js`: `views` gains `"settings"`
-  ([app.js:198](../../internal/web/app.js#L198)); `showView` needs no other change if it is already
-  table-driven, and a load hook for the tab fires the price fetch.
+- `internal/web/app.js`: two changes, and the second is easy to miss. Add `"settings"` to `views`
+  ([app.js:198](../../internal/web/app.js#L198)) — that alone wires the show/hide loop, which looks
+  each section up as `document.getElementById("view-" + v)`
+  ([app.js:201](../../internal/web/app.js#L201)), so the id must be `view-settings` in the HTML and
+  the string literal `view-settings` appears **nowhere** in `app.js`. Then add the tab's load hook
+  next to the existing ones: `showView` is **not** purely table-driven — the loop is, but each view
+  with a fetch has its own hard-coded branch (`if (name === "warnings")`, `"stats"`, `"sessions"`,
+  [app.js:206-215](../../internal/web/app.js#L206-L215)). Add `if (name === "settings")
+  loadSettings();` in the same shape, or the tab renders an empty table on first open.
 
 **2. Render the table from `GET /api/prices`.** One row per model; four rate cells plus the
 `source` badge. `null` must render as an **empty cell**, not `0` — the whole point of D3's `null`
@@ -86,8 +92,15 @@ disk — a binary built before the edit keeps serving the old assets. This repo 
 by that: check the served bytes before debugging dashboard code.
 
 1. `node --check internal/web/app.js`.
-2. Served-asset assertion: `curl -s http://localhost:<port>/app.js | grep -q 'view-settings'` and
-   `grep -q '"settings"'`; `curl -s http://localhost:<port>/ | grep -q 'id="view-settings"'`.
+2. Served-asset assertions, split by which asset carries what — `view-settings` is a string the
+   **HTML** carries and `app.js` composes at runtime, so grepping `/app.js` for it asserts something
+   that is false by design:
+   - `curl -s http://localhost:<port>/ | grep -q 'id="view-settings"'` — the section id, from
+     `index.html`;
+   - `curl -s http://localhost:<port>/ | grep -q 'data-view="settings"'` — the tab button;
+   - `curl -s http://localhost:<port>/app.js | grep -q '"settings"'` — the `views` entry. This is
+     the assertion that catches a missing `views` entry, which would leave the tab unable to show
+     its section at all.
 3. Manual, in a browser:
    - the Settings tab loads the table; a model with no rates shows empty cells, and a model with a
      `0` rate shows `0` — the `null`-vs-`0` distinction, verified through the UI and not only in the
@@ -109,3 +122,22 @@ by that: check the served bytes before debugging dashboard code.
 - `internal/web/app.js` (modify — `views` entry, `showView` load hook, price table render, in-place
   edit, save, re-render from the response)
 - `internal/web/style.css` (modify — editable-cell and destructive-action styles)
+
+---
+
+## Review Notes
+
+**`showView` is table-driven for the show/hide loop and hard-coded for the fetches — both halves
+matter.** The loop looks sections up as `document.getElementById("view-" + v)`
+([app.js:201](../../internal/web/app.js#L201)), so adding `"settings"` to `views` wires the first half
+and nothing else. Each view that fetches has its own branch below it — `warnings`, `stats`,
+`sessions` ([app.js:206-215](../../internal/web/app.js#L206-L215)) — so the bead now requires an
+`if (name === "settings") loadSettings();` in the same shape. The bead previously called `showView`
+"already table-driven", which would have shipped a tab that renders an empty table on first open.
+
+**The byte assertion was checking the wrong asset.** `view-settings` is a string `index.html` carries
+and `app.js` *composes* at runtime — the literal never appears in `app.js`. Grepping `/app.js` for it
+asserts something false by design. The assertion is now split: the section id and the tab button come
+from `/`, and `"settings"` as a `views` entry comes from `/app.js` — the latter being the one that
+catches a missing array entry.
+

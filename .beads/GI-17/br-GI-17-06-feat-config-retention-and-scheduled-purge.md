@@ -33,6 +33,22 @@ something on a machine that is not always on.
 This runs on the **store's writer connection**, which is `SetMaxOpenConns(1)`, so it queues behind
 ingest rather than racing it. It is one of the two writers D7's amended invariant must name.
 
+**Split the run out of `Serve` so it is testable.** `Serve` cannot be driven from a test as it
+stands: it loads and validates config, binds two real listeners on `cfg.ProxyAddr` /
+`cfg.DashboardAddr` ([serve.go:126](../../internal/cli/serve.go#L126),
+[:131](../../internal/cli/serve.go#L131)), and blocks on a `signal.NotifyContext` until interrupted.
+Follow the precedent already in this file — `checkRedaction` was, in its own words, "split out from
+`Serve` so the wiring is testable", because "the self-test's whole value is that it actually runs at
+boot, which is not true of a function no one calls"
+([serve.go:161-171](../../internal/cli/serve.go#L161-L171)). Extract:
+
+```go
+func purgeOnStartup(ctx context.Context, st *store.Store, days int, logf func(string, ...any))
+```
+
+Called once from `Serve` next to `checkRedaction`, and tested directly against a temp store — no
+listener, no signal, no port. The ticker stays in `Serve`; only the run is extracted.
+
 **4. `doctor` prints `retention_days`** in its effective-config table, alongside every other
 resolved value. A retention setting that deletes rows must be visible in the one command whose job
 is "what is this install actually configured to do"; a user debugging "why did my rows disappear"
@@ -83,11 +99,14 @@ why its count is logged.
 
 `internal/cli` (`cli_test.go`):
 
-3. Startup purge: with `retention_days` set and a store seeded with rows past the cutoff, a serve
-   startup deletes exactly those rows. This is integration test 2 of the plan's two
-   ("retention end to end"), and its second assertion is the one that catches a purge that deleted
-   rows without reconciling: the `sessions` totals afterwards agree with the rows that remain.
-4. `retention_days = 0`: startup deletes nothing, and the seeded rows are all present afterwards.
+3. Startup purge, against `purgeOnStartup` **directly** — not against `Serve`, which cannot be
+   driven from a test (two real listeners, a blocking signal context). With `retention_days` set and
+   a temp store seeded with rows past the cutoff, the run deletes exactly those rows, and delegates
+   the count to `logf` so the logged line is asserted too. This is integration test 2 of the plan's
+   two ("retention end to end"), and its **second** assertion is the one that catches a purge that
+   deleted rows without reconciling: the `sessions` totals afterwards agree with the rows that
+   remain.
+4. `retention_days = 0`: the run deletes nothing, and the seeded rows are all present afterwards.
 5. Doctor: the effective-config output contains the resolved `retention_days` value, asserted for a
    non-default setting so a hardcoded line would fail.
 
@@ -97,4 +116,23 @@ why its count is logged.
 - `internal/config/config_test.go` (modify — precedence and rejection cases)
 - `internal/cli/doctor.go` (modify — the effective-config table)
 - `internal/cli/serve.go` (modify — `SetRetention` + `SetPricing` wiring, startup purge, 24h ticker)
-- `internal/cli/cli_test.go` (modify — startup-purge coverage)
+- `internal/cli/cli_test.go` (modify — startup-purge coverage, against the extracted run function)
+
+---
+
+## Review Notes
+
+**`Serve` cannot be driven from a test, so the startup purge was extracted.** The bead originally
+said "a serve startup deletes exactly those rows", owned by `cli_test.go` — but nothing in this repo
+runs a `Serve` lifecycle. It validates config, binds two real listeners
+([serve.go:126](../../internal/cli/serve.go#L126), [:131](../../internal/cli/serve.go#L131)), and
+blocks on a `signal.NotifyContext` until interrupted; the only `Serve`-touching tests pass `--help`
+or exercise the banner and redaction helpers directly.
+
+The precedent is in the same file: `checkRedaction` was "split out from `Serve` so the wiring is
+testable", because "the self-test's whole value is that it actually runs at boot, which is not true
+of a function no one calls" ([serve.go:161-171](../../internal/cli/serve.go#L161-L171)). The bead now
+extracts `purgeOnStartup(ctx, st, days, logf)` in that shape and keeps the ticker in `Serve`. As
+written before, this — one of only three tests guarding the ticket's irreversible behaviour — was
+more likely to be quietly downgraded to a private-helper test than implemented as stated.
+

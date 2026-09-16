@@ -87,14 +87,36 @@ validation each get their own test file section rather than sharing one crowded 
    compare bytes. Repeat for `=`, `.`, a space, and a negative rate.
 5. Unknown rate field: `{"rates":{"inpt":1}}` returns 400 and writes nothing (decode-time
    rejection).
-6. I/O failure maps to 500: point `SetPricing` at a path whose parent directory is an existing
-   **file**, so the save fails for a reason that is not the caller's fault; assert 500. This is the
-   test that fails if every `Save` error is mapped to 400.
+6. I/O failure maps to 500, **without depending on how a given OS fails a write**. The tempting
+   version — point `SetPricing` at a path under a parent that is a regular file — is GOOS-dependent
+   and not guaranteed to reach `Save` at all: the failure may surface in `Load` first, and the
+   contract above does not say what a `Load` failure maps to. Instead, extract the mapping into a
+   small function and test it directly:
+
+   ```go
+   func priceStatus(err error) int // 400 for the two sentinels, 500 otherwise
+   ```
+
+   Table-test it with `pricing.ErrInvalidName`, `pricing.ErrInvalidRate`, a `%w`-wrapped sentinel
+   (which must still map to 400), and a plain `fmt.Errorf` standing in for a disk error (which must
+   map to 500). This is the assertion that fails if every `Save` error is mapped to 400, and it
+   holds on every platform. Keep one end-to-end 400 case from the real handler as a sanity check
+   that the handler calls the mapping at all.
 7. Guard: cross-origin `Origin` → 403; non-loopback `Host` → 403; both bodies name the `prices`
    action.
 8. Unwired: without `SetPricing`, 503.
 9. Response shape: decode the `POST` response with the same struct `GET` uses, so a shape drift
    between the two routes is a compile error rather than a client bug.
+10. **The integration test of D1's premise — automated here, not left to br-GI-17-09's manual
+    eyeball.** Build a real `pricing.NewLoader(tempPath)` **before** the write and call `Table()` on
+    it, so its stat cache is populated. Then `POST` a new rate. Then call `Table()` again and assert
+    the new rate is live.
+
+    Assert through `Loader.Table()`, not `pricing.Load`: `Load` re-reads unconditionally, so a test
+    written against it passes even when the file's mtime/size never changed — which is the entire
+    mechanism D1 rests on, and the thing br-GI-17-01's atomic rename has to preserve. A naive
+    implementation that mutated only an in-memory copy fails here and nowhere else, and so does one
+    whose save leaves the mtime/size unchanged.
 
 ## Owning the read-only / one-write-route search
 
@@ -124,7 +146,9 @@ rg -n -i -g '!docs/planning/GI-*' -g '!docs/superpowers/specs' \
   the set — it is *not* a declared-stay. The docs half of this search belongs to br-GI-17-11.
 - **Declared true lines that stay:** `internal/consumer/analyzer.go:29` and
   `internal/session/session.go:77` ("read-only" aggregates / resolution — true, unrelated to the
-  HTTP surface). Frozen paths stay untouched.
+  HTTP surface). These two are **not hits of this search** — do not go looking for them in its
+  output, and do not treat their absence as a gap. They are named here only so the next reader does
+  not "fix" them. Frozen paths stay untouched.
 
 **A note on wording, because the count changes as beads land.** After this bead the listener carries
 **two** write routes (replay, prices); br-GI-17-07 adds the third (purge). So this bead rewrites the
@@ -136,8 +160,38 @@ three when it lands, and br-GI-17-11 verifies tree-wide that the search's claim-
 
 - `internal/api/prices.go` (modify — the `POST` handler and its decode/validate/save path)
 - `internal/api/prices_test.go` (modify — the cases above)
-- `internal/api/api.go` (modify — the read-only / one-write-route comments at `:67`, `:78`, `:103`,
-  `:335`)
+- `internal/api/api.go` (modify — **one line added to `New`'s route list**:
+  `mux.HandleFunc("POST /api/prices", a.setPrices)`; note the method-prefixed pattern, because this
+  route must **not** be wrapped in `methodGet`, which rejects every non-GET with a 405. Plus the
+  read-only / one-write-route comments at `:67`, `:78`, `:103`, `:335`)
 - `internal/api/broker.go` (modify — the package doc's "read-only JSON API")
 - `internal/api/api_test.go` (modify — the preamble's "read-only API" claim, `:83`)
 - `internal/cli/replay.go` (modify — `:207`, "reads one request through the read-only API")
+
+---
+
+## Review Notes
+
+**The route registration is an `api.go` edit.** As in br-GI-17-03: routes are attached inside `New`
+([api.go:83-97](../../internal/api/api.go#L83-L97)), so this bead adds one line there. Note the
+method-prefixed pattern — this route must **not** be wrapped in `methodGet`, which rejects every
+non-GET with a 405.
+
+**The 500-vs-400 test was platform-dependent and is now a mapping test.** Pointing `SetPricing` at a
+path whose parent is a regular file was the tempting way to force a `Save` failure; the failure may
+instead surface in `Load`, which the contract does not map, and the errno differs by GOOS. It is
+replaced by a direct table test of an extracted `priceStatus(err) int` — sentinel → 400, wrapped
+sentinel → 400, plain error → 500 — which is the assertion that actually fails if every `Save` error
+is mapped to 400, and holds on every platform.
+
+**The D1 integration test is owned here, not delegated to br-GI-17-09.** It was previously left to
+that bead's manual eyeball, which would have left the ticket's central premise — that a browser save
+is picked up by the consumer's `Loader` on its next stat — with no automated assertion. It is now
+test 10, and it asserts through `Loader.Table()` **after** priming the loader's cache, not through
+`pricing.Load`, which re-reads unconditionally and would pass even if the mtime/size never changed.
+
+**The "read-only / one write route" search is owned here** because this is the first bead to add a
+write route beyond replay. The bead rewrites the claims **structurally** rather than asserting a
+count: after this bead the listener has two write routes, and only after br-GI-17-07 does it have
+three. br-GI-17-11 verifies the empty claim-bearing set tree-wide at the end.
+

@@ -18,17 +18,30 @@ source-comment half.
 func (s *Store) purgeWhere(ctx context.Context, where string, args ...any) (PurgeResult, error)
 ```
 
-It holds the transaction, the warnings delete, the per-affected-session `reconcileSession` loop
+It holds the transaction, the per-affected-session `reconcileSession` loop
 ([store.go:893-897](../../internal/store/store.go#L893-L897)), and the commit.
 `PurgeOlderThan(ctx, cutoff) (PurgeResult, error)` and the new `PurgeUnpriced(ctx) (PurgeResult, error)`
 differ **only** in their WHERE clause and become wrappers over it. The session-reconciliation logic
 is the part most likely to be fixed in one copy and forgotten in the other, so keeping exactly one
 copy is the point of the extraction.
 
-The existing warnings delete is
-`DELETE FROM warnings WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)`
-([store.go:878-881](../../internal/store/store.go#L878-L881)) — generalize the inner `WHERE` to the
-passed clause rather than duplicating the statement.
+**Three statements embed the predicate, not one.** All three must be generalized to the passed
+clause, and a partial extraction is the failure mode to guard against — it compiles, and it silently
+deletes the wrong set:
+
+| Statement | Today | Generalize to |
+|---|---|---|
+| affected sessions ([store.go:859-860](../../internal/store/store.go#L859-L860)) | `SELECT DISTINCT session_id FROM requests WHERE started_at < ? AND session_id IS NOT NULL` | `WHERE (<where>) AND session_id IS NOT NULL` |
+| warnings ([store.go:878-880](../../internal/store/store.go#L878-L880)) | `DELETE FROM warnings WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)` | inner `WHERE <where>` |
+| requests ([store.go:884](../../internal/store/store.go#L884)) | `DELETE FROM requests WHERE started_at < ?` | `WHERE <where>` |
+
+Generalizing only the requests delete is the trap: it compiles, `PurgeUnpriced` deletes the right
+rows, and it reconciles **every session that ever had rows** instead of the sessions it touched —
+because the affected-session query still asks its own `started_at < ?` question. The `args` slice
+passed to `purgeWhere` is shared by all three, so keep the placeholder order consistent.
+
+Precedence matters when the clause is embedded: `(<where>)` must be parenthesised, since the D5
+predicate is itself a conjunction and would otherwise bind wrongly against the added `AND`.
 
 `PurgeResult` is **already declared** by br-GI-17-02 in `internal/store/types.go`. Do not re-declare
 it. The second field cannot be dropped: `POST /api/purge` returns `sessions_reconciled` for **both**
@@ -125,7 +138,10 @@ the same single connection" claim: it is false for `lens purge`.
 Amending the invariant means amending **every** statement of it — search, not sample. This bead owns
 the **single-writer governing search** (`docs/planning/GI-17-pricing-retention-purge.md` §D7
 governing searches, search 1), run whole-tree with the frozen-path exclusions
-(`-g '!docs/planning/GI-*' -g '!docs/superpowers/specs' -g '!.beads/GI-1' -g '!.beads/GI-4' -g '!.beads/GI-15'`):
+(`-g '!docs/planning/GI-*' -g '!docs/superpowers/specs' -g '!.beads/GI-1' -g '!.beads/GI-4' -g '!.beads/GI-15'`).
+(`rg` skips hidden directories by default, so `.beads/` is not searched and those three exclusions
+are belt-and-braces rather than load-bearing; under `--hidden` they are what keeps the searches from
+matching this plan's and these beads' own quoted patterns.)
 
 ```
 rg -n -i -g '!docs/planning/GI-*' -g '!docs/superpowers/specs' \
@@ -217,6 +233,15 @@ does. This is the lowest bead in the ticket and the one every other purge bead d
    predicates.
 7. Concurrent purge + insert under `-race`: both return nil and every row is accounted for. Comment
    that the guarantee is `SetMaxOpenConns(1)`'s, not the race detector's.
+8. **Reconciliation is scoped to the sessions the purge actually touched** — the test that catches a
+   partial extraction. Seed two disjoint sets of sessions: one unpriced (with tokens), one priced.
+   Run `PurgeUnpriced`. Assert `SessionsReconciled` counts only the unpriced sessions' count, and
+   that the *priced* sessions' aggregate columns (`first_seen`, `last_seen`, request/warning counts)
+   are **byte-identical** to before.
+
+   This is the assertion that fails if only the requests `DELETE` was generalized: the delete is
+   correct, but the affected-session query still asks `started_at < ?` and so hands `reconcileSession`
+   every session in the table. A test that asserts only `Deleted` cannot see that at all.
 
 ## Files to Touch
 
@@ -226,3 +251,27 @@ does. This is the lowest bead in the ticket and the one every other purge bead d
 - `internal/store/store_test.go` (modify — the cases above, and the two `PurgeOlderThan` call sites)
 - `internal/api/api.go` (modify — the `sendReplay` doc's single-writer quote, `:455-456`, per the
   D7 single-writer search this bead owns)
+
+---
+
+## Review Notes
+
+**Three statements embed the predicate, not one — and generalizing only the obvious one is silent.**
+The bead first called out only the warnings delete. In fact all three carry `started_at < ?`:
+the affected-session query ([store.go:859-860](../../internal/store/store.go#L859-L860)), the
+warnings delete ([store.go:878-880](../../internal/store/store.go#L878-L880)), and the requests
+delete ([store.go:884](../../internal/store/store.go#L884)).
+
+Generalizing only the requests delete is the dangerous partial: it compiles, `PurgeUnpriced` deletes
+exactly the right rows, and `SessionsReconciled` is wrong — because the affected-session query still
+asks its own `started_at < ?` question and hands `reconcileSession` every session in the table. No
+assertion over `Deleted` can see that. Test 8 exists for it: two disjoint session sets, and the
+untouched one's aggregate columns must be byte-identical afterwards. The embedded clause is
+parenthesised, since the D5 predicate is itself a conjunction and would otherwise bind wrongly
+against the added `AND`.
+
+**`rg` skips hidden directories by default.** `.beads/` is not searched at all, so the
+`-g '!.beads/GI-*'` exclusions are belt-and-braces rather than load-bearing. Under `--hidden` they
+are what stops the searches matching this plan's and these beads' own quoted pattern literals — which
+is a fourth classification the gate needs, alongside claim-bearing, declared-true, and frozen.
+

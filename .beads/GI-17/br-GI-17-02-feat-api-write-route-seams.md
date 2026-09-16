@@ -21,6 +21,16 @@ call site — is worse than a return-type change. Store the `*http.ServeMux` on 
 `api` a `ServeHTTP` that delegates to it, so `Handler: api.New(...)` in
 [serve.go:110](../../internal/cli/serve.go#L110) still compiles unchanged.
 
+**`New` stays the single registration point, and this bead does not freeze it.** Today every route
+is attached inside `New`'s body — `mux := http.NewServeMux()` and the whole `mux.HandleFunc` list,
+through the `mux.Handle("/", http.FileServer(...))` catch-all
+([api.go:83-97](../../internal/api/api.go#L83-L97)). This bead moves the mux onto the struct and
+leaves that list where it is. It deliberately adds **no** `Register`/`Handle` method and no
+`routes []func(*http.ServeMux)` field: br-GI-17-03, -04 and -07 each add one line to that existing
+list, which is a smaller and more readable diff than a registration table three beads append to. The
+price of that choice is that each of those beads lists `internal/api/api.go` in its Files to Touch —
+and each does.
+
 **2. `SetPricing(path string)`.** It carries the price-file **path**, not an in-memory table: the
 handler loads and saves through `pricing.Load(path)` / `pricing.Save(path, …)` (D1), so it cannot
 accidentally bypass the file the consumer's `Loader` re-reads.
@@ -127,3 +137,28 @@ differently.
   replay call site)
 - `internal/api/api_test.go` (modify — `newTestAPI` returns `*api`; the guard action table)
 - `internal/store/types.go` (modify — add `PurgeResult`)
+
+---
+
+## Review Notes
+
+**The mux is registered inside `New`, and this bead deliberately does not change that.** Every route
+in the package is attached in one function body — `mux := http.NewServeMux()` through
+`mux.Handle("/", http.FileServer(...))` at [api.go:83-97](../../internal/api/api.go#L83-L97). This
+bead moves the mux onto the struct but adds no `Register` method and no route table, so br-GI-17-03,
+-04 and -07 each add **one line** to that existing list. Each of those beads therefore lists
+`internal/api/api.go` in its Files to Touch. Without that line the handler is never reachable and the
+route falls through to the FileServer catch-all as a **404** — the failure mode that would make three
+later beads unlandable while looking like a test problem.
+
+**`store.PurgeResult` is declared here rather than in br-GI-17-05.** The plan's bead outline assigns
+it to 05, but this bead's `RetentionPurger` declaration is what forces the type into existence, and
+02 and 05 have no dependency in either direction. Declaring the struct here and the methods that
+return it in 05 keeps both beads independently buildable — a two-line type with no behaviour to test,
+then the methods. br-GI-17-05 must not re-declare it.
+
+**`api.New`'s return type is the blast radius.** The change compiles at `serve.go`'s call site with
+no edit, because `*api` satisfies `http.Handler` — the only call site that changes is `newTestAPI` in
+`api_test.go`. That is the whole reason the return-type change is smaller than threading three more
+positional parameters or an `Options` struct.
+

@@ -10,6 +10,20 @@
 
 A read-only route serving the effective price table, registered on the seam br-GI-17-02 added.
 
+**Route registration.** Every route in this package is attached inside `New` — `mux :=
+http.NewServeMux()` and the whole `mux.HandleFunc` list are one function body
+([api.go:83-97](../../internal/api/api.go#L83-L97)), including the `mux.Handle("/",
+http.FileServer(...))` catch-all. br-GI-17-02 stores that mux on `*api` but deliberately adds no
+`Register` method, so this bead registers its route by adding **one line** to that list:
+
+```go
+mux.HandleFunc("/api/prices", methodGet(a.getPrices))
+```
+
+That is an edit to `internal/api/api.go`, listed below. Without it the handler is unreachable: the
+request falls through to the FileServer catch-all and answers **404**, so every test in this bead
+would fail.
+
 ```json
 {
   "path": "C:\\Users\\me\\.deepseek-lens\\prices.toml",
@@ -31,10 +45,14 @@ Three details that are contract, not presentation:
   fields carry ([pricing.go:69-74](../../internal/pricing/pricing.go#L69-L74)) and the same one
   `lens prices --unset` means. A zero would claim the model is free, which is a different and much
   more damaging statement than "no rate configured".
-- **`source` is `Rates.Source()`** — `configured` / `unpriced` / `unknown-model` / `approximate` as
-  the pricing package already defines them. The dashboard renders this directly; it must not
-  re-derive a bucket from the rate values, because "all four rates unset" and "no input rate" are
-  both `unpriced` to `Source()` and the Settings tab should not disagree with the Stats tab.
+- **`source` is `Rates.Source()`, which returns exactly two values** — `configured` when an input
+  rate is set and `unpriced` otherwise ([pricing.go:96-106](../../internal/pricing/pricing.go#L96-L106)).
+  It is **not** the same vocabulary as the cost-source buckets: `unknown-model` is a *row* outcome
+  from `Compute`, and `SourceApproximate` is a **per-call** outcome (it needs cache-read tokens *and*
+  a missing cache-read rate), so `Source()` never reports either. The dashboard renders this verbatim
+  and must not re-derive a bucket from the rate values, because a model with all four rates unset
+  and a model with only its input rate missing are both `unpriced` here — and the Settings tab must
+  not invent a third label the pricing package does not agree with.
 - **Models are sorted**, so the table does not reshuffle between renders as the underlying map
   iterates.
 
@@ -79,6 +97,27 @@ failure mode a pricing UI must not have.
 
 ## Files to Touch
 
-- `internal/api/prices.go` (create — the `GET` handler, its tagged response struct, and the route
-  registration)
+- `internal/api/prices.go` (create — the `GET` handler and its tagged response struct)
+- `internal/api/api.go` (modify — **one line added to `New`'s route list**:
+  `mux.HandleFunc("/api/prices", methodGet(a.getPrices))`)
 - `internal/api/prices_test.go` (create — the cases above)
+
+---
+
+## Review Notes
+
+**The route registration is an `api.go` edit, not something `prices.go` can do.** This bead first
+claimed `prices.go` carried "the route registration"; there is nowhere for it to go. Routes are
+attached inside `New`'s body ([api.go:83-97](../../internal/api/api.go#L83-L97)), and br-GI-17-02
+adds no registration method. The bead now names the one line it adds and lists `internal/api/api.go`
+in its Files to Touch — without it, `GET /api/prices` falls through to the FileServer catch-all and
+every test here fails with a 404.
+
+**`Rates.Source()` returns two values, not four.** The bead listed
+`configured`/`unpriced`/`unknown-model`/`approximate` as though `Source()` reported them all. It does
+not: it is `SourceConfigured` when an input rate is set and `SourceUnpriced` otherwise
+([pricing.go:96-106](../../internal/pricing/pricing.go#L96-L106)). `unknown-model` is a *row* outcome
+from `Compute`, and `SourceApproximate` is a **per-call** outcome — the latter never appears here
+because it needs cache-read tokens *and* a missing cache-read rate. A UI built on the four-value
+reading would render a label the server can never send.
+

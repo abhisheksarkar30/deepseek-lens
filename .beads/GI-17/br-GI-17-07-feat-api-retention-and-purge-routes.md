@@ -121,6 +121,29 @@ which deletes the user's whole capture file.
 
 ## Files to Touch
 
-- `internal/api/purge.go` (create — both handlers, the tagged preview struct, the mode decode, route
-  registration)
+- `internal/api/purge.go` (create — both handlers, the tagged preview struct, the mode decode)
+- `internal/api/api.go` (modify — **two lines added to `New`'s route list**:
+  `mux.HandleFunc("/api/retention", methodGet(a.getRetention))` and
+  `mux.HandleFunc("POST /api/purge", a.purge)`. Note the asymmetry — the read route is wrapped in
+  `methodGet`, the write route is method-prefixed instead, exactly as the replay and prices routes
+  are. Without these lines both handlers are unreachable and fall through to the FileServer
+  catch-all, so test 11's 503 assertion cannot pass)
 - `internal/api/purge_test.go` (create — the cases above)
+
+---
+
+## Review Notes
+
+**Both routes register as `api.go` edits, and the two lines are deliberately asymmetric.** Routes are
+attached inside `New` ([api.go:83-97](../../internal/api/api.go#L83-L97)). The read route is wrapped
+in `methodGet`; the write route uses a method-prefixed pattern instead — the same shape the replay
+and prices routes use, and mandatory here, since `methodGet` would reject every `POST` with a 405
+before the handler ever ran. Omitting the registrations makes both handlers unreachable and sends
+requests to the FileServer catch-all, so test 11's 503 assertion could not pass.
+
+**The bead's two most load-bearing specs are 1 and 6.** Test 1 is the preview-equals-delete
+guarantee — the reason the read and the write share a bead at all — and test 6 is the assertion that
+fails if the predicate degrades to a bare `cost_usd IS NULL`, which would silently fold the
+`unknown-model` bucket into a destructive action. Both are cheap to write and neither is implied by
+any other test in the ticket.
+
