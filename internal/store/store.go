@@ -301,14 +301,23 @@ func (s *Store) GetRequest(ctx context.Context, id int64) (*Request, error) {
 	return r, nil
 }
 
-// ListRequests returns requests matching f, newest first. f.Limit <= 0 is
-// capped at DefaultLimit — never unbounded.
-func (s *Store) ListRequests(ctx context.Context, f Filter) ([]*Request, error) {
-	limit := f.Limit
-	if limit <= 0 {
-		limit = DefaultLimit
+// clampOffset mirrors the Limit <= 0 → DefaultLimit clamp above: a caller
+// that computed its offset arithmetically must not be able to turn it into a
+// SQL error.
+func clampOffset(offset int) int {
+	if offset < 0 {
+		return 0
 	}
+	return offset
+}
 
+// requestWhere builds the WHERE clause shared by ListRequests and
+// CountRequests, returning it with its leading " WHERE " already applied (so
+// callers just concatenate, and an unconstrained filter yields ""). Sharing
+// it is the point: X-Total-Count is only meaningful if the count selects
+// exactly the rows the list would have returned, and two hand-maintained
+// clauses is how they silently diverge.
+func requestWhere(f Filter) (string, []interface{}) {
 	var where []string
 	var args []interface{}
 	if !f.Since.IsZero() {
@@ -333,13 +342,27 @@ func (s *Store) ListRequests(ctx context.Context, f Filter) ([]*Request, error) 
 		where = append(where, "replay_of = ?")
 		args = append(args, *f.ReplayOf)
 	}
-
-	query := "SELECT " + requestColumns + " FROM requests"
-	if len(where) > 0 {
-		query += " WHERE " + strings.Join(where, " AND ")
+	if len(where) == 0 {
+		return "", nil
 	}
-	query += " ORDER BY started_at DESC LIMIT ?"
-	args = append(args, limit)
+	return " WHERE " + strings.Join(where, " AND "), args
+}
+
+// ListRequests returns a page of requests matching f, newest first, starting
+// at f.Offset. f.Limit <= 0 is capped at DefaultLimit — never unbounded.
+func (s *Store) ListRequests(ctx context.Context, f Filter) ([]*Request, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = DefaultLimit
+	}
+
+	where, args := requestWhere(f)
+	// id DESC is the tiebreaker, not decoration: the consumer batch-inserts,
+	// so rows sharing a started_at are normal, and without a total order a
+	// page boundary can serve one row twice or skip it.
+	query := "SELECT " + requestColumns + " FROM requests" + where +
+		" ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, clampOffset(f.Offset))
 
 	rows, err := s.reader.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -356,6 +379,18 @@ func (s *Store) ListRequests(ctx context.Context, f Filter) ([]*Request, error) 
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// CountRequests returns how many requests match f's predicates, ignoring
+// f.Limit and f.Offset by design — this is the X-Total-Count figure, so it
+// has to describe the whole filtered set, not the page being served.
+func (s *Store) CountRequests(ctx context.Context, f Filter) (int, error) {
+	where, args := requestWhere(f)
+	var n int
+	if err := s.reader.QueryRowContext(ctx, "SELECT COUNT(*) FROM requests"+where, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count requests: %w", err)
+	}
+	return n, nil
 }
 
 // StatsSummary aggregates counts, token totals, cost, and warning count
@@ -680,14 +715,10 @@ func scanWarning(sc rowScanner) (*Warning, error) {
 	return &w, nil
 }
 
-// ListWarnings returns warnings matching f (Kind/Severity/Since/Limit),
-// newest first. f.Limit <= 0 is capped at DefaultLimit.
-func (s *Store) ListWarnings(ctx context.Context, f Filter) ([]*Warning, error) {
-	limit := f.Limit
-	if limit <= 0 {
-		limit = DefaultLimit
-	}
-
+// warningWhere builds the WHERE clause shared by ListWarnings,
+// CountWarnings, and WarningSummary — same reasoning as requestWhere: the
+// count and the summary must select exactly the rows the list would.
+func warningWhere(f Filter) (string, []interface{}) {
 	var where []string
 	var args []interface{}
 	if f.Kind != "" {
@@ -702,13 +733,27 @@ func (s *Store) ListWarnings(ctx context.Context, f Filter) ([]*Warning, error) 
 		where = append(where, "created_at >= ?")
 		args = append(args, f.Since.UnixNano())
 	}
-
-	query := "SELECT id, request_id, kind, severity, detail, path, created_at FROM warnings"
-	if len(where) > 0 {
-		query += " WHERE " + strings.Join(where, " AND ")
+	if len(where) == 0 {
+		return "", nil
 	}
-	query += " ORDER BY created_at DESC LIMIT ?"
-	args = append(args, limit)
+	return " WHERE " + strings.Join(where, " AND "), args
+}
+
+// ListWarnings returns a page of warnings matching f
+// (Kind/Severity/Since/Limit/Offset), newest first, starting at f.Offset.
+// f.Limit <= 0 is capped at DefaultLimit.
+func (s *Store) ListWarnings(ctx context.Context, f Filter) ([]*Warning, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = DefaultLimit
+	}
+
+	where, args := warningWhere(f)
+	// id DESC tiebreaker: see ListRequests — batch-inserted warnings share a
+	// created_at routinely, so pages need a total order.
+	query := "SELECT id, request_id, kind, severity, detail, path, created_at FROM warnings" +
+		where + " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, clampOffset(f.Offset))
 
 	rows, err := s.reader.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -723,6 +768,50 @@ func (s *Store) ListWarnings(ctx context.Context, f Filter) ([]*Warning, error) 
 			return nil, fmt.Errorf("store: list warnings: %w", err)
 		}
 		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+// CountWarnings returns how many warnings match f's predicates, ignoring
+// f.Limit and f.Offset — CountRequests' twin, same reasoning.
+func (s *Store) CountWarnings(ctx context.Context, f Filter) (int, error) {
+	where, args := warningWhere(f)
+	var n int
+	if err := s.reader.QueryRowContext(ctx, "SELECT COUNT(*) FROM warnings"+where, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count warnings: %w", err)
+	}
+	return n, nil
+}
+
+// WarningSummary groups the warnings matching f by (kind, severity), with
+// each group's true total drawn from the whole matching set — not from a
+// page of it. That is the difference from grouping a ListWarnings result in
+// the caller: a kind with more occurrences than DefaultLimit would be
+// undercounted there, and no page size fixes it.
+//
+// It honors Kind/Severity/Since and ignores the rest, Limit/Offset included
+// (a GROUP BY result is bounded by the distinct (kind, severity) pairs, not
+// by row count, so a page window would only make the counts wrong). The
+// scan is bounded in cost by idx_warnings_kind_severity_created_at.
+func (s *Store) WarningSummary(ctx context.Context, f Filter) ([]WarningGroup, error) {
+	where, args := warningWhere(f)
+	rows, err := s.reader.QueryContext(ctx,
+		"SELECT kind, severity, COUNT(*), MAX(created_at) FROM warnings"+where+
+			" GROUP BY kind, severity ORDER BY COUNT(*) DESC, kind, severity", args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: warning summary: %w", err)
+	}
+	defer rows.Close()
+
+	var out []WarningGroup
+	for rows.Next() {
+		var g WarningGroup
+		var lastSeen int64
+		if err := rows.Scan(&g.Kind, &g.Severity, &g.Count, &lastSeen); err != nil {
+			return nil, fmt.Errorf("store: warning summary: %w", err)
+		}
+		g.LastSeen = time.Unix(0, lastSeen).UTC()
+		out = append(out, g)
 	}
 	return out, rows.Err()
 }

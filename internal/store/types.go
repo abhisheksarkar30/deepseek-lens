@@ -69,6 +69,20 @@ type Warning struct {
 	CreatedAt time.Time
 }
 
+// WarningGroup is one row of WarningSummary's result: how many warnings of
+// this (kind, severity) the matching set holds, and when the newest of them
+// was raised.
+//
+// No json tags, same convention as Warning and Request above — the served
+// keys are the capitalized Go field names ("Kind", "Count", "LastSeen"), so
+// internal/web/app.js must read them capitalized too.
+type WarningGroup struct {
+	Kind     string
+	Severity string
+	Count    int
+	LastSeen time.Time
+}
+
 // Session groups requests correlated by SessionHeader/PrefixHash and an
 // inactivity gap (br-GI-1-07/12). ID is the session's correlation key, not a
 // surrogate — it's what Request.SessionID points at.
@@ -99,11 +113,17 @@ type Session struct {
 	WarningCount      int
 }
 
-// Filter narrows ListRequests and ListWarnings. Only the fields relevant to
-// the call being made are read — ListRequests ignores Kind/Severity,
-// ListWarnings ignores SessionID/Model/OnlyWarned/OnlyErrors.
+// Filter narrows ListRequests, ListWarnings, WarningSummary, and the
+// CountRequests/CountWarnings counts. Only the fields relevant to the call
+// being made are read — ListRequests ignores Kind/Severity, ListWarnings
+// ignores SessionID/Model/OnlyWarned/OnlyErrors, WarningSummary ignores
+// Limit/Offset/SessionID/Model/OnlyWarned/OnlyErrors/ReplayOf, and
+// CountRequests/CountWarnings honor their List twin's predicates while
+// ignoring Limit/Offset (a total that shrank to the page size would defeat
+// the count).
 type Filter struct {
 	Limit      int // 0 means DefaultLimit, never unbounded
+	Offset     int // 0 means start at the top; a negative offset is clamped to 0
 	Since      time.Time
 	SessionID  string
 	Model      string
