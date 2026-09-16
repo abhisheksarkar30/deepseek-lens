@@ -57,7 +57,17 @@ ADR).
 
 ## Last generated / refreshed
 
-2026-09-16, REFRESH mode, scoped to the GI-15 pagination story (`GI-15-pagination` branch) — the
+2026-09-17, REFRESH mode, scoped to the GI-17 pricing-retention-purge story
+(`GI-17-pricing-retention-purge` branch) — `retention_days` config and the scheduled/startup purge,
+`GET /api/prices` / `POST /api/prices`, `GET /api/retention` / `POST /api/purge`, the twelfth CLI
+subcommand `lens purge`, and the Settings tab. This is also the bead (br-GI-17-11) that amended
+`CLAUDE.md`'s single-writer invariant: SQLite now has **two** writers (ingest via the consumer
+goroutine, and purge — in-process sharing the same connection, or `lens purge` in a separate process
+serialized cross-process by WAL/`busy_timeout`), and the dashboard now has **three** write routes
+(replay, prices, purge) behind one shared Origin/Host allowlist rather than one
+(`architecture.md`, `api-surface.md`, `security-and-permissions.md`, `data-model.md`).
+
+Previously: 2026-09-16, REFRESH mode, scoped to the GI-15 pagination story (`GI-15-pagination` branch) — the
 pagination contract on the three list routes (`?limit`/`?offset`, and the `X-Total-Count`/`X-Limit`/
 `X-Offset` **response headers**, with `X-Limit` reporting the *applied* page size), the new
 unpaginated `GET /api/warnings/summary` route, the `idx_warnings_kind_severity_created_at` index and

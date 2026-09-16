@@ -21,12 +21,16 @@ JSON API is documented here. Registered in the `mux.Handle*` block at
 | GET | `/api/sessions/{id}` | none | One session + its calls (chronological) + union of its warnings | `sessionDetail{*store.Session, Calls, Warnings}` | [internal/api/api.go:804-851](../../internal/api/api.go) |
 | GET | `/api/stream` | none | Server-Sent Events feed of `{type:"request", id}` / `{type:"warnings", id, warnings}` events | SSE `text/event-stream` | [internal/api/api.go:852-903](../../internal/api/api.go) |
 | GET | `/api/health` | none | Sink accepted/dropped counts, consumer processed/failed/flushes, last-write age, `replay_enabled` | `healthResponse` | [internal/api/api.go:904-923](../../internal/api/api.go) |
+| GET | `/api/prices` | none | Effective price table, resolved fresh from `~/.deepseek-lens/prices.toml` on every call (no cache) | `pricesResponse{Path, PeakMultiplier, Models}` | [internal/api/prices.go:35-52](../../internal/api/prices.go) |
+| POST | `/api/prices` | **Origin/Host allowlist** (`replayOriginReject`, action `"prices"`) | Replaces one model's rates wholesale (whole-row write, D3); an omitted field and an explicit `null` both unset it | `pricesResponse` (the post-write table) | [internal/api/prices.go:82-120](../../internal/api/prices.go) |
+| GET | `/api/retention` | none | Retention config plus both purge previews (age-based and unpriced) in one round trip, so a confirm dialog shows a real count | `retentionResponse` | [internal/api/purge.go:19-81](../../internal/api/purge.go) |
+| POST | `/api/purge` | **Origin/Host allowlist** (`replayOriginReject`, action `"purge"`) | Deletes rows by `mode`: `older_than` (requires `days > 0`) or `unpriced` — the destructive route | `purgeResponse{Mode, Deleted, SessionsReconciled}` | [internal/api/purge.go:104-152](../../internal/api/purge.go) |
 | GET/* | `/` (catch-all) | none | Serves the embedded dashboard static assets (`internal/web`) | HTML/CSS/JS | [internal/api/api.go:97](../../internal/api/api.go) |
 
 Every GET route but the catch-all is wrapped by `methodGet`, which rejects non-GET methods with a
-JSON 405 ([internal/api/api.go:105-113](../../internal/api/api.go)). All routes except replay are
-read-only and rely on loopback binding for their "no auth needed" rationale
-([internal/api/api.go:96-104](../../internal/api/api.go), and see
+JSON 405 ([internal/api/api.go:105-113](../../internal/api/api.go)). All routes **except the three
+POST write routes** (replay, prices, purge) are read-only and rely on loopback binding for their "no
+auth needed" rationale ([internal/api/api.go:96-104](../../internal/api/api.go), and see
 [security-and-permissions.md](security-and-permissions.md)).
 
 ### Pagination contract (the three list routes)
@@ -67,18 +71,24 @@ problem the summary exists to fix. Its *query* is unbounded (counting correctly 
 warning); the covering index `idx_warnings_kind_severity_created_at` keeps that cheap — see
 [data-model.md](data-model.md).
 
-### Replay's guard (the one write route)
+### The three write routes' shared guard
 
-`POST /api/requests/{id}/replay` is the project's only billable, state-changing route. It is gated by:
+`replayOriginReject` ([internal/api/api.go:639-697](../../internal/api/api.go)) is one Origin/Host
+allowlist, parameterized by an `action` string for its error message, applied before any bytes are
+sent or any row is touched. All three write routes call it — nothing here is replay-specific
+anymore:
 
-1. `replayEnabled` — off by default; `lens serve --replay` turns it on
-   ([internal/api/api.go:357-362](../../internal/api/api.go)).
-2. An Origin/Host allowlist (`replayOriginReject`) applied before any bytes are sent —
-   [internal/api/api.go:604-626](../../internal/api/api.go). Full rationale in
-   [security-and-permissions.md](security-and-permissions.md).
+1. `POST /api/requests/{id}/replay` — the project's **only billable** route, and the only one gated
+   by an additional opt-in flag (`replayEnabled`, off by default; `lens serve --replay` turns it on,
+   [internal/api/api.go:357-362](../../internal/api/api.go)). Query params: `?set=<jsonpath>=<value>`
+   (repeatable, body edits) and `?no_capture=true` (send without recording).
+2. `POST /api/prices` — always on; rejects malformed/unknown-field bodies and invalid rates before
+   writing (see [internal/api/prices.go](../../internal/api/prices.go)).
+3. `POST /api/purge` — always on; the **destructive** one. `mode: "older_than"` additionally requires
+   `days > 0` (400 otherwise), and `mode: "unpriced"` ignores `days` entirely — see
+   [internal/api/purge.go](../../internal/api/purge.go).
 
-Query params: `?set=<jsonpath>=<value>` (repeatable, body edits) and `?no_capture=true` (send without
-recording).
+Full guard rationale in [security-and-permissions.md](security-and-permissions.md).
 
 ## Async messaging
 
@@ -90,10 +100,15 @@ is dropped (buffer of 64) rather than allowed to block a publish.
 
 ## Scheduled / CLI triggers
 
-No cron/scheduler. Every non-`serve` trigger is a `lens` CLI subcommand — see
-[cli-and-tooling.md](cli-and-tooling.md) for the full table. `lens replay` is the one CLI command
-that itself calls the dashboard's write route (`POST /api/requests/{id}/replay`) over HTTP rather than
-touching the store directly — [internal/cli/replay.go](../../internal/cli/replay.go).
+No cron/scheduler, except the in-process purge: `lens serve` runs a 24-hour ticker that calls the same
+`PurgeOlderThan` the `POST /api/purge` route calls, using `retention_days` — see
+[internal/cli/serve.go](../../internal/cli/serve.go). Every non-`serve` trigger is a `lens` CLI
+subcommand — see [cli-and-tooling.md](cli-and-tooling.md) for the full table. `lens replay` is the
+one CLI command that calls a dashboard write route (`POST /api/requests/{id}/replay`) over HTTP
+rather than touching the store directly — [internal/cli/replay.go](../../internal/cli/replay.go).
+`lens purge` is the opposite case: the one CLI command that opens the store and writes to it
+directly, deliberately not going through the API — see [internal/cli/purge.go](../../internal/cli/purge.go)
+and CLAUDE.md's two-writers invariant.
 
 ## Representative payloads
 
