@@ -68,8 +68,9 @@ type api struct {
 // /api/* (including the /api/stream SSE endpoint) plus assets served from
 // the embedded internal/web filesystem at every other path. Handlers are
 // thin per the bead: parse query params into a store.Filter, call st, encode
-// JSON — no business logic here (grouping, e.g. for the warning inbox, is
-// the dashboard JS's job).
+// JSON — no business logic here. Grouping that has to be correct over the
+// whole table (the warning inbox's per-kind totals) therefore lives in SQL,
+// in store.WarningSummary, and is served by /api/warnings/summary.
 //
 // proxyHandler is the one write path this package owns: POST
 // /api/requests/{id}/replay re-issues a captured request through it, so the
@@ -84,6 +85,10 @@ func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, asset
 	mux.HandleFunc("/api/requests/{id}", methodGet(a.getRequest))
 	mux.HandleFunc("POST /api/requests/{id}/replay", a.replay)
 	mux.HandleFunc("/api/stats", methodGet(a.stats))
+	// Registered before /api/warnings, which as a prefix pattern would
+	// otherwise also match this path. Go's ServeMux prefers the more
+	// specific pattern either way; the order here is for the reader.
+	mux.HandleFunc("/api/warnings/summary", methodGet(a.warningsSummary))
 	mux.HandleFunc("/api/warnings", methodGet(a.listWarnings))
 	mux.HandleFunc("/api/sessions", methodGet(a.listSessions))
 	mux.HandleFunc("/api/sessions/{id}", methodGet(a.getSession))
@@ -677,6 +682,40 @@ func (a *api) stats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// warningsSummary serves the warning inbox's groups: one entry per distinct
+// (kind, severity), with a count taken over the entire matching set.
+//
+// The count has to come from SQL and not from a page of rows, because
+// grouping and pagination do not compose — a page of N rows cannot yield a
+// correct global per-kind total, however large N is. This is what fixes the
+// latent undercount: the dashboard used to group at most DefaultLimit raw
+// rows, so any kind with more occurrences than that reported a wrong count.
+//
+// There is deliberately no limit or offset, and none should be added. A
+// GROUP BY result set is bounded by the number of distinct (kind, severity)
+// pairs, not by row count, so it cannot grow with the table — and a
+// paginated summary would put the UI right back where this ticket found it,
+// unable to state a true group total. The *query* is unbounded, since
+// counting correctly means scanning every warning; br-GI-15-01's covering
+// index is what keeps that scan cheap.
+func (a *api) warningsSummary(w http.ResponseWriter, r *http.Request) {
+	since, err := parseSinceParam(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	q := r.URL.Query()
+	// No Limit/Offset: the request carries none and the store reads none.
+	groups, err := a.store.WarningSummary(r.Context(), store.Filter{
+		Since: since, Kind: q.Get("kind"), Severity: q.Get("severity"),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, groups)
+}
+
 func (a *api) listWarnings(w http.ResponseWriter, r *http.Request) {
 	limit, err := parseLimit(r)
 	if err != nil {
@@ -757,9 +796,8 @@ type sessionDetail struct {
 	Calls []*store.Request `json:"calls"`
 	// Warnings is the union of every warning raised across the session's
 	// calls, one entry per occurrence. Grouping them into one line per kind
-	// is the dashboard's job (see this package's New doc comment) — but the
-	// union has to be assembled here, because only the server knows which
-	// requests belong to the session.
+	// is the dashboard's job — but the union has to be assembled here,
+	// because only the server knows which requests belong to the session.
 	Warnings []*store.Warning `json:"warnings"`
 }
 
