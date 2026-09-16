@@ -13,11 +13,20 @@ feature will ever need already exists in the schema, even columns only a later f
 |---|---|---|---|---|
 | `requests` | One row per proxied (or replayed) call | `id` PK, `started_at`, `method`/`path`/`status`, `req_body`/`resp_body` (BLOB, redacted+capped), `input_tokens`/`output_tokens`, `model_requested`/`model_resolved`, `session_id`, `cost_usd`/`cost_source`, `replay_of`/`replay_edits`, `prefix_hash` | Index on `started_at`, index on `session_id` | [internal/store/schema.sql:10-41](../../internal/store/schema.sql) |
 | `sessions` | Agentic-run grouping with incrementally maintained totals | `id` PK (format `s_<unix-ms>_<8hex>`), `prefix_hash` (nullable, see below), `first_seen`/`last_seen`, `request_count`, `total_input_tokens`/`total_output_tokens`/`total_cost_usd`, `priced_count`/`unpriced_count`, `model_set`, `warning_count` | Index on `prefix_hash` | [internal/store/schema.sql:50-65](../../internal/store/schema.sql) |
-| `warnings` | One row per analyzer finding attached to a request | `id` PK, `request_id` FK (no enforced FK constraint), `kind`, `severity`, `detail`, `path`, `created_at` | Index on `request_id` | [internal/store/schema.sql:67-77](../../internal/store/schema.sql) |
+| `warnings` | One row per analyzer finding attached to a request | `id` PK, `request_id` FK → `requests(id)` (`ON DELETE CASCADE`), `kind`, `severity`, `detail`, `path`, `created_at` | Index on `request_id`; covering index on `(kind, severity, created_at)` for `WarningSummary`'s `GROUP BY` | [internal/store/schema.sql:72-89](../../internal/store/schema.sql) |
+
+The `warnings` FK **is** enforced: the DSN sets `_pragma=foreign_keys(ON)`
+([internal/store/store.go:43](../../internal/store/store.go)). `PurgeOlderThan` does not lean on the
+cascade anyway — it deletes warnings explicitly before deleting their requests, both inside one
+transaction ([internal/store/store.go:879-884](../../internal/store/store.go)).
 
 Go types mirroring these tables live in
 [internal/store/types.go](../../internal/store/types.go): `Request`, `Session`, `Warning`, plus
-query-only shapes `Filter`, `Summary`, `ModelStat`, `DayStat`, `CostSourceStat`.
+the query-only shapes `Filter`, `Summary`, `ModelStat`, `DayStat`, `CostSourceStat`, and
+`WarningGroup` (one row of `WarningSummary`'s result: a `(kind, severity)` pair, its `Count`, and its
+`LastSeen`). `WarningGroup` carries **no `json` tags**, matching the convention for every type
+crossing the API/SSE broker — so its served keys are the capitalized Go field names and
+`internal/web/app.js` reads `g.Kind`/`g.Severity`/`g.Count`/`g.LastSeen`, not lowercase.
 
 Times are stored as Unix **nanoseconds** (`INTEGER`), chosen so a Go `time.Time` round-trips exactly
 through `UnixNano()`/`time.Unix(0, ns)`
@@ -89,16 +98,26 @@ treating NULL/empty interchangeably — see [workflows.md](workflows.md)'s sessi
   [internal/store/store.go](../../internal/store/store.go)).
 - **`sessions` rows are upserted incrementally**: `UpsertSession` MAXes `last_seen` and sums the
   running totals per call rather than the session list being an aggregate query over `requests` on
-  every read — see [internal/store/store.go:617-628](../../internal/store/store.go) and
+  every read — see [internal/store/store.go:699-731](../../internal/store/store.go) and
   [internal/session/session.go:113-150](../../internal/session/session.go).
 - **Single-writer discipline**: the store opens one writer connection with `SetMaxOpenConns(1)` and
   up to 4 reader connections in WAL mode, so readers never block on the writer
-  ([internal/store/store.go:71-118](../../internal/store/store.go)). Only the consumer goroutine
+  ([internal/store/store.go:91-131](../../internal/store/store.go)). Only the consumer goroutine
   ever calls a writer method (`InsertRequest(s)`, `InsertWarnings`, `UpsertSession`) — see
   [CLAUDE.md](../../CLAUDE.md)'s "SQLite has exactly one writer" invariant.
 - **Batched writes**: `InsertRequests` commits a whole consumer flush (up to 50 calls) as one
   transaction, falling back to per-row `InsertRequest` calls if the batch fails, so one bad row never
-  costs the rest — [internal/store/store.go:177-204](../../internal/store/store.go).
+  costs the rest — [internal/store/store.go:196-218](../../internal/store/store.go).
+- **Reads are windowed, counts are not**: every list method takes a `Filter` whose `Limit`/`Offset`
+  bound only the rows returned, while the count of that same set is never windowed — a total that
+  shrank to the page size would defeat the count. On the two filtered lists, `/api/requests` and
+  `/api/warnings`, the `Count*` partner reads the same predicates and takes them from one shared
+  where-builder (`requestWhere` at [internal/store/store.go:320](../../internal/store/store.go),
+  `warningWhere` at [internal/store/store.go:746](../../internal/store/store.go)) so the two can never
+  drift; sessions have no filterable column, so `ListSessions` windows the whole table on
+  `last_seen DESC, id DESC` and `CountSessions` counts it with no `Filter` at all. Every
+  list `ORDER BY` ends in `id DESC` so the sort is total: the consumer batch-inserts, so equal
+  timestamps are normal and an unstable sort would make pages overlap or skip rows.
 - **Body capture policy**: `req_body`/`resp_body` are capped at `BodyCapBytes` (default 262144) per
   [internal/config/config.go](../../internal/config/config.go) and redacted of sensitive headers
   before ever reaching the store — see [security-and-permissions.md](security-and-permissions.md).

@@ -97,6 +97,34 @@ h3 { font-size: 0.95rem; color: var(--fg-muted); margin: 20px 0 8px; }
 
 .table-wrap { overflow-x: auto; max-width: 100%; }
 
+/* Pager: shared by the sessions table and the warnings drill-down, so both
+   call sites are one <div class="pager"> and nothing else. */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+  color: var(--fg-muted);
+}
+.pager select {
+  background: var(--bg-alt);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+.pager button {
+  background: var(--bg-alt);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.pager button:disabled { opacity: 0.5; cursor: not-allowed; }
+.pager-count { margin-left: auto; }
+
 table { border-collapse: collapse; width: 100%; min-width: 480px; }
 th, td {
   text-align: left;
