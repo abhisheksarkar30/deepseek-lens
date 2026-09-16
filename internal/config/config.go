@@ -54,6 +54,11 @@ type Config struct {
 	ReplayCostThresholdUSD float64
 	ModelMap               string // client-model → DeepSeek-model table; see DefaultModelMap
 	ModelMaxTokens         string // DeepSeek-model → max_tokens ceiling; see DefaultModelMaxTokens
+	// RetentionDays is how long a request row is kept before serve purges
+	// it; 0 (the default) means keep forever, matching this repo's fail-open
+	// posture — nothing is deleted on an unconfigured install. A negative
+	// value is rejected by Validate.
+	RetentionDays int
 }
 
 // Default returns the built-in defaults.
@@ -75,6 +80,7 @@ func Default() *Config {
 		ReplayCostThresholdUSD: 0.25,
 		ModelMap:               DefaultModelMap,
 		ModelMaxTokens:         DefaultModelMaxTokens,
+		RetentionDays:          0,
 	}
 }
 
@@ -121,6 +127,7 @@ var fieldsByEnv = map[string]string{
 	"LENS_REPLAY_COST_THRESHOLD_USD": "ReplayCostThresholdUSD",
 	"LENS_MODEL_MAP":                 "ModelMap",
 	"LENS_MODEL_MAX_TOKENS":          "ModelMaxTokens",
+	"LENS_RETENTION_DAYS":            "RetentionDays",
 }
 
 func envKV() map[string]string {
@@ -198,6 +205,8 @@ func applyKV(cfg *Config, kv map[string]string) error {
 			cfg.ModelMap = val
 		case "ModelMaxTokens":
 			cfg.ModelMaxTokens = val
+		case "RetentionDays":
+			cfg.RetentionDays, err = strconv.Atoi(val)
 		default:
 			return fmt.Errorf("config: apply: unknown key %q", key)
 		}
@@ -227,6 +236,7 @@ func applyFlags(cfg *Config, args []string) error {
 		"replay needs --yes above this original-call cost in US dollars")
 	fs.StringVar(&cfg.ModelMap, "model-map", cfg.ModelMap, "client-model to DeepSeek-model map, e.g. \"opus:deepseek-v4-pro,*:deepseek-flash\"")
 	fs.StringVar(&cfg.ModelMaxTokens, "model-max-tokens", cfg.ModelMaxTokens, "per-DeepSeek-model max_tokens ceiling, e.g. \"deepseek-v4-pro:64000\"")
+	fs.IntVar(&cfg.RetentionDays, "retention-days", cfg.RetentionDays, "purge requests older than this many days; 0 means keep forever")
 	return fs.Parse(args)
 }
 
@@ -300,6 +310,9 @@ func (c *Config) Validate() error {
 	// replay needs --yes", a legitimate strict setting.
 	if !(c.ReplayCostThresholdUSD >= 0) {
 		return fmt.Errorf("config: validate: ReplayCostThresholdUSD: must be a non-negative number, got %v", c.ReplayCostThresholdUSD)
+	}
+	if c.RetentionDays < 0 {
+		return fmt.Errorf("config: validate: RetentionDays: must not be negative, got %d", c.RetentionDays)
 	}
 	return nil
 }
