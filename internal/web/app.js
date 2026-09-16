@@ -101,14 +101,41 @@ function sevBadge(sev) {
   return `<span class="sev ${cls}">${escapeHtml(sev || "info")}</span>`;
 }
 
-async function fetchJSON(url) {
+// fetchRaw is the one place the response is checked, so the paged and the
+// unpaged paths cannot drift into two different ideas of what a failed request
+// looks like.
+async function fetchRaw(url) {
   const res = await fetch(url);
   if (!res.ok) {
     let msg = res.statusText;
     try { msg = (await res.json()).error || msg; } catch (e) { /* ignore */ }
     throw new Error(`${url}: ${res.status} ${msg}`);
   }
-  return res.json();
+  return res;
+}
+
+async function fetchJSON(url) {
+  return (await fetchRaw(url)).json();
+}
+
+// fetchPage reads a list endpoint's pagination metadata off the response
+// headers. The body stays a bare array — the headers are what carry the total
+// and the applied window — so this returns both rather than the body becoming
+// an envelope. items is defaulted because the store encodes an empty result
+// as null, which would otherwise blow up every caller's .map.
+async function fetchPage(url) {
+  const res = await fetchRaw(url);
+  const items = await res.json();
+  const hdr = (name) => {
+    const n = parseInt(res.headers.get(name), 10);
+    return Number.isFinite(n) ? n : 0;
+  };
+  return {
+    items: items || [],
+    total: hdr("X-Total-Count"),
+    limit: hdr("X-Limit"),
+    offset: hdr("X-Offset"),
+  };
 }
 
 // ---- app state ------------------------------------------------------------
@@ -119,6 +146,13 @@ const state = {
   warnedIds: new Set(),
   warningsCache: [],
   feedRowLimit: 200,
+  // sessionsPage is the sessions table's window. The limit starts at one of
+  // PAGE_SIZES so the select's initial value and the first request's ?limit=
+  // are the same number by construction — they cannot diverge.
+  sessionsPage: { limit: 50, offset: 0 },
+  // sessionsFetchSeq is the last-issued-wins guard over loadSessions; see the
+  // comment there.
+  sessionsFetchSeq: 0,
   // replayEnabled mirrors /api/health's replay_enabled. The detail view offers
   // the replay editor only when it is true: the endpoint answers 403 when
   // replay is off, so the button is inert rather than offered and broken.
@@ -385,14 +419,82 @@ function renderStatsByModel(byModel) {
   </tr>`).join("") || `<tr><td colspan="4" class="hint">No data yet.</td></tr>`;
 }
 
+// ---- pager ------------------------------------------------------------
+
+// PAGE_SIZES is the page-size select's options. Both pager call sites seed
+// their state with one of these, so the server's applied X-Limit is always a
+// value the select can display.
+const PAGE_SIZES = [25, 50, 100, 200];
+
+// renderPager draws page controls into container and calls onPageChange with
+// the new {limit, offset} on interaction. Shared by the sessions table and the
+// warnings drill-down: the only thing the two share is this class, which is
+// what keeps the markup from having to be a template.
+//
+// The select's value comes from the APPLIED limit the server reported, not
+// from a private constant. X-Limit is the size of the page actually fetched,
+// so deriving it from anywhere else would let the shown value, the count
+// label, and the Next/Prev arithmetic disagree with the rows on screen.
+function renderPager(container, page, onPageChange) {
+  const { total, limit, offset } = page;
+  // first is clamped to total as well, not just last. A page past the end is
+  // reachable (delay a Next click past a list that shrank, or the accepted
+  // X-Total-Count staleness), and an unclamped first reads "201-120 of 120" —
+  // a backwards range sitting directly above a "nothing on this page" row.
+  const first = total === 0 ? 0 : Math.min(offset + 1, total);
+  const last = Math.min(offset + limit, total);
+  container.innerHTML = `
+    <label>Rows per page
+      <select class="pager-size">${PAGE_SIZES.map(
+        (n) => `<option value="${n}"${n === limit ? " selected" : ""}>${n}</option>`).join("")}</select>
+    </label>
+    <button class="pager-prev" type="button"${offset > 0 ? "" : " disabled"}>&laquo; Prev</button>
+    <button class="pager-next" type="button"${offset + limit < total ? "" : " disabled"}>Next &raquo;</button>
+    <span class="pager-count">${first}&ndash;${last} of ${total}</span>`;
+
+  const select = container.querySelector(".pager-size");
+  select.addEventListener("change", () => {
+    // Resizing always returns to the top. Keeping the offset would land a user
+    // on page 3 of 100-row pages at item 200 *of 25-row pages* — a page they
+    // never chose, reading as missing data.
+    onPageChange({ limit: parseInt(select.value, 10), offset: 0 });
+  });
+  container.querySelector(".pager-prev").addEventListener("click", () => {
+    onPageChange({ limit, offset: Math.max(0, offset - limit) });
+  });
+  container.querySelector(".pager-next").addEventListener("click", () => {
+    onPageChange({ limit, offset: offset + limit });
+  });
+}
+
 // ---- sessions ---------------------------------------------------------
 
 async function loadSessions() {
+  // Last-issued-wins. The pager is exactly the surface that invites rapid
+  // repeated triggers — double-clicking Next, or changing the page size right
+  // after a Next click — and two fetches can be in flight with the slower,
+  // EARLIER one resolving last and overwriting the page the user asked for.
+  const seq = ++state.sessionsFetchSeq;
+  const { limit, offset } = state.sessionsPage;
   try {
     document.getElementById("session-detail").hidden = true; // a reload invalidates any open drill-down
-    const sessions = await fetchJSON("/api/sessions");
+    const page = await fetchPage(`/api/sessions?limit=${limit}&offset=${offset}`);
+    if (seq !== state.sessionsFetchSeq) return;
+
+    // Take the applied window from the response so the next Next/Prev moves
+    // from the page that is actually on screen.
+    state.sessionsPage = { limit: page.limit || limit, offset: page.offset };
+
+    // "Empty" has two causes now, and they must not read the same. A valid
+    // page past the end is reachable through the accepted X-Total-Count
+    // staleness, and telling a user who asked for page 9 that no sessions
+    // were recorded turns a staleness blip into the appearance of data loss.
+    const emptyHint = page.offset > 0
+      ? "No sessions on this page — the list has shrunk since it was loaded."
+      : "No sessions recorded yet.";
+
     const body = document.getElementById("sessions-body");
-    body.innerHTML = (sessions || []).map((s) => `<tr data-id="${escapeHtml(s.ID)}">
+    body.innerHTML = page.items.map((s) => `<tr data-id="${escapeHtml(s.ID)}">
       <td>${escapeHtml(s.ID)}</td>
       <td>${relTime(s.FirstSeen)}</td>
       <td>${fmtSpanMs(new Date(s.LastSeen) - new Date(s.FirstSeen))}</td>
@@ -400,9 +502,13 @@ async function loadSessions() {
       <td>${fmtTokens((s.TotalInputTokens || 0) + (s.TotalOutputTokens || 0))}</td>
       <td>${fmtCostTotal(s.TotalCostUSD, s.UnpricedCount || 0)}</td>
       <td>${s.WarningCount ? warnBadge(s.WarningCount, "click the session to list them") : ""}</td>
-    </tr>`).join("") || `<tr><td colspan="7" class="hint">No sessions recorded yet.</td></tr>`;
+    </tr>`).join("") || `<tr><td colspan="7" class="hint">${emptyHint}</td></tr>`;
     body.querySelectorAll("tr[data-id]").forEach((row) => {
       row.addEventListener("click", () => openSession(row.dataset.id));
+    });
+    renderPager(document.getElementById("sessions-pager"), page, (next) => {
+      state.sessionsPage = next;
+      loadSessions();
     });
   } catch (e) {
     console.error("loadSessions", e);
