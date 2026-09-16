@@ -21,8 +21,9 @@ slow both in SQL (full scans) and in the browser (large DOM tables). This plan a
 offset/limit pagination — with a selectable per-page size — to the APIs and to the two UI views
 where it actually pays for itself. GitHub issue: https://github.com/abhisheksarkar30/deepseek-lens/issues/15.
 
-This is Phase 1+2 of the flywheel only (intake + plan) — the user explicitly asked for a plan,
-not beadify/implementation. No code changes are made in this pass.
+Phases 1-2 of the flywheel (intake + plan) produced this document; Phase 3 (beadify) then split it
+into `.beads/GI-15/br-GI-15-01` … `-08`. No source changes are made by either pass — implementation
+is Phase 5 and is not part of this plan's scope.
 
 ## Design decisions (and what's deliberately left out)
 
