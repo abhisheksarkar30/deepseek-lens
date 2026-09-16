@@ -149,6 +149,7 @@ func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, asset
 	mux.HandleFunc("/api/sessions/{id}", methodGet(a.getSession))
 	mux.HandleFunc("/api/stream", methodGet(a.stream))
 	mux.HandleFunc("/api/health", methodGet(a.health))
+	mux.HandleFunc("/api/prices", methodGet(a.getPrices))
 	mux.Handle("/", http.FileServer(http.FS(assets)))
 	a.mux = mux
 	return a
