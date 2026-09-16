@@ -545,6 +545,25 @@ func TestPricesRejectsBadRateWithoutWriting(t *testing.T) {
 	}
 }
 
+// TestPricesRejectsInjectedModelName covers br-GI-17-01: a model name
+// containing a newline is the CLI's pre-existing injection hole ($'evil\nx.input=1'
+// writes two parseable lines) and must now be refused by the shared
+// pricing.CheckModel guard, with the file left unwritten.
+func TestPricesRejectsInjectedModelName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prices.toml")
+	var buf bytes.Buffer
+	err := runPrices([]string{"--set", "evil\nx.input=1"}, &buf, path)
+	if err == nil {
+		t.Fatal("--set with a newline in the model name was accepted")
+	}
+	if !strings.Contains(err.Error(), "invalid model name") {
+		t.Errorf("error = %q, want it to name the shared check's rejection", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a rejected --set still wrote %s (stat err = %v)", path, err)
+	}
+}
+
 func TestPricesPrintsTheShippedTableWithNoFlags(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "prices.toml") // never written
 
