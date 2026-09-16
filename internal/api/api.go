@@ -131,6 +131,54 @@ func parseLimit(r *http.Request) (int, error) {
 	return n, nil
 }
 
+// parseOffset reads ?offset, defaulting to 0. A negative offset is rejected
+// rather than clamped, mirroring parseLimit — so no handler ever needs to
+// resolve an effective offset: absent → 0 *is* the effective offset.
+func parseOffset(r *http.Request) (int, error) {
+	s := r.URL.Query().Get("offset")
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid offset %q: want a non-negative integer", s)
+	}
+	return n, nil
+}
+
+// effectiveLimit resolves the page size the store will actually apply, so a
+// handler can report it while the store's own clamp is out of reach. The
+// duplication of store's Limit <= 0 → DefaultLimit rule is deliberate: a
+// header that disagrees with the rows on screen is worse than one line of
+// arithmetic in two places.
+func effectiveLimit(limit int) int {
+	if limit <= 0 {
+		return store.DefaultLimit
+	}
+	return limit
+}
+
+// writePageHeaders sets the pagination metadata that rides on response
+// headers rather than in the body, so list responses stay the bare JSON
+// arrays every existing consumer already decodes.
+//
+// It must run before writeJSON, which calls WriteHeader — headers set after
+// that are silently dropped, and the bug would surface only as three missing
+// headers in a browser.
+//
+// limit is the EFFECTIVE page size, not the requested one. The two differ
+// whenever ?limit is absent: that parses to 0, which the store clamps to
+// DefaultLimit, so the response must say 1000 rather than 0. A header-driven
+// consumer computes nextOffset = offset + X-Limit, and the raw 0 would leave
+// it stuck on page 1 forever with no error to explain why. Callers pass
+// effectiveLimit(limit); offsets need no such resolution.
+func writePageHeaders(w http.ResponseWriter, total, limit, offset int) {
+	h := w.Header()
+	h.Set("X-Total-Count", strconv.Itoa(total))
+	h.Set("X-Limit", strconv.Itoa(limit))
+	h.Set("X-Offset", strconv.Itoa(offset))
+}
+
 // parseSinceParam reads ?since as a Go duration ("24h") or an RFC3339
 // timestamp, mirroring internal/cli's parseSince. Absent means the zero
 // Time, which every store method already treats as "since the beginning of
@@ -167,6 +215,11 @@ func (a *api) listRequests(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	offset, err := parseOffset(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	since, err := parseSinceParam(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -185,6 +238,7 @@ func (a *api) listRequests(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := store.Filter{
 		Limit:      limit,
+		Offset:     offset,
 		Since:      since,
 		SessionID:  q.Get("session"),
 		Model:      q.Get("model"),
@@ -197,6 +251,14 @@ func (a *api) listRequests(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// The same filter, so the total counts exactly the set the page was
+	// drawn from — CountRequests ignores Limit/Offset itself.
+	total, err := a.store.CountRequests(r.Context(), f)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writePageHeaders(w, total, effectiveLimit(limit), offset)
 	writeJSON(w, http.StatusOK, reqs)
 }
 
@@ -621,32 +683,64 @@ func (a *api) listWarnings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	offset, err := parseOffset(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	since, err := parseSinceParam(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	q := r.URL.Query()
-	f := store.Filter{Limit: limit, Since: since, Kind: q.Get("kind"), Severity: q.Get("severity")}
+	f := store.Filter{
+		Limit: limit, Offset: offset, Since: since,
+		Kind: q.Get("kind"), Severity: q.Get("severity"),
+	}
 
 	warnings, err := a.store.ListWarnings(r.Context(), f)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, warnings)
-}
-
-func (a *api) listSessions(w http.ResponseWriter, r *http.Request) {
-	// Every row store.ListSessions returns is maintained incrementally by
-	// store.UpsertSession, which br-GI-1-12's consumer step calls once per
-	// captured call. The aggregates on each row therefore need no work here.
-	// The zero Filter means "default limit, offset 0".
-	sessions, err := a.store.ListSessions(r.Context(), store.Filter{})
+	total, err := a.store.CountWarnings(r.Context(), f)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	writePageHeaders(w, total, effectiveLimit(limit), offset)
+	writeJSON(w, http.StatusOK, warnings)
+}
+
+func (a *api) listSessions(w http.ResponseWriter, r *http.Request) {
+	limit, err := parseLimit(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	offset, err := parseOffset(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Every row store.ListSessions returns is maintained incrementally by
+	// store.UpsertSession, which br-GI-1-12's consumer step calls once per
+	// captured call. The aggregates on each row therefore need no work here.
+	sessions, err := a.store.ListSessions(r.Context(), store.Filter{Limit: limit, Offset: offset})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// CountSessions takes no Filter: sessions have no filterable column, so
+	// the total is simply the whole table.
+	total, err := a.store.CountSessions(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writePageHeaders(w, total, effectiveLimit(limit), offset)
 	writeJSON(w, http.StatusOK, sessions)
 }
 
