@@ -513,10 +513,11 @@ func (a *api) replay(w http.ResponseWriter, r *http.Request) {
 // of its own is the design: the request picks up the same transport, the same
 // streaming rewrite, the same tee, the same body cap and the same header
 // redaction as live traffic, and the call it produces reaches SQLite through
-// the consumer's single writer, which CLAUDE.md requires ("SQLite has exactly
-// one writer: the consumer goroutine"). proxy.WithReplay is what carries the
-// replay_of/replay_edits linkage across, since the Handler sees only the
-// request.
+// the consumer's single writer — the one that ingests rows, per CLAUDE.md's
+// invariant (row ingest has exactly one writer; a purge is a different,
+// additional writer — see internal/store's package doc). proxy.WithReplay is
+// what carries the replay_of/replay_edits linkage across, since the Handler
+// sees only the request.
 //
 // The response is written to a statusRecorder, which records the status and
 // discards the body — the proxy's own tee already captured it, so keeping a

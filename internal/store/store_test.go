@@ -579,12 +579,12 @@ func TestPurgeOlderThan(t *testing.T) {
 		t.Fatalf("InsertRequest(newer): %v", err)
 	}
 
-	n, err := s.PurgeOlderThan(ctx, cutoff)
+	res, err := s.PurgeOlderThan(ctx, cutoff)
 	if err != nil {
 		t.Fatalf("PurgeOlderThan: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("PurgeOlderThan: removed %d want 1", n)
+	if res.Deleted != 1 {
+		t.Fatalf("PurgeOlderThan: removed %d want 1", res.Deleted)
 	}
 
 	if _, err := s.GetRequest(ctx, oldID); !errors.Is(err, sql.ErrNoRows) {
@@ -675,6 +675,423 @@ func TestPurgeOlderThanReconcilesSessionAggregates(t *testing.T) {
 
 	if _, err := s.GetSession(ctx, "emptied"); !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("emptied session should be deleted once its only request is purged, got err=%v", err)
+	}
+}
+
+// mkCostRow inserts a request with no session and the given cost_source,
+// cost_usd and input_tokens — the fields purgeUnpricedWhere's predicate
+// reads. Used by the PurgeUnpriced tests below, which don't care about
+// session reconciliation (that is covered separately).
+func mkCostRow(t *testing.T, s *Store, costSource *string, costUSD *float64, tokens int) int64 {
+	t.Helper()
+	r := fullRequest()
+	r.SessionID = nil
+	r.SessionHeader = nil
+	r.CostSource = costSource
+	r.CostUSD = costUSD
+	r.InputTokens = tokens
+	r.OutputTokens = 0
+	r.CacheCreationTokens = 0
+	r.CacheReadTokens = 0
+	id, err := s.InsertRequest(context.Background(), r)
+	if err != nil {
+		t.Fatalf("InsertRequest: %v", err)
+	}
+	return id
+}
+
+// TestPurgeUnpricedDeletesOnlyTheD5Predicate is the discriminating test for
+// the whole predicate: it seeds every class the COALESCE and the
+// positive-token conjunct are meant to tell apart, and only one of them
+// must be deleted. It fails if the token conjunct is dropped (the
+// zero-token unpriced row would also be deleted) and it fails if the
+// COALESCE is dropped for a bare NULL test (the unknown-model row would be
+// swept in).
+func TestPurgeUnpricedDeletesOnlyTheD5Predicate(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	configured, unknown, unpriced := "configured", "unknown-model", "unpriced"
+	cost := 0.5
+
+	pricedID := mkCostRow(t, s, &configured, &cost, 100)
+	unknownID := mkCostRow(t, s, &unknown, nil, 100)
+	unpricedZeroTokensID := mkCostRow(t, s, &unpriced, nil, 0)
+	unpricedWithTokensID := mkCostRow(t, s, &unpriced, nil, 100)
+	nullSourceWithTokensID := mkCostRow(t, s, nil, nil, 50) // COALESCE folds this into "unpriced"
+
+	res, err := s.PurgeUnpriced(ctx)
+	if err != nil {
+		t.Fatalf("PurgeUnpriced: %v", err)
+	}
+	if res.Deleted != 2 {
+		t.Errorf("Deleted = %d, want 2 (only the two unpriced-with-tokens rows)", res.Deleted)
+	}
+
+	for _, id := range []int64{pricedID, unknownID, unpricedZeroTokensID} {
+		if _, err := s.GetRequest(ctx, id); err != nil {
+			t.Errorf("request %d should survive PurgeUnpriced: %v", id, err)
+		}
+	}
+	for _, id := range []int64{unpricedWithTokensID, nullSourceWithTokensID} {
+		if _, err := s.GetRequest(ctx, id); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("request %d should have been purged: err=%v", id, err)
+		}
+	}
+}
+
+// TestPurgeUnpricedEmptyMatchTouchesNothing pins that a purge over an empty
+// match returns a zero PurgeResult and reconciles no session row — the
+// baseline every other assertion in this file assumes.
+func TestPurgeUnpricedEmptyMatchTouchesNothing(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	configured := "configured"
+	cost := 0.5
+	mkCostRow(t, s, &configured, &cost, 100)
+
+	res, err := s.PurgeUnpriced(ctx)
+	if err != nil {
+		t.Fatalf("PurgeUnpriced: %v", err)
+	}
+	if res != (PurgeResult{}) {
+		t.Errorf("PurgeUnpriced over an empty match = %+v, want the zero value", res)
+	}
+}
+
+// TestPreviewAgreesWithPurgeByConstruction asserts, for both predicate
+// pairs, that the preview's count and bytes equal what the corresponding
+// purge then actually deletes — the "agree by construction" design claim
+// (D5/D6), tested rather than merely commented.
+func TestPreviewAgreesWithPurgeByConstruction(t *testing.T) {
+	ctx := context.Background()
+	body := bytes.Repeat([]byte("x"), 100)
+
+	t.Run("older-than", func(t *testing.T) {
+		s := newTestStore(t)
+		cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		configured := "configured"
+		cost := 0.5
+
+		mk := func(startedAt time.Time) {
+			r := fullRequest()
+			r.SessionID, r.SessionHeader = nil, nil
+			r.StartedAt = startedAt
+			r.CostSource, r.CostUSD = &configured, &cost
+			r.ReqBody, r.RespBody = body, body
+			if _, err := s.InsertRequest(ctx, r); err != nil {
+				t.Fatalf("InsertRequest: %v", err)
+			}
+		}
+		mk(cutoff.Add(-2 * time.Hour))
+		mk(cutoff.Add(-time.Hour))
+		mk(cutoff.Add(time.Hour)) // survives: after cutoff
+
+		count, _, _, err := s.CountPurgeable(ctx, cutoff)
+		if err != nil {
+			t.Fatalf("CountPurgeable: %v", err)
+		}
+		previewBytes, err := s.PurgeableBytes(ctx, cutoff)
+		if err != nil {
+			t.Fatalf("PurgeableBytes: %v", err)
+		}
+
+		res, err := s.PurgeOlderThan(ctx, cutoff)
+		if err != nil {
+			t.Fatalf("PurgeOlderThan: %v", err)
+		}
+		if int64(count) != res.Deleted {
+			t.Errorf("preview count = %d, delete count = %d, want equal", count, res.Deleted)
+		}
+		wantBytes := int64(count) * int64(len(body)*2)
+		if previewBytes != wantBytes {
+			t.Errorf("preview bytes = %d, want %d (count * body size)", previewBytes, wantBytes)
+		}
+	})
+
+	t.Run("unpriced", func(t *testing.T) {
+		s := newTestStore(t)
+		unpriced, configured := "unpriced", "configured"
+		cost := 0.5
+
+		mk := func(costSource *string, costUSD *float64, tokens int) {
+			r := fullRequest()
+			r.SessionID, r.SessionHeader = nil, nil
+			r.CostSource, r.CostUSD = costSource, costUSD
+			r.InputTokens, r.OutputTokens, r.CacheCreationTokens, r.CacheReadTokens = tokens, 0, 0, 0
+			r.ReqBody, r.RespBody = body, body
+			if _, err := s.InsertRequest(ctx, r); err != nil {
+				t.Fatalf("InsertRequest: %v", err)
+			}
+		}
+		mk(&unpriced, nil, 100)
+		mk(&unpriced, nil, 50)
+		mk(&configured, &cost, 100) // survives: priced
+
+		count, err := s.CountUnpriced(ctx)
+		if err != nil {
+			t.Fatalf("CountUnpriced: %v", err)
+		}
+		previewBytes, err := s.UnpricedBytes(ctx)
+		if err != nil {
+			t.Fatalf("UnpricedBytes: %v", err)
+		}
+
+		res, err := s.PurgeUnpriced(ctx)
+		if err != nil {
+			t.Fatalf("PurgeUnpriced: %v", err)
+		}
+		if int64(count) != res.Deleted {
+			t.Errorf("preview count = %d, delete count = %d, want equal", count, res.Deleted)
+		}
+		wantBytes := int64(count) * int64(len(body)*2)
+		if previewBytes != wantBytes {
+			t.Errorf("preview bytes = %d, want %d (count * body size)", previewBytes, wantBytes)
+		}
+	})
+}
+
+// TestPreviewsOverEmptyEligibleSetsAreZeroNotError covers the state a
+// days-larger-than-the-data's-age or a freshly-installed database is in:
+// zero eligible rows, reported as a clean zero rather than an error, and
+// oldest/newest nil (not a zero time.Time).
+func TestPreviewsOverEmptyEligibleSetsAreZeroNotError(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	configured := "configured"
+	cost := 0.5
+	mkCostRow(t, s, &configured, &cost, 100)
+
+	// A cutoff before every row: nothing is eligible for older-than.
+	cutoff := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	count, oldest, newest, err := s.CountPurgeable(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("CountPurgeable: %v", err)
+	}
+	if count != 0 || oldest != nil || newest != nil {
+		t.Errorf("CountPurgeable = (%d, %v, %v), want (0, nil, nil)", count, oldest, newest)
+	}
+	purgeableBytes, err := s.PurgeableBytes(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("PurgeableBytes: %v", err)
+	}
+	if purgeableBytes != 0 {
+		t.Errorf("PurgeableBytes = %d, want 0", purgeableBytes)
+	}
+
+	// No unpriced rows at all (the seeded row is priced).
+	unprCount, err := s.CountUnpriced(ctx)
+	if err != nil {
+		t.Fatalf("CountUnpriced: %v", err)
+	}
+	if unprCount != 0 {
+		t.Errorf("CountUnpriced = %d, want 0", unprCount)
+	}
+	unprBytes, err := s.UnpricedBytes(ctx)
+	if err != nil {
+		t.Fatalf("UnpricedBytes: %v", err)
+	}
+	if unprBytes != 0 {
+		t.Errorf("UnpricedBytes = %d, want 0", unprBytes)
+	}
+}
+
+// TestPurgePreviewPairsAreNotInterchangeable proves the older-than and D5
+// preview pairs are wired to different predicates: with both an aged set
+// and an unpriced set present (and disjoint from each other), the two
+// counts must differ.
+func TestPurgePreviewPairsAreNotInterchangeable(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	configured, unpriced := "configured", "unpriced"
+	cost := 0.5
+
+	// Two aged, priced rows (eligible for older-than, not for unpriced).
+	for i := 0; i < 2; i++ {
+		r := fullRequest()
+		r.SessionID, r.SessionHeader = nil, nil
+		r.StartedAt = cutoff.Add(-time.Hour)
+		r.CostSource, r.CostUSD = &configured, &cost
+		if _, err := s.InsertRequest(ctx, r); err != nil {
+			t.Fatalf("InsertRequest: %v", err)
+		}
+	}
+	// One recent, unpriced-with-tokens row (eligible for unpriced, not for
+	// older-than).
+	r := fullRequest()
+	r.SessionID, r.SessionHeader = nil, nil
+	r.StartedAt = cutoff.Add(time.Hour)
+	r.CostSource, r.CostUSD = &unpriced, nil
+	r.InputTokens, r.OutputTokens, r.CacheCreationTokens, r.CacheReadTokens = 10, 0, 0, 0
+	if _, err := s.InsertRequest(ctx, r); err != nil {
+		t.Fatalf("InsertRequest: %v", err)
+	}
+
+	agedCount, _, _, err := s.CountPurgeable(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("CountPurgeable: %v", err)
+	}
+	unprCount, err := s.CountUnpriced(ctx)
+	if err != nil {
+		t.Fatalf("CountUnpriced: %v", err)
+	}
+	if agedCount != 2 {
+		t.Errorf("CountPurgeable = %d, want 2", agedCount)
+	}
+	if unprCount != 1 {
+		t.Errorf("CountUnpriced = %d, want 1", unprCount)
+	}
+	if agedCount == unprCount {
+		t.Fatalf("CountPurgeable and CountUnpriced both = %d — the two pairs must not be interchangeable", agedCount)
+	}
+}
+
+// TestConcurrentPurgeAndInsertDoNotRace runs a purge and an InsertRequest
+// concurrently under -race and asserts every row is accounted for — present
+// or deleted, none lost or duplicated.
+//
+// This is NOT a race detector for the two calls themselves: s.writer is
+// capped at one open connection (SetMaxOpenConns(1)), so database/sql
+// serializes them before any Go-memory race can exist, and *sql.DB is
+// concurrency-safe by contract. The serialization guarantee is
+// SetMaxOpenConns(1)'s, not this test's; this test pins the no-lost-row
+// behaviour that guarantee is meant to produce.
+func TestConcurrentPurgeAndInsertDoNotRace(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	configured := "configured"
+	cost := 0.5
+
+	const seeded = 20
+	for i := 0; i < seeded; i++ {
+		r := fullRequest()
+		r.SessionID, r.SessionHeader = nil, nil
+		r.StartedAt = cutoff.Add(-time.Hour)
+		r.CostSource, r.CostUSD = &configured, &cost
+		if _, err := s.InsertRequest(ctx, r); err != nil {
+			t.Fatalf("seed InsertRequest: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	var purgeErr, insertErr error
+	var insertedID int64
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, purgeErr = s.PurgeOlderThan(ctx, cutoff)
+	}()
+	go func() {
+		defer wg.Done()
+		r := fullRequest()
+		r.SessionID, r.SessionHeader = nil, nil
+		r.StartedAt = cutoff.Add(time.Hour) // survives any purge over this cutoff
+		insertedID, insertErr = s.InsertRequest(ctx, r)
+	}()
+	wg.Wait()
+
+	if purgeErr != nil {
+		t.Errorf("PurgeOlderThan: %v", purgeErr)
+	}
+	if insertErr != nil {
+		t.Errorf("InsertRequest: %v", insertErr)
+	}
+	if _, err := s.GetRequest(ctx, insertedID); err != nil {
+		t.Errorf("concurrently inserted row is missing: %v", err)
+	}
+
+	remaining, err := s.ListRequests(ctx, Filter{Limit: 1000})
+	if err != nil {
+		t.Fatalf("ListRequests: %v", err)
+	}
+	// Every seeded row was eligible for the purge, so only the concurrently
+	// inserted survivor should remain — never more (a duplicate) and never
+	// less (a second row lost).
+	if len(remaining) != 1 {
+		t.Errorf("remaining rows = %d, want exactly 1 (the concurrently inserted survivor)", len(remaining))
+	}
+}
+
+// TestPurgeUnpricedReconciliationIsScopedToTouchedSessions is the test that
+// catches a partial purgeWhere extraction: if only the requests DELETE were
+// generalized to the D5 predicate while the affected-session query kept
+// asking its own started_at question, Deleted would still be correct but
+// SessionsReconciled would count every session in the table, and an
+// untouched session's aggregate columns could be silently rewritten.
+//
+// Two disjoint session sets are seeded — one unpriced-with-tokens, one
+// priced — so PurgeUnpriced must reconcile only the first, leaving the
+// second's aggregate row byte-for-byte as UpsertSession left it.
+func TestPurgeUnpricedReconciliationIsScopedToTouchedSessions(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	unpriced, configured := "unpriced", "configured"
+	cost := 0.5
+
+	mkReq := func(sessionID string, costSource *string, costUSD *float64, tokens int) int64 {
+		r := fullRequest()
+		sid := sessionID
+		r.SessionID = &sid
+		r.SessionHeader = &sid
+		r.CostSource, r.CostUSD = costSource, costUSD
+		r.InputTokens, r.OutputTokens, r.CacheCreationTokens, r.CacheReadTokens = tokens, 0, 0, 0
+		id, err := s.InsertRequest(ctx, r)
+		if err != nil {
+			t.Fatalf("InsertRequest: %v", err)
+		}
+		return id
+	}
+	upsertFor := func(sessionID string, startedAt time.Time, tokens int, cost *float64) {
+		t.Helper()
+		sess := &Session{
+			ID: sessionID, FirstSeen: startedAt, LastSeen: startedAt,
+			RequestCount: 1, TotalInputTokens: int64(tokens), TotalOutputTokens: int64(tokens),
+			ModelSet: "deepseek-flash",
+		}
+		if cost != nil {
+			sess.TotalCostUSD = *cost
+			sess.PricedCount = 1
+		} else {
+			sess.UnpricedCount = 1
+		}
+		if err := s.UpsertSession(ctx, sess); err != nil {
+			t.Fatalf("UpsertSession: %v", err)
+		}
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	mkReq("unpriced-session", &unpriced, nil, 100)
+	upsertFor("unpriced-session", now, 100, nil)
+
+	mkReq("priced-session", &configured, &cost, 100)
+	upsertFor("priced-session", now, 100, &cost)
+
+	before, err := s.GetSession(ctx, "priced-session")
+	if err != nil {
+		t.Fatalf("GetSession(priced-session) before: %v", err)
+	}
+
+	res, err := s.PurgeUnpriced(ctx)
+	if err != nil {
+		t.Fatalf("PurgeUnpriced: %v", err)
+	}
+	if res.SessionsReconciled != 1 {
+		t.Errorf("SessionsReconciled = %d, want 1 (only unpriced-session)", res.SessionsReconciled)
+	}
+
+	if _, err := s.GetSession(ctx, "unpriced-session"); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("unpriced-session should be gone (its only request was purged): err=%v", err)
+	}
+
+	after, err := s.GetSession(ctx, "priced-session")
+	if err != nil {
+		t.Fatalf("GetSession(priced-session) after: %v", err)
+	}
+	if *before != *after {
+		t.Errorf("priced-session was touched by an unpriced-only purge:\n before %+v\n after  %+v", *before, *after)
 	}
 }
 
