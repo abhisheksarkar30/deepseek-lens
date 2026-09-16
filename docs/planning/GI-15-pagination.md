@@ -1,6 +1,6 @@
 # GI#15: Pagination (limit/offset/page-size) for list APIs and dashboard UI
 
-<!-- version=9 -->
+<!-- version=11 status=converged -->
 
 ## Context
 
@@ -83,10 +83,20 @@ occurrences total, since it groups only the capped fetch.
   `Offset int` (0 = start at the top), doc comment updated alongside the existing `Limit` comment.
   Several further doc comments this change makes stale must be updated in the same change (the
   F3.4/F7.1/F8.2 staleness class — comments the plan's edits invalidate):
-  - `internal/store/types.go:102-104`: `"Filter narrows ListRequests and ListWarnings"` →
-    `"Filter narrows ListRequests, ListWarnings, and ListSessions"`, and add
-    `"ListSessions ignores everything but Limit/Offset"` to the "only the fields relevant to the
-    call being made are read" enumeration.
+  - `internal/store/types.go:102-104`: rewrite the reader list to name **all four `Filter` readers
+    this plan leaves in place** — `ListRequests, ListWarnings, ListSessions, and WarningSummary` —
+    and enumerate the `Count*` variants (`CountRequests`/`CountWarnings`/`CountSessions`) in the
+    "only the fields relevant to the call being made are read" sentence. **Governing principle (the
+    class this closes):** the comment the plan *writes here* must not be invalidated by the plan's
+    *own additions* — `WarningSummary` (below) and the `Count*` readers are readers the plan itself
+    introduces, so an F8.2 rewrite that stopped at `ListSessions` would be stale the moment they
+    land. Resulting text, e.g.: `"Filter narrows ListRequests, ListWarnings, ListSessions,
+    WarningSummary, and the CountRequests/CountWarnings/CountSessions counts. Only the fields
+    relevant to the call being made are read — ListRequests ignores Kind/Severity, ListWarnings
+    ignores SessionID/Model/OnlyWarned/OnlyErrors, ListSessions ignores everything but Limit/Offset,
+    WarningSummary ignores Limit/Offset/SessionID/Model/OnlyWarned/OnlyErrors/ReplayOf, and
+    CountRequests/CountWarnings honor their List twin's predicates minus Limit/Offset while
+    CountSessions takes no Filter (sessions have no filterable column, so it reads none)."`
   - `internal/store/store.go:30-32`: `"DefaultLimit is what Filter.Limit: 0 means for ListRequests
     and ListWarnings"` → `"... for ListRequests, ListWarnings, and ListSessions"` (the plan's own
     `ListSessions` bullet clamps `Limit <= 0` to `DefaultLimit`, so the sentence is no longer
@@ -219,6 +229,16 @@ the grouping discussion in `New`. Drop or retarget that parenthetical in the sam
   resets `offset` to 0 before calling `onPageChange` — a user on page 3 of 100-row pages who
   switches to 25 returns to the top, not to item 200 of 25-row pages. One helper, two call sites
   (sessions, warnings drill-down) — reused, not duplicated.
+  - **The `<select>` is driven by the applied `X-Limit`, not a private constant.** The select's
+    value is initialised from — and re-synced to — the effective `limit` the server reports
+    (`X-Limit`), the same value the "X–Y of Z" label and the Prev/Next disablement math are
+    computed from (`offset+limit < total`). This is what keeps the pager self-consistent: because
+    `X-Limit` reports the *applied* page size (plan:35-43), a select whose shown value disagreed
+    with the fetched page size would render a label and edge-disablement that don't match the rows
+    on screen. Both pager call sites therefore use a fixed **initial page size of 50** (one of the
+    select's options), stored in the named `state` pager objects below, so the first fetch's
+    applied `limit` equals the select's initial value by construction — the initial value and the
+    first request's `?limit=` cannot diverge.
   - **Every pager-triggered fetch carries the same last-issued-wins guard the plan already gives
     `loadWarnings()`.** `renderPager`'s `onPageChange` is exactly the surface that invites rapid
     repeated triggers (double-clicking Next/Prev, or clicking the page-size `<select>` right after
@@ -239,8 +259,9 @@ the grouping discussion in `New`. Drop or retarget that parenthetical in the sam
     offset}`. (Chosen over the reverse — wrapping `fetchJSON` over `fetchPage` — because
     non-paginated endpoints such as `/api/stats` and `/api/warnings/summary` carry no pagination
     headers, so `fetchRaw` is the honest shared base and `fetchPage` stays pagination-specific.)
-  - `loadSessions()` ([internal/web/app.js:390-410](../../internal/web/app.js#L390-L410)): takes
-    `{limit, offset}` (module-level pager state), calls `/api/sessions?limit=&offset=` via
+  - `loadSessions()` ([internal/web/app.js:390-410](../../internal/web/app.js#L390-L410)): reads its
+    `{limit, offset}` from the named `state.sessionsPage` pager object (see the `state` bullet
+    below), calls `/api/sessions?limit=&offset=` via
     `fetchPage`, renders the returned page, renders the pager above `#sessions-body`. Guard the
     fetch against out-of-order responses with a generation counter (`sessionsFetchSeq`, added to
     `state`): at the top, increment `state.sessionsFetchSeq` and capture `const seq`; after
@@ -250,12 +271,29 @@ the grouping discussion in `New`. Drop or retarget that parenthetical in the sam
     `groupWarnings()` — that function is deleted, dead code removed). The SSE `warnings` handler
     at `app.js:702-709` currently calls `renderWarningGroups(state.warningsCache)` with a raw
     `Warning[]`; once `renderWarningGroups` is changed to consume `WarningGroup[]` from the
-    summary endpoint, this call must also change. Implementation:
+    summary endpoint, this call must also change. **Property casing (wire ↔ JS contract):**
+    `store.WarningGroup` carries no `json` tags — the repo's established convention
+    (`types.go:58-61`) — so the served JSON keys are the Go field names, capitalized:
+    `renderWarningGroups` must read `g.Kind` / `g.Severity` / `g.Count` / `g.LastSeen`. It reads
+    lowercase `g.kind`/`g.severity`/`g.count`/`g.lastSeen` today (`app.js:269-273`) only because it
+    consumed the client-minted keys `groupWarnings()` produced (`app.js:246`), and this plan deletes
+    that function — a literal swap-the-source edit renders every cell `undefined`. Do **not** add
+    `json` tags to `WarningGroup` to paper over this; the no-tags convention is established and out
+    of scope. (Class sweep: this is the *only* wire type the plan newly has `app.js` consume —
+    `Warning` (`/api/warnings`), `Session` (`/api/sessions`), and the stats types are already
+    consumed today and already read with their capitalized Go keys, and `index.html`/`style.css`
+    add only markup/classes with no wire type crossing — so no other bullet carries this gap.)
+    Implementation:
     - Add `warningsDebounceTimer: null` and `warningsFetchSeq: 0` to the `state` object
       (alongside `warnedIds`, `feedRowLimit`, etc. at `app.js:116-126`) — and add
-      `sessionsFetchSeq: 0` and `warningDetailFetchSeq: 0` for the two pager-driven fetches. All
+      `sessionsFetchSeq: 0` and `warningDetailFetchSeq: 0` for the two pager-driven fetches. **The
+      pager's own `limit`/`offset` are named on `state` too, not held as an anonymous module-level
+      variable:** `sessionsPage: {limit: 50, offset: 0}` for `loadSessions()` and
+      `warningDetailPage: {limit: 50, offset: 0}` for the `showWarningDetail()` drill-down. The
+      initial `limit: 50` is the select's initial value (one of its four options), so the first
+      fetch's applied `X-Limit` equals what the select shows — they cannot disagree. All
       other mutable UI state introduced or touched by this plan is named on `state`; the debounce
-      timer and sequence counter follow the same convention.
+      timer, sequence counters, and pager state follow the same convention.
     - When a `warnings` SSE event arrives and the warnings tab is visible, use a
       `setTimeout`-based coalescing guard to schedule a `loadWarnings()` call — on each event,
       cancel any pending timer (`clearTimeout(state.warningsDebounceTimer)`) and restart it
@@ -281,18 +319,54 @@ the grouping discussion in `New`. Drop or retarget that parenthetical in the sam
       fetch always wins the render regardless of resolution order (b).
     The raw `state.warningsCache` accumulation and its `-feedRowLimit` slice (`app.js:705`) are
     removed with `groupWarnings()`, **including the now-unused `warningsCache: []` entry in the
-    `state` object (`app.js:120`)** — once lines 258/285/705-707 are gone, that declaration is
-    written and read by nothing, so it is dead code and goes too; the `warnedIds` Set update
-    (`markFeedRowWarned`) stays untouched.
+    `state` object (`app.js:120`)** — once lines 258/259/285/287/705-707 are gone, that declaration
+    is written and read by nothing, so it is dead code and goes too.
+    - **Full displaced-site enumeration (the `warningsCache` / raw-`Warning[]` removal):** the
+      sites that read the removed list are `app.js:258` (`state.warningsCache = list`), `259`
+      (`for (const w of list) state.warnedIds.add(w.RequestID)`), `285` (`state.warningsCache
+      .filter(...)` in `showWarningDetail`), `287` (`${matches.length}` — the title count derived
+      from that filter), and `705-707` (the SSE handler's `state.warningsCache` reassignment and
+      `-feedRowLimit` slice). Every one is addressed: `258` by deleting the assignment, `285`/`287`
+      by the `showWarningDetail` rewrite above (server fetch + title from `X-Total-Count`'s
+      `total`), and `705-707` by the SSE handler switch to a debounced `loadWarnings()`.
+    - **`app.js:259` — accepted loss of the single-non-SSE `⚠` back-fill (deliberate, named side
+      effect).** Line 259 is the `warnedIds` back-fill: today, opening the warnings tab fetches up
+      to 1000 raw warnings and adds each `w.RequestID` to `state.warnedIds`, which is what badges
+      an *already-rendered* feed row (`feedRowHTML`, `app.js:175`). After the switch,
+      `loadWarnings()` fetches `/api/warnings/summary` (`WarningGroup[]` — `{Kind, Severity, Count,
+      LastSeen}`, no `RequestID`), so this loop has no request-ID source and is **deleted, not
+      replaced**. The consequence, stated plainly rather than left implicit: the only remaining
+      writer of `state.warnedIds` is `markFeedRowWarned` (`app.js:198-205`), called from the SSE
+      `warnings` branch (`app.js:703`) — so **a feed row for a request that was already warned
+      *before* the page loaded shows no `⚠` badge until a fresh SSE warning arrives for that same
+      request** (or the page is not reloaded). This is accepted for the same reason the `lens
+      sessions` cap is (plan:73-78): the badge is cosmetic, and the alternative — keeping a
+      `RequestID`-bearing source — means re-issuing the exact `fetchJSON("/api/warnings?limit=1000")`
+      full-list fetch this ticket exists to eliminate, just to harvest IDs and then discard the rows.
+      The summary endpoint carries counts, not IDs, so there is no cheaper request-ID source; the
+      one-fetch-per-tab-open cost is not worth a stale-cosmetically-missing badge. Upgrade path if
+      this ever matters: page the raw `/api/warnings` and pair it with `feedRowHTML`, or add a
+      `warned_request_ids`-style field to the summary response. The `warnedIds` Set's other
+      reader/writer (`markFeedRowWarned`, the SSE path) is untouched and keeps live warnings badging
+      correctly.
   - `showWarningDetail()` ([internal/web/app.js:281-299](../../internal/web/app.js#L281-L299)):
     currently filters `state.warningsCache` (initialized at 1000 on load, but shrunk to the last
     200 warnings — `feedRowLimit` — after any live SSE warning event) in JS. Switches to calling
     `/api/warnings?kind=&severity=&limit=&offset=` via `fetchPage` directly against the server,
+    driving its `{limit, offset}` from the named `state.warningDetailPage` pager object (below),
     with its own pager. Selecting a different kind/severity group resets the drill-down pager
-    to `offset: 0`. Guard the drill-down fetch with a generation counter (`warningDetailFetchSeq`,
-    added to `state`), using the same increment-and-capture / skip-render-on-mismatch pattern as
-    `loadSessions()`, so a slow response to an earlier pager click cannot overwrite a later one.
-    With `warningsCache` removed (see above), this switch is required.
+    (`state.warningDetailPage.offset`) to 0. Guard the drill-down fetch with a generation counter
+    (`warningDetailFetchSeq`, added to `state`), using the same increment-and-capture /
+    skip-render-on-mismatch pattern as `loadSessions()`, so a slow response to an earlier pager
+    click cannot overwrite a later one.
+    With `warningsCache` removed (see above), this switch is required instead of optional.
+    **Title count (displaced by the `warningsCache` removal).** The title line
+    (`app.js:287`, `${matches.length} occurrence(s)`) reads the deleted `matches` — a filtered
+    slice of `state.warningsCache` (`app.js:285`). It becomes the drill-down's **`total`** from
+    `X-Total-Count` returned by `fetchPage`: `${kind} (${severity}) — ${total} occurrence(s)`. That
+    is the correct global count for the group (the old `matches.length` was only ever the count
+    within the ≤1000-row client cache), it is already in the response — no extra fetch — and it
+    matches the pager's "X–Y of Z" denominator beneath it.
 - **`index.html`** / **`style.css`**: add the pager's markup/classes (page-size select, prev/next
   buttons, count label) once, reused via the same class for both tables.
 
@@ -360,11 +434,63 @@ the grouping discussion in `New`. Drop or retarget that parenthetical in the sam
    to update `docs/context/api-surface.md` (new `offset` param on three routes, three new response
    headers, the new `/api/warnings/summary` route, and shifted line citations) and
    `docs/context/data-model.md` (new `idx_warnings_kind_severity_created_at` index on the
-   `warnings` table row) and `docs/context/testing-and-quality.md` (the `groupWarnings`/
+   `warnings` table row **and** the new `WarningGroup` type added to the types.go enumeration at
+   `data-model.md:18-20`, which lists that file's Go types exhaustively — `Request`, `Session`,
+   `Warning`, `Filter`, `Summary`, `ModelStat`, `DayStat`, `CostSourceStat` — and so goes stale on
+   the plan's own new exported type) and `docs/context/testing-and-quality.md` (the `groupWarnings`/
    `groupSessionWarnings` reference at line 15 names a function deleted by this plan). This
    follows the same pattern as the GI-9 refresh recorded at `docs/context/INDEX.md:58-64`.
 
 ## Change History
+
+### v11 (round-10 triage)
+- **F10.1** (JUSTIFIED): The displaced-site enumeration for the `warningsCache`/raw-`Warning[]`
+  removal named `258/285/705-707` but omitted `app.js:259` (the `warnedIds` back-fill loop reading
+  `w.RequestID`) and `app.js:287` (the `showWarningDetail` title count reading `matches`). The
+  plan now enumerates all of `258/259/285/287/705-707` and states each one's resolution. For `259`,
+  the resolution is **accepted loss** of the single-non-SSE `⚠` back-fill — named explicitly,
+  with the rationale (no `RequestID` in `WarningGroup`; the alternative is re-issuing the full
+  1000-row `/api/warnings` fetch this ticket removes) and the user-visible symptom (a feed row for
+  a request warned before page load shows no `⚠` until a fresh SSE warning arrives for it), in the
+  same "accepted side effect" style as the `lens sessions` cap. For `287`, the title count becomes
+  the drill-down `total` from `X-Total-Count`.
+- **F10.2** (JUSTIFIED): Verification step 5's `data-model.md` refresh clause named only the new
+  index; since the plan adds the exported `store.WarningGroup` type and `data-model.md:18-20`
+  enumerates `types.go`'s types exhaustively, the clause now also names adding `WarningGroup` to
+  that enumeration.
+- **F10.3** (JUSTIFIED): The pager's `limit`/`offset` were an unnamed "module-level pager state"
+  with no specified initial page size. The plan now names them on `state` —
+  `sessionsPage: {limit: 50, offset: 0}` and `warningDetailPage: {limit: 50, offset: 0}` — matching
+  the convention the plan already follows for `sessionsFetchSeq`/`warningDetailFetchSeq`/
+  `warningsDebounceTimer`, and pins the initial page size to 50 (a select option). The
+  `renderPager` bullet now states the `<select>` is initialised from and re-synced to the applied
+  `X-Limit`, so the select's initial value and the first fetch's applied limit cannot disagree
+  (they drive the "X–Y of Z" label and Prev/Next disablement).
+
+### v10 (round-9 triage)
+- **F9.1** (JUSTIFIED): The `types.go:102-104` rewrite the plan instructed named only
+  `ListRequests, ListWarnings, ListSessions` — but the plan *also* adds `WarningSummary` as a
+  fourth `Filter` reader and the three `Count*` variants, so the comment the plan itself writes is
+  stale the moment the plan's own additions land. The `Filter` bullet now names all four readers
+  (`ListRequests, ListWarnings, ListSessions, WarningSummary`) plus the `Count*` variants and gives
+  the resulting text, with the *governing principle* stated (a comment the plan writes must not be
+  invalidated by the plan's own additions). Per the human's direction to close the class by
+  enumeration, a fresh codebase sweep was run for any *other* comment this plan's additions make
+  stale: the only remaining candidate, `internal/api/api.go:234` ("ListWarnings filters by
+  Kind/Severity/Since only"), was checked and **excluded** — its parenthetical enumerates the
+  *predicate* (narrowing) fields, not the windowing fields, and already omits `Limit`, so adding
+  the `Offset` window does not make it false (same reasoning as the `store.go:304-305` exclusion).
+  No other member found; the class is closed.
+- **F9.2** (JUSTIFIED): `renderWarningGroups` switching to consume `WarningGroup[]` from
+  `/api/warnings/summary` changes the property reads from lowercase (the deleted `groupWarnings()`
+  minted `kind`/`severity`/`count`/`lastSeen`) to the capitalized wire keys, because
+  `store.WarningGroup` carries no `json` tags (repo convention, `types.go:58-61`). The
+  `renderWarningGroups` bullet now states the reads explicitly as `g.Kind`/`g.Severity`/`g.Count`/
+  `g.LastSeen` and forbids papering over it with `json` tags. Per the human's direction to fix the
+  class, the plan was swept for every *other* wire type it newly has `app.js` consume:
+  `WarningGroup` is the only one — `Warning`, `Session`, and the stats types are already consumed
+  today with capitalized reads, and `index.html`/`style.css` add no wire crossing. Recorded in the
+  bullet so no later round re-opens it.
 
 ### v9 (round-8 triage)
 - **F8.1** (JUSTIFIED): `X-Limit` reported the *requested* limit (`0` when `?limit` absent) while
