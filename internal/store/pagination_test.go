@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -453,6 +454,192 @@ func TestWarningSummaryHonorsPredicates(t *testing.T) {
 	if len(byWindow) != len(all) {
 		t.Errorf("Filter{Limit:1,Offset:5} returned %d groups, unfiltered returned %d — a GROUP BY must ignore the page window",
 			len(byWindow), len(all))
+	}
+}
+
+// ---- GI-15: session pagination (br-GI-15-02) -----------------------------
+
+// insertSession upserts a minimal session row, so the fixture only carries
+// what ListSessions/CountSessions read: the id and the ordering key.
+func insertSession(t *testing.T, s *Store, ctx context.Context, id string, lastSeen time.Time) {
+	t.Helper()
+	if err := s.UpsertSession(ctx, &Session{
+		ID: id, FirstSeen: lastSeen.Add(-time.Minute), LastSeen: lastSeen, RequestCount: 1,
+	}); err != nil {
+		t.Fatalf("UpsertSession(%s): %v", id, err)
+	}
+}
+
+func sessionIDsByPage(t *testing.T, s *Store, ctx context.Context, f Filter) map[string]int {
+	t.Helper()
+	got, err := s.ListSessions(ctx, f)
+	if err != nil {
+		t.Fatalf("ListSessions(%+v): %v", f, err)
+	}
+	ids := map[string]int{}
+	for _, sess := range got {
+		ids[sess.ID]++
+	}
+	return ids
+}
+
+func TestListSessionsOffsetWindows(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 6; i++ {
+		insertSession(t, s, ctx, fmt.Sprintf("s_%d", i), base.Add(time.Duration(i)*time.Second))
+	}
+
+	page1 := sessionIDsByPage(t, s, ctx, Filter{Limit: 3, Offset: 0})
+	page2 := sessionIDsByPage(t, s, ctx, Filter{Limit: 3, Offset: 3})
+	if len(page1) != 3 || len(page2) != 3 {
+		t.Fatalf("page sizes: got %d and %d, want 3 and 3", len(page1), len(page2))
+	}
+	for id := range page2 {
+		if page1[id] > 0 {
+			t.Errorf("session %q appears on both page 1 and page 2 — the pages are not disjoint", id)
+		}
+	}
+	seen := map[string]int{}
+	for id, n := range page1 {
+		seen[id] = n
+	}
+	for id, n := range page2 {
+		seen[id] += n
+	}
+	if len(seen) != 6 {
+		t.Errorf("the two pages cover %d distinct sessions, want all 6", len(seen))
+	}
+}
+
+// TestListSessionsDefaultClamp is the "no longer unbounded" assertion: this
+// list used to return every row, so the fixture has to exceed DefaultLimit
+// for the assertion to mean anything — below the cap, a capped and an
+// uncapped query are indistinguishable.
+func TestListSessionsDefaultClamp(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	const total = DefaultLimit + 1
+	for i := 0; i < total; i++ {
+		insertSession(t, s, ctx, fmt.Sprintf("s_%04d", i), base.Add(time.Duration(i)*time.Second))
+	}
+
+	for _, f := range []Filter{{}, {Limit: 0}, {Limit: -1}} {
+		got, err := s.ListSessions(ctx, f)
+		if err != nil {
+			t.Fatalf("ListSessions(%+v): %v", f, err)
+		}
+		if len(got) != DefaultLimit {
+			t.Errorf("ListSessions(%+v) returned %d rows, want the DefaultLimit cap %d — the list is unbounded again",
+				f, len(got), DefaultLimit)
+		}
+	}
+
+	n, err := s.CountSessions(ctx)
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	if n != total {
+		t.Errorf("CountSessions = %d, want %d (the cap must not affect the total)", n, total)
+	}
+}
+
+func TestListSessionsOffsetEdges(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 6; i++ {
+		insertSession(t, s, ctx, fmt.Sprintf("s_%d", i), base.Add(time.Duration(i)*time.Second))
+	}
+
+	past, err := s.ListSessions(ctx, Filter{Limit: 5, Offset: 100})
+	if err != nil {
+		t.Fatalf("ListSessions past the end: %v", err)
+	}
+	if len(past) != 0 {
+		t.Errorf("offset past the end: got %d rows, want 0", len(past))
+	}
+
+	// A negative offset clamps to 0 instead of erroring, same as the other
+	// two lists.
+	neg, err := s.ListSessions(ctx, Filter{Offset: -5})
+	if err != nil {
+		t.Fatalf("ListSessions{Offset:-5}: %v", err)
+	}
+	zero, err := s.ListSessions(ctx, Filter{})
+	if err != nil {
+		t.Fatalf("ListSessions{Offset:0}: %v", err)
+	}
+	if len(neg) != len(zero) {
+		t.Fatalf("negative offset returned %d rows, offset 0 returned %d", len(neg), len(zero))
+	}
+	for i := range neg {
+		if neg[i].ID != zero[i].ID {
+			t.Fatalf("negative offset differs from offset 0 at row %d: %q vs %q", i, neg[i].ID, zero[i].ID)
+		}
+	}
+}
+
+// TestListSessionsPagingIsTotal is the F6.1 tiebreaker check for sessions:
+// every fixture row shares one last_seen, so without `id DESC` the
+// LIMIT/OFFSET window can serve a session twice or drop it entirely. One row
+// per page makes any such slip a visible duplicate rather than an invisible
+// omission.
+func TestListSessionsPagingIsTotal(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	same := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	const total = 5
+	for i := 0; i < total; i++ {
+		insertSession(t, s, ctx, fmt.Sprintf("s_%d", i), same)
+	}
+
+	seen := map[string]int{}
+	for offset := 0; offset < total; offset++ {
+		page := sessionIDsByPage(t, s, ctx, Filter{Limit: 1, Offset: offset})
+		if len(page) != 1 {
+			t.Fatalf("page at offset %d held %d rows, want exactly 1", offset, len(page))
+		}
+		for id, n := range page {
+			seen[id] += n
+		}
+	}
+	if len(seen) != total {
+		t.Errorf("paging over %d identical-timestamp sessions yielded %d distinct rows — sessions were skipped", total, len(seen))
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("session %q appeared on %d pages, want exactly 1", id, n)
+		}
+	}
+}
+
+func TestCountSessions(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	n, err := s.CountSessions(ctx)
+	if err != nil {
+		t.Fatalf("CountSessions on an empty store: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("CountSessions on an empty store = %d, want 0", n)
+	}
+
+	for i := 0; i < 6; i++ {
+		insertSession(t, s, ctx, fmt.Sprintf("s_%d", i), base.Add(time.Duration(i)*time.Second))
+	}
+	n, err = s.CountSessions(ctx)
+	if err != nil {
+		t.Fatalf("CountSessions: %v", err)
+	}
+	if n != 6 {
+		t.Errorf("CountSessions = %d, want 6", n)
 	}
 }
 

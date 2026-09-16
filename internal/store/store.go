@@ -27,8 +27,8 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-// DefaultLimit is what Filter.Limit: 0 means for ListRequests and
-// ListWarnings — a sane cap, never an unbounded scan of the table.
+// DefaultLimit is what Filter.Limit: 0 means for ListRequests, ListWarnings,
+// and ListSessions — a sane cap, never an unbounded scan of the table.
 const DefaultLimit = 1000
 
 // pragmaDSN is appended to the database file path for both the writer and
@@ -575,10 +575,24 @@ func scanSession(sc rowScanner) (*Session, error) {
 	return &sess, nil
 }
 
-// ListSessions returns every session, most recently active first.
-func (s *Store) ListSessions(ctx context.Context) ([]*Session, error) {
+// ListSessions returns a page of sessions, most recently active first,
+// starting at f.Offset. It reads only f.Limit/f.Offset — sessions have no
+// filterable column, so there is nothing else for a Filter to narrow. f.Limit
+// <= 0 is capped at DefaultLimit: this list used to be truly unbounded, and
+// capping it is the deliberate consistency fix, not an accident.
+func (s *Store) ListSessions(ctx context.Context, f Filter) ([]*Session, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = DefaultLimit
+	}
+
+	// id DESC tiebreaker, same reason as ListRequests/ListWarnings: two
+	// sessions with equal last_seen must not be able to land on two pages or
+	// be skipped across a boundary. sessions.id is TEXT, but lexicographic
+	// order is still a total order, which is all a tiebreaker needs.
 	rows, err := s.reader.QueryContext(ctx,
-		"SELECT "+sessionColumns+" FROM sessions ORDER BY last_seen DESC")
+		"SELECT "+sessionColumns+" FROM sessions ORDER BY last_seen DESC, id DESC LIMIT ? OFFSET ?",
+		limit, clampOffset(f.Offset))
 	if err != nil {
 		return nil, fmt.Errorf("store: list sessions: %w", err)
 	}
@@ -593,6 +607,17 @@ func (s *Store) ListSessions(ctx context.Context) ([]*Session, error) {
 		out = append(out, sess)
 	}
 	return out, rows.Err()
+}
+
+// CountSessions returns the total number of sessions. It takes no Filter on
+// purpose: no Filter field targets sessions (they have no filterable
+// column), and inventing one would only require a rule for what it ignores.
+func (s *Store) CountSessions(ctx context.Context) (int, error) {
+	var n int
+	if err := s.reader.QueryRowContext(ctx, "SELECT COUNT(*) FROM sessions").Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count sessions: %w", err)
+	}
+	return n, nil
 }
 
 // GetSession returns the session with id, or sql.ErrNoRows if it does not

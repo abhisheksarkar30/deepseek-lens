@@ -113,14 +113,16 @@ type Session struct {
 	WarningCount      int
 }
 
-// Filter narrows ListRequests, ListWarnings, WarningSummary, and the
-// CountRequests/CountWarnings counts. Only the fields relevant to the call
-// being made are read — ListRequests ignores Kind/Severity, ListWarnings
-// ignores SessionID/Model/OnlyWarned/OnlyErrors, WarningSummary ignores
+// Filter narrows ListRequests, ListWarnings, ListSessions, WarningSummary,
+// and the CountRequests/CountWarnings counts. Only the fields relevant to
+// the call being made are read — ListRequests ignores Kind/Severity,
+// ListWarnings ignores SessionID/Model/OnlyWarned/OnlyErrors, ListSessions
+// ignores everything but Limit/Offset, WarningSummary ignores
 // Limit/Offset/SessionID/Model/OnlyWarned/OnlyErrors/ReplayOf, and
 // CountRequests/CountWarnings honor their List twin's predicates while
 // ignoring Limit/Offset (a total that shrank to the page size would defeat
-// the count).
+// the count). CountSessions takes no Filter at all — sessions have no
+// filterable column, so it reads none.
 type Filter struct {
 	Limit      int // 0 means DefaultLimit, never unbounded
 	Offset     int // 0 means start at the top; a negative offset is clamped to 0

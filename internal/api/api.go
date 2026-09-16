@@ -35,9 +35,13 @@ type Store interface {
 	StatsByModel(ctx context.Context, since time.Time) ([]store.ModelStat, error)
 	StatsByDay(ctx context.Context, since time.Time) ([]store.DayStat, error)
 	StatsByCostSource(ctx context.Context, since time.Time) ([]store.CostSourceStat, error)
-	ListSessions(ctx context.Context) ([]*store.Session, error)
+	ListSessions(ctx context.Context, f store.Filter) ([]*store.Session, error)
 	GetSession(ctx context.Context, id string) (*store.Session, error)
 	ListWarnings(ctx context.Context, f store.Filter) ([]*store.Warning, error)
+	CountRequests(ctx context.Context, f store.Filter) (int, error)
+	CountWarnings(ctx context.Context, f store.Filter) (int, error)
+	CountSessions(ctx context.Context) (int, error)
+	WarningSummary(ctx context.Context, f store.Filter) ([]store.WarningGroup, error)
 }
 
 type api struct {
@@ -634,11 +638,11 @@ func (a *api) listWarnings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) listSessions(w http.ResponseWriter, r *http.Request) {
-	// store.ListSessions takes no Filter (no limit param to honor): every row
-	// it returns is maintained incrementally by store.UpsertSession, which
-	// br-GI-1-12's consumer step calls once per captured call. The aggregates
-	// on each row therefore need no work here.
-	sessions, err := a.store.ListSessions(r.Context())
+	// Every row store.ListSessions returns is maintained incrementally by
+	// store.UpsertSession, which br-GI-1-12's consumer step calls once per
+	// captured call. The aggregates on each row therefore need no work here.
+	// The zero Filter means "default limit, offset 0".
+	sessions, err := a.store.ListSessions(r.Context(), store.Filter{})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
