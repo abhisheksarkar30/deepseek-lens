@@ -144,7 +144,11 @@ const state = {
   paused: false,
   totals: { calls: 0, tokens: 0, cost: 0, unpriced: 0 },
   warnedIds: new Set(),
-  warningsCache: [],
+  // warningsDebounceTimer coalesces a burst of SSE warning events into one
+  // summary refetch; warningsFetchSeq is the last-issued-wins guard over
+  // loadWarnings. See both at their use sites.
+  warningsDebounceTimer: null,
+  warningsFetchSeq: 0,
   feedRowLimit: 200,
   // sessionsPage is the sessions table's window. The limit starts at one of
   // PAGE_SIZES so the select's initial value and the first request's ?limit=
@@ -193,7 +197,16 @@ function showView(name) {
   for (const btn of document.querySelectorAll(".tab")) {
     btn.classList.toggle("active", btn.dataset.view === name);
   }
-  if (name === "warnings") loadWarnings();
+  if (name === "warnings") {
+    // A still-pending debounce timer would otherwise fire a second
+    // loadWarnings immediately after this one. This does NOT make the fetch
+    // single-flight — clearTimeout is a no-op on a timer that already fired,
+    // so a fetch in flight can still overlap this one. The generation counter
+    // inside loadWarnings is what covers that.
+    clearTimeout(state.warningsDebounceTimer);
+    state.warningsDebounceTimer = null;
+    loadWarnings();
+  }
   if (name === "stats") loadStats();
   if (name === "sessions") loadSessions();
 }
@@ -271,40 +284,35 @@ async function loadInitialFeed() {
 
 // ---- warnings inbox -------------------------------------------------------
 
-function groupWarnings(list) {
-  const groups = new Map();
-  for (const w of list) {
-    const key = w.Kind + "\x00" + w.Severity;
-    let g = groups.get(key);
-    if (!g) {
-      g = { kind: w.Kind, severity: w.Severity, count: 0, lastSeen: w.CreatedAt };
-      groups.set(key, g);
-    }
-    g.count++;
-    if (new Date(w.CreatedAt) > new Date(g.lastSeen)) g.lastSeen = w.CreatedAt;
-  }
-  return [...groups.values()].sort((a, b) => b.count - a.count);
-}
-
+// The counts come from the server (store.WarningSummary, via
+// /api/warnings/summary) rather than from grouping a page of rows here.
+// Grouping and pagination do not compose: a page of N rows cannot yield a
+// correct global per-kind count, so the old client-side version undercounted
+// every kind that fired more than the fetch cap.
 async function loadWarnings() {
+  // Last-issued-wins. A debounce fire and a tab switch can each have a fetch
+  // in flight, and the earlier one can land last.
+  const seq = ++state.warningsFetchSeq;
   try {
-    const list = await fetchJSON("/api/warnings?limit=1000");
-    state.warningsCache = list;
-    for (const w of list) state.warnedIds.add(w.RequestID);
-    renderWarningGroups(list);
+    const groups = await fetchJSON("/api/warnings/summary");
+    if (seq !== state.warningsFetchSeq) return;
+    renderWarningGroups(groups || []);
   } catch (e) {
     console.error("loadWarnings", e);
   }
 }
 
-function renderWarningGroups(list) {
-  const groups = groupWarnings(list);
+// WarningGroup carries no json tags — the repo's convention for types
+// crossing the API/SSE broker — so the served keys are the Go field names.
+// Reading the lowercase names here still compiles and still runs; it just
+// renders every cell undefined.
+function renderWarningGroups(groups) {
   const body = document.getElementById("warnings-groups");
-  body.innerHTML = groups.map((g) => `<tr data-kind="${escapeHtml(g.kind)}" data-severity="${escapeHtml(g.severity)}">
-    <td>${escapeHtml(g.kind)}</td>
-    <td>${sevBadge(g.severity)}</td>
-    <td>${g.count}</td>
-    <td>${relTime(g.lastSeen)}</td>
+  body.innerHTML = groups.map((g) => `<tr data-kind="${escapeHtml(g.Kind)}" data-severity="${escapeHtml(g.Severity)}">
+    <td>${escapeHtml(g.Kind)}</td>
+    <td>${sevBadge(g.Severity)}</td>
+    <td>${g.Count}</td>
+    <td>${relTime(g.LastSeen)}</td>
   </tr>`).join("") || `<tr><td colspan="4" class="hint">No warnings yet.</td></tr>`;
 
   body.querySelectorAll("tr[data-kind]").forEach((row) => {
@@ -312,24 +320,34 @@ function renderWarningGroups(list) {
   });
 }
 
-function showWarningDetail(kind, severity) {
+// The rows have to come from the server: the summary that names the group
+// holds counts, not the warnings themselves. limit=1000 and no pager here —
+// br-GI-15-07 adds the pager and the guard its rapid triggers need.
+async function showWarningDetail(kind, severity) {
   const panel = document.getElementById("warnings-detail");
   const title = document.getElementById("warnings-detail-title");
   const body = document.getElementById("warnings-detail-body");
-  const matches = state.warningsCache.filter((w) => w.Kind === kind && w.Severity === severity);
-
-  title.textContent = `${kind} (${severity}) — ${matches.length} occurrence(s)`;
-  body.innerHTML = matches.map((w) => `<tr data-id="${w.RequestID}">
-    <td>${w.RequestID}</td>
-    <td>${sevBadge(w.Severity)}</td>
-    <td>${relTime(w.CreatedAt)}</td>
-    <td>${w.Path ? `<code>${escapeHtml(w.Path)}</code>` : ""}</td>
-    <td>${escapeHtml(w.Detail)}</td>
-  </tr>`).join("");
-  body.querySelectorAll("tr[data-id]").forEach((row) => {
-    row.addEventListener("click", () => openDetail(Number(row.dataset.id)));
-  });
-  panel.hidden = false;
+  const q = `kind=${encodeURIComponent(kind)}&severity=${encodeURIComponent(severity)}`;
+  try {
+    const page = await fetchPage(`/api/warnings?${q}&limit=1000&offset=0`);
+    // X-Total-Count is the group's true global count, which is the point:
+    // the old title counted rows in a capped client-side cache, so it
+    // disagreed with the summary table directly above it.
+    title.textContent = `${kind} (${severity}) — ${page.total} occurrence(s)`;
+    body.innerHTML = page.items.map((w) => `<tr data-id="${w.RequestID}">
+      <td>${w.RequestID}</td>
+      <td>${sevBadge(w.Severity)}</td>
+      <td>${relTime(w.CreatedAt)}</td>
+      <td>${w.Path ? `<code>${escapeHtml(w.Path)}</code>` : ""}</td>
+      <td>${escapeHtml(w.Detail)}</td>
+    </tr>`).join("");
+    body.querySelectorAll("tr[data-id]").forEach((row) => {
+      row.addEventListener("click", () => openDetail(Number(row.dataset.id)));
+    });
+    panel.hidden = false;
+  } catch (e) {
+    console.error("showWarningDetail", e);
+  }
 }
 
 // ---- stats ----------------------------------------------------------------
@@ -807,11 +825,12 @@ async function handleStreamEvent(ev) {
     } catch (e) { console.error("stream request fetch", e); }
   } else if (evt.type === "warnings") {
     markFeedRowWarned(evt.id);
-    if (Array.isArray(evt.warnings)) {
-      state.warningsCache = state.warningsCache.concat(evt.warnings).slice(-state.feedRowLimit);
-      if (!document.getElementById("view-warnings").hidden) {
-        renderWarningGroups(state.warningsCache);
-      }
+    // Debounced to one refetch per burst. A multi-turn warning streak fires N
+    // events back to back, and N summary fetches make the table visibly
+    // flicker through N intermediate states on the way to the same answer.
+    if (!document.getElementById("view-warnings").hidden) {
+      clearTimeout(state.warningsDebounceTimer);
+      state.warningsDebounceTimer = setTimeout(loadWarnings, 250);
     }
   }
 }
