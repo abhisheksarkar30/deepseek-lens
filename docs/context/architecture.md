@@ -47,7 +47,7 @@ together at once; every other CLI command opens the store or dashboard API on it
 | `internal/replay` | Pure helpers for `lens replay`: JSON-path body edits, outcome diffing | [internal/replay/edit.go](../../internal/replay/edit.go), [internal/replay/replay.go](../../internal/replay/replay.go) |
 | `internal/api` | Dashboard's read-only JSON API + SSE broker + the one write route (`POST /api/requests/{id}/replay`) + embedded static asset mount | [internal/api/api.go](../../internal/api/api.go), [internal/api/broker.go](../../internal/api/broker.go) |
 | `internal/web` | `go:embed`-ed dashboard assets (`index.html`, `app.js`, `style.css`) | [internal/web/embed.go](../../internal/web/embed.go) |
-| `internal/cli` | Eleven subcommand implementations (`doctor`, `serve`, `ls`, `show`, `tail`, `stats`, `sessions`, `warnings`, `export`, `prices`, `replay`) | [internal/cli/](../../internal/cli/) |
+| `internal/cli` | Twelve subcommand implementations (`doctor`, `serve`, `ls`, `show`, `tail`, `stats`, `sessions`, `warnings`, `export`, `prices`, `replay`, `purge`) | [internal/cli/](../../internal/cli/) |
 
 ## Cross-cutting concerns
 
