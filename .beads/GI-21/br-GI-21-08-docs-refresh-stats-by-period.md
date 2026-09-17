@@ -22,8 +22,11 @@ The plan counts four such citations; the real class is twenty-one (see item 2).
 
 2. **Recompute the drifted `api.go` citations in `api-surface.md`.** The plan names four rows off by a
    uniform +72; that estimate is wrong on both counts. Every `internal/api/api.go` citation in the
-   file has drifted — twenty-one of them, by +85 to +113, the spread because the edits that shifted
-   them move only the rows below them. Fix the class, not the four.
+   file has drifted — twenty-one of them, by **+59 to +140**. The ten route-table rows that cite a
+   *handler* span **+85 to +124**; the catch-all `/` row cites the registration line rather than a
+   handler and moved +61; and the class outliers are the `mux.Handle*` block citation at the low end
+   (+59) and the `healthResponse` payload citation at the high end (+140). The spread exists because
+   the edits that shifted them move only the rows below them. Fix the class, not the four.
 
    The four rows the plan names, as the pre-edit positive control (*before* values, not what to write):
 
@@ -36,9 +39,12 @@ The plan counts four such citations; the real class is twenty-one (see item 2).
 
    Enumerating the class adds the route-table rows for `/api/requests`, `/api/requests/{id}`,
    `/api/requests/{id}/replay`, `/api/sessions/{id}`, `/api/stream` and `/api/health`, plus the
-   non-route citations in the same file: the `mux.Handle*` block, `methodGet`, `effectiveLimit` /
-   `writePageHeaders`, `replayOriginReject`, the `!replayEnabled` guard, the `healthResponse`
-   payload, and the three "same `store.Filter`" references.
+   catch-all `/` row (which already cited `api.go`) — **11 route-table rows** in all. The **10
+   non-route citations** in the same file are the `mux.Handle*` block, `methodGet`, the
+   read-only/loopback-bound rationale comment, `effectiveLimit` / `writePageHeaders`,
+   `replayOriginReject`, the `!replayEnabled` guard, the `healthResponse` payload, and the three
+   "same `store.Filter`" references. 11 + 10 = the 21 measured above; if an enumeration and that
+   total ever disagree, the enumeration is the thing to re-check.
 
    Never write the old number plus an offset — brace-match the handler or region each citation names
    in the edited file and cite the range it actually occupies. The `/api/stats` range in particular

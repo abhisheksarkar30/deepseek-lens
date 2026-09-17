@@ -64,8 +64,9 @@ granularities, with `DayStat`/`Day` renamed to `PeriodStat`/`Period`; `GET /api/
 `lens stats --json` followed with the same key rename; the Stats tab gained the granularity/From/To
 controls, the metric toggle, and the history table (`api-surface.md`, `data-model.md`). This refresh
 also recomputed **every** `internal/api/api.go` citation in `api-surface.md`: the bead expected four
-drifted rows, but the whole citation set had drifted (+85 to +113 lines, twenty-one citations), so
-the class was corrected rather than the four instances.
+drifted rows, but the whole citation set had drifted (+59 to +140 lines across twenty-one citations,
+the ten handler-citing route rows spanning +85 to +124), so the class was corrected rather than the
+four instances.
 
 Previously: 2026-09-17, REFRESH mode, scoped to the GI-17 pricing-retention-purge story
 (`GI-17-pricing-retention-purge` branch) — `retention_days` config and the scheduled/startup purge,
