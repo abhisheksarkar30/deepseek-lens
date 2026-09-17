@@ -539,29 +539,60 @@ func (s *Store) StatsByModel(ctx context.Context, since, until time.Time) ([]Mod
 	return out, rows.Err()
 }
 
-// StatsByDay aggregates request count, token totals, and cost per UTC
-// calendar day, for dashboard charts.
-func (s *Store) StatsByDay(ctx context.Context, since time.Time) ([]DayStat, error) {
+// periodFormat maps a granularity to the strftime format its buckets are
+// labelled with, all UTC. An unrecognized granularity is an error rather than
+// a default: the format reaches the query as a positional strftime argument
+// (SQLite has no bind placeholder for it), so this whitelist is the only thing
+// standing between a caller's string and the query text. Building the query
+// from the returned constant — never from the caller's own value — is the
+// property that has to hold even for a future call site that skips its own
+// validation.
+func periodFormat(granularity string) (string, error) {
+	switch granularity {
+	case "hour":
+		return "%Y-%m-%dT%H:00", nil
+	case "day":
+		return "%Y-%m-%d", nil
+	case "week":
+		// ponytail: SQLite's %W is Monday-first week-of-year with no
+		// year-boundary carry, not ISO-8601 week numbering. Fine for a
+		// dashboard bucket label; not a "which ISO week is this" API.
+		return "%Y-W%W", nil
+	case "month":
+		return "%Y-%m", nil
+	}
+	return "", fmt.Errorf("store: stats by period: invalid granularity %q", granularity)
+}
+
+// StatsByPeriod aggregates request count, token totals, and cost per UTC
+// bucket — hour, day, week, or month per granularity — for dashboard charts,
+// over requests in [since, until). Buckets with no rows are absent, not
+// zero-filled, so callers must tolerate a non-contiguous series.
+func (s *Store) StatsByPeriod(ctx context.Context, since, until time.Time, granularity string) ([]PeriodStat, error) {
+	format, err := periodFormat(granularity)
+	if err != nil {
+		return nil, err
+	}
+	where, args := statsWindow(since, until)
 	rows, err := s.reader.QueryContext(ctx, `
-		SELECT strftime('%Y-%m-%d', started_at / 1000000000, 'unixepoch'),
+		SELECT strftime('`+format+`', started_at / 1000000000, 'unixepoch'),
 			COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0),
 			COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0)
-		FROM requests
-		WHERE started_at >= ?
+		FROM requests`+where+`
 		GROUP BY 1
-		ORDER BY 1`, since.UnixNano())
+		ORDER BY 1`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("store: stats by day: %w", err)
+		return nil, fmt.Errorf("store: stats by period: %w", err)
 	}
 	defer rows.Close()
 
-	var out []DayStat
+	var out []PeriodStat
 	for rows.Next() {
-		var d DayStat
-		if err := rows.Scan(&d.Day, &d.RequestCount, &d.InputTokens, &d.OutputTokens, &d.CostUSDTotal, &d.UnpricedCount); err != nil {
-			return nil, fmt.Errorf("store: stats by day: %w", err)
+		var p PeriodStat
+		if err := rows.Scan(&p.Period, &p.RequestCount, &p.InputTokens, &p.OutputTokens, &p.CostUSDTotal, &p.UnpricedCount); err != nil {
+			return nil, fmt.Errorf("store: stats by period: %w", err)
 		}
-		out = append(out, d)
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }
