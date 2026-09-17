@@ -127,12 +127,13 @@ func (a *api) ServeHTTP(w http.ResponseWriter, r *http.Request) { a.mux.ServeHTT
 // whole table (the warning inbox's per-kind totals) therefore lives in SQL,
 // in store.WarningSummary, and is served by /api/warnings/summary.
 //
-// Two routes write: POST /api/requests/{id}/replay re-issues a captured
+// Three routes write: POST /api/requests/{id}/replay re-issues a captured
 // request through proxyHandler, so the replay is proxied, teed and recorded
 // by exactly the code that handles live traffic; POST /api/prices writes
-// the price file through the seam SetPricing wires (pricing.Save, D1).
-// Passing a nil proxyHandler disables replay entirely, which is what the
-// tests of beads before replay's own do.
+// the price file through the seam SetPricing wires (pricing.Save, D1);
+// POST /api/purge deletes rows (see purge.go) and is the one destructive
+// route. Passing a nil proxyHandler disables replay entirely, which is what
+// the tests of beads before replay's own do.
 func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, assets fs.FS, proxyHandler http.Handler, replayEnabled bool) *api {
 	a := &api{store: st, sink: sk, consumer: cons, broker: broker, proxyHandler: proxyHandler, replayEnabled: replayEnabled}
 
@@ -163,7 +164,7 @@ func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, asset
 // dashboard's read endpoints are otherwise unauthenticated on the strength of
 // being read-only and loopback-bound; the routes that write are registered
 // separately, each behind replayOriginReject and its own method — see
-// replay and setPrices.
+// replay, setPrices and postPurge.
 func methodGet(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -394,8 +395,8 @@ const (
 )
 
 // replay is POST /api/requests/{id}/replay: the project's only billable
-// route. It is one of the dashboard's write routes (alongside POST
-// /api/prices), none of which are covered by the read-GET dashboard's "no
+// route. It is one of the dashboard's write routes (alongside POST /api/prices
+// and POST /api/purge), none of which are covered by the read-GET dashboard's "no
 // auth on loopback" rationale (br-GI-1-13, plan §security self-review) —
 // each instead sits behind replayOriginReject.
 //
