@@ -28,23 +28,29 @@ three independent controls:
 ## Sensitive permissions & consent
 
 Not applicable in the mobile/platform-permission sense — this is a server proxy, not a client app
-requesting OS-level permissions. The closest analog is the replay endpoint's write authority:
+requesting OS-level permissions. The closest analog is the three write routes' authority:
 
 | Capability | Why needed | Where gated | Evidence |
 |---|---|---|---|
 | Replay (re-send a captured request, billable) | Lets a user or the dashboard UI resend a call against the real upstream | Off by default (`--replay`); Origin/Host allowlist checked before any I/O; `lens replay` gates spend above `ReplayCostThresholdUSD` behind `--yes` | [internal/api/api.go:254-362](../../internal/api/api.go), [internal/cli/replay.go:155-172](../../internal/cli/replay.go) |
+| Set/unset a model's price rates | Lets the Settings tab or `lens prices --set` change what future calls cost | Always on; Origin/Host allowlist; invalid rate/model name rejected before write | [internal/api/prices.go](../../internal/api/prices.go) |
+| Purge rows (delete, by age or the unpriced predicate) | Lets the Settings tab or `lens purge` reclaim disk; the one destructive capability in the system | Always on; Origin/Host allowlist; `days > 0` required for the age-based mode; `lens purge` additionally requires `--yes` for a non-dry-run delete | [internal/api/purge.go](../../internal/api/purge.go), [internal/cli/purge.go](../../internal/cli/purge.go) |
 
 ## Role / access model
 
-No roles — any local process that can reach the loopback ports has full read access to captured data
-and, if `--replay` is on, can trigger a replay (subject to the Origin/Host guard). This is a
-documented, deliberate trust boundary: "a local process that could forge past this [guard] could
-already read the SQLite file" ([internal/api/api.go:516-519](../../internal/api/api.go)).
+No roles — any local process that can reach the loopback ports has full read access to captured data,
+can always set prices and purge data (subject to the Origin/Host guard), and, if `--replay` is on,
+can trigger a replay. This is a documented, deliberate trust boundary: "a local process that could
+forge past this [guard] could already read the SQLite file"
+([internal/api/api.go:674](../../internal/api/api.go)) — and, since GI-17, could already delete
+rows from it via `lens purge` without going through the guard at all, which is why the guard's role
+is to stop a *browser*, not a local process with its own access to the file.
 
-### Replay's Origin/Host allowlist (the one credentialless write guard in the system)
+### The Origin/Host allowlist shared by all three write routes
 
-`replayOriginReject` ([internal/api/api.go:491-542](../../internal/api/api.go)) runs before any store
-or upstream access and rejects on two conditions:
+`replayOriginReject` ([internal/api/api.go:639-697](../../internal/api/api.go)) runs before any store
+or upstream access and rejects on two conditions, for whichever of the three write routes calls it
+(replay, prices, purge — each passes its own `action` string, used only in the rejection message):
 
 - **`Host` must be loopback** — defends against DNS-rebinding pages that resolve their own hostname
   to `127.0.0.1` and then POST with a forged `Host`.
@@ -52,7 +58,7 @@ or upstream access and rejects on two conditions:
   compared against the request's actual `Host` (not the configured `DashboardAddr`) because the
   dashboard answers on whichever loopback alias was browsed to.
 - **A missing `Origin` passes** — browsers always send it, so its absence identifies a non-browser
-  client (i.e., `lens replay` itself), deliberately, not a hole.
+  client (i.e., a CLI caller), deliberately, not a hole.
 
 This is explicitly *not* a credential/secret-based guard — see the plan's security self-review
 referenced in [CLAUDE.md](../../CLAUDE.md)'s "Fail open" section for the stated rationale and upgrade
@@ -61,9 +67,10 @@ path.
 ## Security rules (DB/storage)
 
 No Firestore/RLS-style declarative rules — access control is entirely at the network layer
-(loopback binding) plus the one application-layer guard above. The SQLite file itself has default
-OS file permissions; `~/.deepseek-lens/prices.toml` is written with `0o600` and its directory with
-`0o700` ([internal/pricing/table.go:154-155,179](../../internal/pricing/table.go)).
+(loopback binding) plus the shared application-layer guard above, applied identically to all three
+write routes. The SQLite file itself has default OS file permissions;
+`~/.deepseek-lens/prices.toml` is written with `0o600` and its directory with `0o700`
+([internal/pricing/table.go:154-155,179](../../internal/pricing/table.go)).
 
 ## Known gaps
 

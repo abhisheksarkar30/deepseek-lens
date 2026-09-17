@@ -63,6 +63,7 @@ func runDoctor(args []string, w io.Writer) error {
 		{"session_gap_minutes", fmt.Sprintf("%d", cfg.SessionGapMinutes)},
 		{"replay_enabled", fmt.Sprintf("%t", cfg.ReplayEnabled)},
 		{"replay_cost_threshold_usd", fmt.Sprintf("%.4f", cfg.ReplayCostThresholdUSD)},
+		{"retention_days", fmt.Sprintf("%d", cfg.RetentionDays)},
 	}
 	fmt.Fprint(w, table([]string{"FIELD", "VALUE"}, cfgRows, 0))
 

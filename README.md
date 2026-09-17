@@ -210,6 +210,42 @@ upstream that requires the key, the replay is answered `401` and that `401` is r
 which is what the replay comparison is for. `lens replay <id> --dump out.json` writes the edited body
 and sends nothing at all.
 
+## Retention & purge
+
+By default lens keeps every captured row forever. Set `retention_days` — config file, `LENS_RETENTION_DAYS`,
+or `--retention-days` — to change that: `lens serve` then purges rows older than that many days once at
+startup and again every 24 hours while it runs. `0` (the default) means **keep forever**.
+
+Two purge actions exist, independent of each other:
+
+- **Age-based** — deletes rows older than the configured retention (or an explicit `--older-than <days>`
+  on the CLI). Unavailable — not just disabled, but absent, both as a CLI flag combination and as a
+  button in the Settings tab — whenever no retention is configured, since there is nothing to preview
+  or confirm against.
+- **Unpriced** — deletes rows with at least one token that were never priced (`cost_source` is
+  `unpriced`, or unset). Always available regardless of `retention_days`, since it isn't about age. This
+  is a stricter count than `lens stats`' "unpriced" total, which also includes zero-token rows.
+
+```sh
+./lens purge --dry-run                       # preview using the configured retention_days
+./lens purge --older-than 30 --yes           # delete rows older than 30 days
+./lens purge --unpriced --yes                # delete unpriced rows instead
+./lens purge --older-than 30 --yes --vacuum  # also reclaim disk
+```
+
+`lens purge` is guarded before it ever opens the database: `--older-than` and `--unpriced` cannot be
+combined, a non-positive `--older-than` is refused, and a bare `lens purge` with neither flag and no
+`retention_days` configured is refused rather than deleting the whole table. A real (non-`--dry-run`)
+delete additionally requires `--yes`.
+
+Deleting rows frees SQLite's internal pages for reuse but does **not** shrink the `.db` file on disk —
+only `lens purge --vacuum` does that. It runs SQLite's `VACUUM`, which takes an exclusive lock for as
+long as it runs, so the dashboard never triggers it itself; reclaiming disk is a CLI-only, opt-in step.
+
+The Settings tab's **Data** section mirrors both actions with a live preview (row count, byte estimate,
+oldest/newest timestamp) before you confirm — same absent-not-disabled rule for the age-based button
+when `retention_days` is `0`.
+
 ## Security posture
 
 - **Loopback-only by default.** Both listeners bind `127.0.0.1`, and `config.Validate` refuses a
@@ -272,6 +308,7 @@ worth investigating.
 | `lens stats` | Window totals, per-model split, and the unpriced count. |
 | `lens prices` | The effective price table. `--set`, `--unset`, `--edit`. |
 | `lens replay <id>` | Re-issue a captured call. `--set path=value`, `--diff <id>`, `--dump <file>`, `--yes`. |
+| `lens purge` | Delete rows by age or the unpriced predicate. `--older-than <days>`, `--unpriced`, `--dry-run`, `--yes`, `--vacuum`. See [Retention & purge](#retention--purge). |
 | `lens export` | Every stored row as JSON, one object per line. |
 
 ## How it fits together
@@ -281,8 +318,10 @@ client → proxy → (tee) → bounded sink → consumer → {parse, analyze} �
 ```
 
 One process, two `http.Server`s. The proxy listener does no parsing: it copies bytes and hands a
-bounded copy to the sink, which never blocks the hot path. The consumer goroutine is the only
-writer SQLite ever sees. The dashboard reads that file and pushes live updates over SSE.
+bounded copy to the sink, which never blocks the hot path. The consumer goroutine is the only writer
+for captured traffic; a purge (scheduled, `POST /api/purge`, or `lens purge`) is a second, much
+rarer writer that only deletes — see [Retention & purge](#retention--purge). The dashboard reads
+that file and pushes live updates over SSE.
 
 Two invariants are worth stating because they are easy to break and hard to notice if you do: the
 hot path never buffers the stream to count tokens (a buffered stream still returns the right bytes,

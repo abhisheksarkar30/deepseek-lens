@@ -75,14 +75,15 @@ func seedRequest(t *testing.T, st *store.Store, opts func(*store.Request)) *stor
 
 // newTestAPI builds a handler backed by st (or a spy wrapping it), a fresh
 // broker, a real (unstarted) consumer, and in-memory assets.
-func newTestAPI(t *testing.T, st Store) (http.Handler, *sink.Sink, *consumer.Consumer, *Broker) {
+func newTestAPI(t *testing.T, st Store) (*api, *sink.Sink, *consumer.Consumer, *Broker) {
 	t.Helper()
 	sk := sink.New(16)
 	cons := consumer.New(sk, nil, nil) // Run is never called in most tests; Stats() is fine on a fresh Consumer.
 	broker := NewBroker()
-	// No proxy handler and replay off: these tests cover the read-only API, and
-	// the replay route (br-GI-1-13) is exercised in internal/replay, where a
-	// real proxy and a recording upstream can be wired up.
+	// No proxy handler and replay off: these tests cover the routes that only
+	// read, plus prices_test.go's POST /api/prices cases; the replay route
+	// (br-GI-1-13) is exercised in internal/replay, where a real proxy and a
+	// recording upstream can be wired up.
 	return New(st, sk, cons, broker, testAssets, nil, false), sk, cons, broker
 }
 
@@ -1000,5 +1001,27 @@ func TestWarningsSummaryHasNoPaginationHeaders(t *testing.T) {
 		if got := rr.Header().Get(name); got != "" {
 			t.Errorf("summary response carries %s: %q — this route must stay unpaginated", name, got)
 		}
+	}
+}
+
+// TestReplayOriginRejectNamesTheCallingAction covers br-GI-17-02: the guard
+// is now shared by three write routes (replay, prices, purge), so its
+// rejection message must name the caller's action rather than always
+// saying "replay" — a browser turned away from POST /api/prices reading a
+// message about replay would look like the wrong endpoint had been hit.
+// Both rejection arms are covered: non-loopback Host and cross-origin
+// Origin.
+func TestReplayOriginRejectNamesTheCallingAction(t *testing.T) {
+	nonLoopback := httptest.NewRequest(http.MethodPost, "/api/prices", nil)
+	nonLoopback.Host = "evil.example.com"
+	if reason := replayOriginReject(nonLoopback, "prices"); !strings.Contains(reason, "prices") || strings.Contains(reason, "replay") {
+		t.Errorf("non-loopback Host reason = %q, want it to name %q and not %q", reason, "prices", "replay")
+	}
+
+	crossOrigin := httptest.NewRequest(http.MethodPost, "/api/purge", nil)
+	crossOrigin.Host = "localhost:9999"
+	crossOrigin.Header.Set("Origin", "http://attacker.example:1234")
+	if reason := replayOriginReject(crossOrigin, "purge"); !strings.Contains(reason, "purge") || strings.Contains(reason, "replay") {
+		t.Errorf("cross-origin reason = %q, want it to name %q and not %q", reason, "purge", "replay")
 	}
 }

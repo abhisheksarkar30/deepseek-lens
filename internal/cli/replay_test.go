@@ -235,8 +235,10 @@ func TestReplayCostGateFollowsTheConfiguredThreshold(t *testing.T) {
 
 // --- the send path never opens the database ---
 
-// The CLI must not become a second writer. Pointing DBPath at an unopenable
-// path is the direct test: if runReplay opened the store, this would fail.
+// Replay's send path must not become a second writer (lens purge, br-GI-17-08,
+// is the one CLI path that deliberately does open the store directly — see
+// replay.go's prelude). Pointing DBPath at an unopenable path is the direct
+// test: if runReplay opened the store, this would fail.
 func TestReplaySendPathNeverOpensTheDatabase(t *testing.T) {
 	rig := newReplayRig(t)
 	orig := seedRequest(t, rig.store, withBody(editableBody))
@@ -321,7 +323,9 @@ func TestReplayDumpWritesTheEditedBodyAndSendsNothing(t *testing.T) {
 		t.Errorf("output = %q, want it to say nothing was sent", buf.String())
 	}
 	// Reading the stored body is all --dump does to the database: no row is
-	// written, because the only writer is the running server's consumer.
+	// written, because --dump never opens a writer at all (the running
+	// server's consumer is the only writer that ever inserts a request row —
+	// lens purge, the one CLI path that opens the store, only deletes).
 	reqs, err := rig.store.ListRequests(context.Background(), store.Filter{})
 	if err != nil {
 		t.Fatalf("ListRequests: %v", err)

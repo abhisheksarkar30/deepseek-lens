@@ -1,7 +1,11 @@
-// Package api is the read-only JSON API (plus SSE push) behind the
-// dashboard, and the embedded-asset mount for internal/web. See
-// CLAUDE.md's architecture essentials: "the dashboard listener reads
-// SQLite and pushes SSE" — this package is that listener's handler.
+// Package api is the JSON API (plus SSE push) behind the dashboard, and
+// the embedded-asset mount for internal/web. Almost every route only
+// reads; the exceptions are POST /api/requests/{id}/replay, POST
+// /api/prices, and POST /api/purge, each behind replayOriginReject's
+// Origin/Host allowlist rather than the "read-only and loopback-bound"
+// rationale the GET routes rely on. See CLAUDE.md's architecture
+// essentials: "the dashboard listener reads SQLite and pushes SSE" —
+// this package is that listener's handler.
 package api
 
 import (

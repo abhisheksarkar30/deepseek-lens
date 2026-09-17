@@ -100,11 +100,15 @@ treating NULL/empty interchangeably — see [workflows.md](workflows.md)'s sessi
   running totals per call rather than the session list being an aggregate query over `requests` on
   every read — see [internal/store/store.go:699-731](../../internal/store/store.go) and
   [internal/session/session.go:113-150](../../internal/session/session.go).
-- **Single-writer discipline**: the store opens one writer connection with `SetMaxOpenConns(1)` and
-  up to 4 reader connections in WAL mode, so readers never block on the writer
-  ([internal/store/store.go:91-131](../../internal/store/store.go)). Only the consumer goroutine
-  ever calls a writer method (`InsertRequest(s)`, `InsertWarnings`, `UpsertSession`) — see
-  [CLAUDE.md](../../CLAUDE.md)'s "SQLite has exactly one writer" invariant.
+- **Single-writer discipline for ingest, plus a second writer for purge**: the store opens one writer
+  connection with `SetMaxOpenConns(1)` and up to 4 reader connections in WAL mode, so readers never
+  block on the writer ([internal/store/store.go:91-131](../../internal/store/store.go)). The consumer
+  goroutine is the only caller of the ingest writer methods (`InsertRequest(s)`, `InsertWarnings`,
+  `UpsertSession`). `PurgeOlderThan`/`PurgeUnpriced` are a second, additional writer — in-process
+  (the scheduled/startup purge and `POST /api/purge`) they share this same connection, so they queue
+  behind ingest; `lens purge` opens its own connection in a separate process, serialized
+  cross-process by WAL plus `busy_timeout`. See [CLAUDE.md](../../CLAUDE.md)'s "SQLite has two
+  writers" invariant.
 - **Batched writes**: `InsertRequests` commits a whole consumer flush (up to 50 calls) as one
   transaction, falling back to per-row `InsertRequest` calls if the batch fails, so one bad row never
   costs the rest — [internal/store/store.go:196-218](../../internal/store/store.go).

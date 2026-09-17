@@ -41,6 +41,38 @@ func Default() Table {
 // fieldOrder is the write order and the only set of field names accepted.
 var fieldOrder = []string{"input", "output", "cache_read", "cache_write"}
 
+// ErrInvalidName and ErrInvalidRate are the typed rejections CheckModel and
+// CheckRate wrap with %w, so a caller (POST /api/prices) can map a bad model
+// name or a bad rate to 400 with errors.Is, and anything else (a disk
+// failure) to 500 — a full disk is not a bad request.
+var (
+	ErrInvalidName = errors.New("pricing: invalid model name")
+	ErrInvalidRate = errors.New("pricing: invalid rate")
+)
+
+// CheckModel reports whether name is a valid model name, wrapping
+// ErrInvalidName when it is not. It is the one guard every writer of the
+// price file passes through: parseTable, Save, and cli.applySet.
+func CheckModel(name string) error {
+	if !validModel(name) {
+		return fmt.Errorf("%w: %q", ErrInvalidName, name)
+	}
+	return nil
+}
+
+// CheckRate reports whether v is a valid rate — finite and non-negative —
+// wrapping ErrInvalidRate when it is not. 0 is valid: a genuinely free model
+// is distinct from an unset (nil) one.
+func CheckRate(v float64) error {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return fmt.Errorf("%w: %v: want a number", ErrInvalidRate, v)
+	}
+	if v < 0 {
+		return fmt.Errorf("%w: %v: must not be negative", ErrInvalidRate, v)
+	}
+	return nil
+}
+
 // Load reads the price table at path. A missing file is not an error: it
 // yields Default(), so a fresh install reports "unpriced" rather than
 // "unknown-model" for the models DeepSeek actually serves. Every Default()
@@ -88,8 +120,8 @@ func parseTable(data string) (Table, error) {
 		key, val, hasEq := strings.Cut(line, "=")
 		key = strings.TrimSpace(key)
 		if !hasEq {
-			if !validModel(key) {
-				return nil, fmt.Errorf("line %d: missing '=': %q", i+1, line)
+			if err := CheckModel(key); err != nil {
+				return nil, fmt.Errorf("line %d: missing '=': %q: %w", i+1, line, err)
 			}
 			if _, ok := t[key]; !ok {
 				t[key] = Rates{}
@@ -97,8 +129,11 @@ func parseTable(data string) (Table, error) {
 			continue
 		}
 		model, field, ok := strings.Cut(key, ".")
-		if !ok || !validModel(model) {
+		if !ok {
 			return nil, fmt.Errorf("line %d: want model.<%s>, got %q", i+1, strings.Join(fieldOrder, "|"), key)
+		}
+		if err := CheckModel(model); err != nil {
+			return nil, fmt.Errorf("line %d: %w", i+1, err)
 		}
 		rate, err := parseRate(strings.TrimSpace(val))
 		if err != nil {
@@ -118,11 +153,11 @@ func parseTable(data string) (Table, error) {
 // it touched.
 func parseRate(s string) (float64, error) {
 	v, err := strconv.ParseFloat(s, 64)
-	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+	if err != nil {
 		return 0, fmt.Errorf("invalid rate %q: want a number", s)
 	}
-	if v < 0 {
-		return 0, fmt.Errorf("invalid rate %q: must not be negative", s)
+	if err := CheckRate(v); err != nil {
+		return 0, fmt.Errorf("invalid rate %q: %w", s, err)
 	}
 	return v, nil
 }
@@ -130,6 +165,14 @@ func parseRate(s string) (float64, error) {
 // validModel keeps a bare model line from swallowing a typo: only model-name
 // characters are accepted, so "input 0.28" (a missing '=') is reported as a
 // malformed line instead of silently reading as a model named "input 0.28".
+//
+// '.' is deliberately not accepted, even though it once was: Save writes
+// model+"."+field (below) and parseTable cuts at the first '.' (above), so a
+// model named "a.b" would write "a.b.input = 0.28", which reads back as
+// model "a" / field "b.input" — an unknown field, failing the whole Load.
+// Known behaviour change: a previously-accepted bare line like "deepseek.v2"
+// is now a parse error — no real DeepSeek model name contains '.', and such
+// a line could never round-trip through Save anyway.
 func validModel(s string) bool {
 	if s == "" {
 		return false
@@ -137,7 +180,7 @@ func validModel(s string) bool {
 	for _, r := range s {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '-', r == '_', r == '.', r == ':':
+		case r == '-', r == '_', r == ':':
 		default:
 			return false
 		}
@@ -150,8 +193,36 @@ func validModel(s string) bool {
 // no rates is written as a bare model line: that is what keeps "known but
 // unpriced" alive across a round trip, and what makes `lens prices --unset`
 // revert a model to unpriced rather than deleting it into unknown-model.
+//
+// Every model name and rate in t is validated before anything is written —
+// a rejection (ErrInvalidName / ErrInvalidRate, matched with errors.Is)
+// leaves the target file untouched. The write itself is atomic: a uniquely
+// named temp file in the target's directory, synced, then renamed over the
+// target, so a Loader mid-read never observes a truncated or empty file —
+// os.WriteFile(path, ..., O_TRUNC) could otherwise be caught between the
+// truncate and the write and read back an empty table, which Load treats as
+// a fresh install and merges with Default(), permanently storing the next
+// captured call as cost_usd IS NULL.
 func Save(path string, t Table) error {
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
+	for _, model := range sortedModels(t) {
+		if err := CheckModel(model); err != nil {
+			return fmt.Errorf("pricing: save: %w", err)
+		}
+		r := t[model]
+		for _, f := range fieldOrder {
+			if v := r.rate(f); v != nil {
+				if err := CheckRate(*v); err != nil {
+					return fmt.Errorf("pricing: save: %w", err)
+				}
+			}
+		}
+	}
+
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	if dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("pricing: save: creating price dir %s: %w", dir, err)
 		}
@@ -180,10 +251,56 @@ func Save(path string, t Table) error {
 			b.WriteString(model + "\n")
 		}
 	}
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
-		return fmt.Errorf("pricing: save: writing price table: %w", err)
+	tmp, err := os.CreateTemp(dir, ".prices-*.tmp")
+	if err != nil {
+		return fmt.Errorf("pricing: save: creating temp file: %w", err)
 	}
+	tmpPath := tmp.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.WriteString(b.String()); err != nil {
+		tmp.Close()
+		return fmt.Errorf("pricing: save: writing temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("pricing: save: syncing temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("pricing: save: closing temp file: %w", err)
+	}
+	// Windows opens files without FILE_SHARE_DELETE by default, so a rename
+	// over a file a concurrent Loader has open for reading can transiently
+	// fail with "access is denied" even though the read itself is done in
+	// microseconds. Retry briefly rather than surface that race to the
+	// caller — the alternative is the exact torn-read window this bead
+	// exists to close.
+	if err := renameWithRetry(tmpPath, path); err != nil {
+		return fmt.Errorf("pricing: save: renaming temp file into place: %w", err)
+	}
+	renamed = true
 	return nil
+}
+
+// renameWithRetry retries os.Rename briefly on failure. Needed on Windows,
+// where a concurrent reader's open handle (no FILE_SHARE_DELETE by default)
+// can make a rename-over-target transiently fail; harmless elsewhere, where
+// a rename failure is not expected to be transient and the loop exits on
+// its first (and only) attempt succeeding or its last attempt's error.
+func renameWithRetry(oldpath, newpath string) error {
+	var err error
+	for attempt := 0; attempt < 20; attempt++ {
+		if err = os.Rename(oldpath, newpath); err == nil {
+			return nil
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return err
 }
 
 // rate returns the named field's value, nil when unset. Unexported: the

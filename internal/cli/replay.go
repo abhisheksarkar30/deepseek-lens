@@ -29,11 +29,14 @@ const replayClientTimeout = 5 * time.Minute
 //
 // Like every other subcommand it resolves the config itself, but unlike the
 // read-only ones it does NOT open the store: `lens replay <id>` is a thin HTTP
-// client for the running server's POST /api/requests/{id}/replay, so the
-// consumer stays the only writer (CLAUDE.md's single-writer discipline, and
-// br-GI-1-06's decision log entry that rejected "the CLI opens its own DB
-// writer"). The one exception is --dump, which never sends anything and is
-// therefore the one path that may read the local database directly.
+// client for the running server's POST /api/requests/{id}/replay, so replay
+// itself never becomes a second writer (br-GI-1-06's decision log entry that
+// rejected "the CLI opens its own DB writer"). This is a statement about
+// replay, not about every subcommand — `lens purge` (br-GI-17-08) does open
+// the store directly, serialized against a running `lens serve` by WAL plus
+// busy_timeout rather than by staying out entirely. The one exception here is
+// --dump, which never sends anything and is therefore the one path in this
+// file that may read the local database directly.
 func Replay(args []string) error {
 	cfg, err := config.Load(nil)
 	if err != nil {
@@ -204,9 +207,9 @@ type requestDetail struct {
 	Warnings []*store.Warning `json:"warnings"`
 }
 
-// getRequestDetail reads one request through the read-only API. Reusing the
-// read endpoint rather than opening the database is what keeps `lens replay`
-// free of any local write path at all.
+// getRequestDetail reads one request through GET /api/requests/{id}, a
+// read-only endpoint. Reusing it rather than opening the database is what
+// keeps `lens replay` free of any local write path at all.
 func getRequestDetail(client *http.Client, base string, id int64) (*requestDetail, error) {
 	u := fmt.Sprintf("%s/api/requests/%d", base, id)
 	res, err := client.Get(u)

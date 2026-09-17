@@ -79,24 +79,36 @@ flow. Neither runs tests — tests are not a CI gate.
   and does no parsing; it tees the bytes into a bounded sink and returns. The consumer goroutine
   drains the sink, parses, analyzes, and writes to SQLite. The dashboard listener reads SQLite and
   pushes SSE.
-- **Data flow is strictly one-way**: `client → proxy → (tee) → sink → consumer → {parse, analyze}
-  → store → api → web`. The proxy depends only on `sink` and `config`. If `proxy` ever imports
-  `analyze` or `store`, the design has eroded — that is the signal, not a style nit.
+- **Data flow is one-way for ingest, with one deliberate exception.** Live capture flows
+  `client → proxy → (tee) → sink → consumer → {parse, analyze} → store → api → web`, and the proxy
+  depends only on `sink` and `config` — if `proxy` ever imports `analyze` or `store`, the design has
+  eroded, and that remains the signal to watch. A purge (the startup/scheduled purge, `POST
+  /api/purge`, or `lens purge`) is the one exception: it runs `api → store` directly and reads no rows
+  first, because deleting is not part of the ingest pipeline.
 - **The hot path must never buffer the stream to count tokens.** The TTFB test (fake upstream,
   slow-streamed SSE, assert the client sees the first event before upstream sends its last) is the
   hard gate that keeps this true. A buffered stream still returns correct bytes — just late — so no
   other test would catch it.
-- **SQLite has exactly one writer: the consumer goroutine.** `lens replay` does not open a second
-  writer; it calls the running server's `POST /api/requests/{id}/replay` and the server records the
-  row through the same consumer writer. This is what keeps SQLite locking a non-issue.
+- **SQLite has two writers, not one, serialized two different ways.** The consumer goroutine is still
+  the only writer for row *ingest*: `lens replay` does not open a second writer for that, it calls the
+  running server's `POST /api/requests/{id}/replay` and the server records the row through the same
+  consumer writer. A purge is a second, additional writer, not a violation of that discipline —
+  **in-process purge** (the scheduled/startup run and `POST /api/purge`) uses the store's own writer
+  connection (`SetMaxOpenConns(1)`), so it queues behind ingest rather than racing it, while **`lens
+  purge`** is a *separate process* with its own writer connection, serialized **cross-process** by WAL
+  plus `busy_timeout(5000)` — the same protocol every other external opener of the file already relies
+  on. Do not describe `lens purge` as going through "the same single connection" as the consumer; that
+  claim is false for it specifically.
 - **Cold-path pipeline order is fixed**: `ExtractMeta`/`ExtractUsage` → resolve session → compute
   cost → `InsertRequest` → run analyzers. Session resolution and costing populate columns on the
   row so they run *before* insert; warning analyzers attach by row id so they run *after*. Feature
   beads plug into these seams at fixed points rather than reordering them.
-- **Fail open.** The proxy never makes the user's coding session depend on the observer. Replay is
-  the exception: it is a billable write path, so it is off by default (`--replay`), and guarded by a
-  strict `Origin`/`Host` allowlist with no shared secret — see the plan's security self-review for
-  why the credentialless guard is sufficient and what the upgrade path is.
+- **Fail open.** The proxy never makes the user's coding session depend on the observer. The
+  dashboard listener carries three write routes — `POST /api/requests/{id}/replay`, `POST
+  /api/prices`, and `POST /api/purge` (destructive) — each behind `replayOriginReject`'s
+  `Origin`/`Host` allowlist, parameterized by action, with no shared secret. Replay is the only
+  billable one and is off by default (`--replay`) on top of that guard — see the plan's security
+  self-review for why the credentialless guard is sufficient and what the upgrade path is.
 - **`x-api-key` is redacted before insert.** Full bodies *are* stored (256KB cap per body,
   configurable), so the content — every prompt and every file the agent read — is the asset this
   repo is protecting. Loopback binding and redaction are load-bearing defaults, not conveniences.

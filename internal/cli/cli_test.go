@@ -324,14 +324,22 @@ func TestLSCostColumnNeverClaimsZero(t *testing.T) {
 // — plus the three stored requests.
 func seedSession(t *testing.T, st *store.Store) (string, []*store.Request) {
 	t.Helper()
+	return seedSessionAt(t, st, "aaaaaaaaaaaaaaa1", time.Now().Add(-time.Minute))
+}
+
+// seedSessionAt is seedSession parameterized on the prefix hash (so multiple
+// sessions in one test don't collide) and the base time of its first call —
+// used by the retention-purge tests, which need one session entirely before
+// a cutoff and another entirely after it.
+func seedSessionAt(t *testing.T, st *store.Store, prefix string, base time.Time) (string, []*store.Request) {
+	t.Helper()
 	res := session.New(st, 30)
 	ctx := context.Background()
-	const prefix = "aaaaaaaaaaaaaaa1"
 
 	var sid string
 	var reqs []*store.Request
 	for i := 0; i < 3; i++ {
-		at := time.Now().Add(-time.Minute).Add(time.Duration(i) * time.Second)
+		at := base.Add(time.Duration(i) * time.Second)
 		sid = res.Resolve(parse.Meta{PrefixHash: prefix}, at)
 		s := sid
 		r := seedRequest(t, st, func(r *store.Request) {
@@ -539,6 +547,25 @@ func TestPricesRejectsBadRateWithoutWriting(t *testing.T) {
 		if err := runPrices([]string{"--set", arg}, &buf, path); err == nil {
 			t.Errorf("--set %q was accepted", arg)
 		}
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a rejected --set still wrote %s (stat err = %v)", path, err)
+	}
+}
+
+// TestPricesRejectsInjectedModelName covers br-GI-17-01: a model name
+// containing a newline is the CLI's pre-existing injection hole ($'evil\nx.input=1'
+// writes two parseable lines) and must now be refused by the shared
+// pricing.CheckModel guard, with the file left unwritten.
+func TestPricesRejectsInjectedModelName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prices.toml")
+	var buf bytes.Buffer
+	err := runPrices([]string{"--set", "evil\nx.input=1"}, &buf, path)
+	if err == nil {
+		t.Fatal("--set with a newline in the model name was accepted")
+	}
+	if !strings.Contains(err.Error(), "invalid model name") {
+		t.Errorf("error = %q, want it to name the shared check's rejection", err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("a rejected --set still wrote %s (stat err = %v)", path, err)
@@ -1266,5 +1293,85 @@ func TestServeRedactionCheckSilentOnCleanStore(t *testing.T) {
 
 	if len(lines) != 0 {
 		t.Errorf("expected no log output for an already-redacted store, got: %v", lines)
+	}
+}
+
+// TestPurgeOnStartupDeletesPastCutoffAndReconciles is the bead's "retention
+// end to end" integration case, driven directly against purgeOnStartup since
+// Serve itself cannot be driven from a test (two real listeners, a blocking
+// signal context). One session is entirely older than the cutoff and must be
+// fully purged; a second, untouched session must survive with its totals
+// unchanged — the assertion that would catch a purge that deletes rows
+// without reconciling sessions correctly.
+func TestPurgeOnStartupDeletesPastCutoffAndReconciles(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	oldSid, oldReqs := seedSessionAt(t, st, "aaaaaaaaaaaaaaa1", time.Now().Add(-10*24*time.Hour))
+	newSid, _ := seedSessionAt(t, st, "bbbbbbbbbbbbbbb2", time.Now().Add(-time.Hour))
+
+	var lines []string
+	purgeOnStartup(ctx, st, 5, func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly one logged line, got %d: %v", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], fmt.Sprintf("%d", len(oldReqs))) {
+		t.Errorf("logged line does not name the deleted count %d: %q", len(oldReqs), lines[0])
+	}
+
+	for _, r := range oldReqs {
+		if _, err := st.GetRequest(ctx, r.ID); err == nil {
+			t.Errorf("request %d from the old session should have been purged", r.ID)
+		}
+	}
+
+	sessions, err := st.ListSessions(ctx, store.Filter{})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != newSid {
+		t.Fatalf("sessions after purge = %+v, want exactly the untouched session %q", sessions, newSid)
+	}
+	if sessions[0].RequestCount != 3 {
+		t.Errorf("surviving session %q has RequestCount=%d, want 3 (unchanged)", oldSid, sessions[0].RequestCount)
+	}
+}
+
+// TestPurgeOnStartupZeroRetentionDeletesNothing pins retention_days<=0 as
+// "keep forever": no rows are removed and nothing is logged.
+func TestPurgeOnStartupZeroRetentionDeletesNothing(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	_, oldReqs := seedSessionAt(t, st, "ccccccccccccccc3", time.Now().Add(-365*24*time.Hour))
+
+	var lines []string
+	purgeOnStartup(ctx, st, 0, func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+
+	if len(lines) != 0 {
+		t.Errorf("retention_days=0 logged output: %v", lines)
+	}
+	for _, r := range oldReqs {
+		if _, err := st.GetRequest(ctx, r.ID); err != nil {
+			t.Errorf("request %d should survive retention_days=0: %v", r.ID, err)
+		}
+	}
+}
+
+// TestDoctorReportsRetentionDays asserts the resolved value appears in
+// doctor's effective-config table for a non-default setting, so a hardcoded
+// output line would fail.
+func TestDoctorReportsRetentionDays(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"-db-path", dbPath, "-retention-days", "17"}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v", err)
+	}
+	if !strings.Contains(buf.String(), "17") {
+		t.Errorf("doctor output does not report retention_days=17:\n%s", buf.String())
 	}
 }

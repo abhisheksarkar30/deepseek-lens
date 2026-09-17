@@ -51,6 +51,12 @@ func Serve(args []string) error {
 	// proxy already applies.
 	checkRedaction(context.Background(), st, log.Printf)
 
+	// br-GI-17-06's retention purge: a startup run plus a 24-hour ticker
+	// (below), so a tool that is opened and closed around work sessions
+	// still sees the setting take effect. purgeOnStartup no-ops when
+	// cfg.RetentionDays <= 0 (the default: keep forever).
+	purgeOnStartup(context.Background(), st, cfg.RetentionDays, log.Printf)
+
 	sk := sink.New(sink.DefaultCapacity)
 	broker := api.NewBroker()
 	// PublishingStore wraps st so the consumer's writes also publish SSE
@@ -105,9 +111,12 @@ func Serve(args []string) error {
 	// same tee and the same consumer writer as every other call (br-GI-1-13).
 	// cfg.ReplayEnabled is the endpoint's opt-in control — the dashboard route
 	// exists but answers 403 until `lens serve --replay` is passed.
+	dashAPI := api.New(st, sk, cons, broker, web.Files, proxySrv.Handler, cfg.ReplayEnabled)
+	dashAPI.SetPricing(pricing.DefaultPath())
+	dashAPI.SetRetention(cfg.RetentionDays, st)
 	dashSrv := &http.Server{
 		Addr:    cfg.DashboardAddr,
-		Handler: api.New(st, sk, cons, broker, web.Files, proxySrv.Handler, cfg.ReplayEnabled),
+		Handler: dashAPI,
 	}
 
 	printBanner(os.Stdout, cfg)
@@ -130,6 +139,23 @@ func Serve(args []string) error {
 	go func() {
 		if err := dashSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- fmt.Errorf("dashboard server: %w", err)
+		}
+	}()
+
+	// br-GI-17-06's 24-hour purge ticker, alongside the startup run above —
+	// a tool that is opened and closed around work sessions may never see a
+	// 24-hour boundary on its own, but this keeps a long-lived process from
+	// only ever purging once.
+	purgeTicker := time.NewTicker(24 * time.Hour)
+	defer purgeTicker.Stop()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-purgeTicker.C:
+				purgeOnStartup(ctx, st, cfg.RetentionDays, log.Printf)
+			}
 		}
 	}()
 
@@ -168,6 +194,26 @@ func checkRedaction(ctx context.Context, st *store.Store, logf func(string, ...a
 	if err := st.RedactCheck(ctx); err != nil {
 		logf("serve: %v", err)
 	}
+}
+
+// purgeOnStartup runs br-GI-17-06's retention purge against st's writer
+// connection and logs the deleted count through logf. days <= 0 means "keep
+// forever" (the default) and is a no-op — nothing is deleted on an
+// unconfigured install. Split out from Serve for the same reason
+// checkRedaction is: Serve cannot be driven from a test (two real listeners,
+// a blocking signal context), so the run itself has to be testable on its
+// own against a temp store.
+func purgeOnStartup(ctx context.Context, st *store.Store, days int, logf func(string, ...any)) {
+	if days <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+	res, err := st.PurgeOlderThan(ctx, cutoff)
+	if err != nil {
+		logf("serve: retention purge: %v", err)
+		return
+	}
+	logf("serve: retention purge: deleted %d row(s) older than %s", res.Deleted, cutoff.Format(time.RFC3339))
 }
 
 // printBanner prints the copy-pasteable ANTHROPIC_BASE_URL line, the

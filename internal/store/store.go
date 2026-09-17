@@ -1,11 +1,18 @@
 // Package store is the SQLite-backed persistence layer: everything the
 // consumer (br-GI-1-07) writes and everything the dashboard/API
 // (br-GI-1-08 onward) reads. See CLAUDE.md's "Architecture essentials" for
-// the single-writer discipline this package assumes: exactly one goroutine
-// ever calls a writer method. Open's writer connection has
-// SetMaxOpenConns(1), which is what turns a violation of that discipline
-// into serialized queuing rather than silent corruption — belt and braces,
-// not the primary guarantee.
+// the discipline row ingest assumes: the consumer's Run goroutine is the
+// one caller of InsertRequest and its kin. A purge is a different kind of
+// writer, not a violation of that discipline — there are two of them. The
+// in-process purges (PurgeOlderThan/PurgeUnpriced, run on a schedule or via
+// POST /api/purge) share this package's writer connection below
+// (SetMaxOpenConns(1)), so they queue behind ingest rather than race it.
+// `lens purge` (br-GI-17-08) is a separate process with its own writer
+// connection: it is not serialized by that connection cap, but
+// cross-process by WAL plus busy_timeout instead (see pragmaDSN below).
+// The connection cap is what turns an accidental same-process second
+// ingest caller into serialized queuing rather than silent corruption —
+// belt and braces, not the primary guarantee.
 package store
 
 import (
@@ -841,65 +848,195 @@ func (s *Store) WarningSummary(ctx context.Context, f Filter) ([]WarningGroup, e
 	return out, rows.Err()
 }
 
-// PurgeOlderThan deletes requests started before cutoff and their warnings,
-// as one transaction, and returns the number of requests deleted. Any
-// session that had requests purged out of it is reconciled in the same
-// transaction (see reconcileSession) — sessions' counters are otherwise
-// incrementally maintained (UpsertSession only ever adds), so without this a
-// purged session's row would keep reporting calls that no longer exist.
-func (s *Store) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
+// purgeUnpricedWhere is the D5 predicate: a strict subset of the "unpriced"
+// cost-source bucket StatsByCostSource groups on, further narrowed to
+// requests that actually used tokens. cost_usd IS NULL alone is a superset
+// — it also matches unknown-model rows, since Compute returns
+// Cost{Source: SourceUnknownModel} with a nil Amount — so this starts from
+// the same COALESCE StatsByCostSource uses to label a row "unpriced"
+// (folding in the NULL-source rows while leaving unknown-model, configured
+// and approximate as their own groups; a bare <> test would be
+// NULL-safe-false and wrongly drop the NULL-source rows). The positive-token
+// conjunct is what keeps this a strict subset of that Stats-tab group
+// rather than an equality with it: StatsByCostSource has no token
+// condition, so it also counts zero-token error/4xx responses this
+// predicate deliberately excludes — those were never priceable, so purging
+// them would not be "records of actual tokens used". There is no tokens
+// column, so the conjunct is spelled out over the four token columns.
+// Held once here so the preview reads (CountUnpriced, UnpricedBytes) and
+// the delete (PurgeUnpriced) agree by construction.
+const purgeUnpricedWhere = `COALESCE(cost_source, 'unpriced') = 'unpriced'
+	AND (input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens) > 0`
+
+// purgeWhere is the one delete implementation PurgeOlderThan and
+// PurgeUnpriced both wrap: same transaction, same per-affected-session
+// reconcileSession loop, same commit — only the WHERE clause differs.
+//
+// All three statements below embed where, and generalizing only the
+// requests delete is the trap that compiles and deletes the right rows
+// while reconciling every session in the table instead of the ones
+// actually touched: the affected-session query would still ask its own
+// question if left hardcoded. where is parenthesised in the
+// affected-session query, where it gains an appended AND, since the D5
+// predicate is itself a conjunction and would otherwise bind wrongly
+// against it.
+func (s *Store) purgeWhere(ctx context.Context, where string, args ...any) (PurgeResult, error) {
 	tx, err := s.writer.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("store: purge: begin: %w", err)
+		return PurgeResult{}, fmt.Errorf("store: purge: begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	before := cutoff.UnixNano()
-
 	sessionRows, err := tx.QueryContext(ctx,
-		"SELECT DISTINCT session_id FROM requests WHERE started_at < ? AND session_id IS NOT NULL", before)
+		"SELECT DISTINCT session_id FROM requests WHERE ("+where+") AND session_id IS NOT NULL", args...)
 	if err != nil {
-		return 0, fmt.Errorf("store: purge: affected sessions: %w", err)
+		return PurgeResult{}, fmt.Errorf("store: purge: affected sessions: %w", err)
 	}
 	var affected []string
 	for sessionRows.Next() {
 		var id string
 		if err := sessionRows.Scan(&id); err != nil {
 			sessionRows.Close()
-			return 0, fmt.Errorf("store: purge: affected sessions: %w", err)
+			return PurgeResult{}, fmt.Errorf("store: purge: affected sessions: %w", err)
 		}
 		affected = append(affected, id)
 	}
 	if err := sessionRows.Err(); err != nil {
-		return 0, fmt.Errorf("store: purge: affected sessions: %w", err)
+		return PurgeResult{}, fmt.Errorf("store: purge: affected sessions: %w", err)
 	}
 	sessionRows.Close()
 
 	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM warnings WHERE request_id IN (SELECT id FROM requests WHERE started_at < ?)", before,
+		"DELETE FROM warnings WHERE request_id IN (SELECT id FROM requests WHERE "+where+")", args...,
 	); err != nil {
-		return 0, fmt.Errorf("store: purge: warnings: %w", err)
+		return PurgeResult{}, fmt.Errorf("store: purge: warnings: %w", err)
 	}
 
-	res, err := tx.ExecContext(ctx, "DELETE FROM requests WHERE started_at < ?", before)
+	res, err := tx.ExecContext(ctx, "DELETE FROM requests WHERE "+where, args...)
 	if err != nil {
-		return 0, fmt.Errorf("store: purge: requests: %w", err)
+		return PurgeResult{}, fmt.Errorf("store: purge: requests: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return 0, fmt.Errorf("store: purge: rows affected: %w", err)
+		return PurgeResult{}, fmt.Errorf("store: purge: rows affected: %w", err)
 	}
 
 	for _, id := range affected {
 		if err := reconcileSession(ctx, tx, id); err != nil {
-			return 0, fmt.Errorf("store: purge: %w", err)
+			return PurgeResult{}, fmt.Errorf("store: purge: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("store: purge: commit: %w", err)
+		return PurgeResult{}, fmt.Errorf("store: purge: commit: %w", err)
+	}
+	return PurgeResult{Deleted: n, SessionsReconciled: len(affected)}, nil
+}
+
+// PurgeOlderThan deletes requests started before cutoff and their warnings,
+// as one transaction, and returns the number of requests deleted and the
+// number of sessions reconciled. Any session that had requests purged out
+// of it is reconciled in the same transaction (see reconcileSession) —
+// sessions' counters are otherwise incrementally maintained (UpsertSession
+// only ever adds), so without this a purged session's row would keep
+// reporting calls that no longer exist.
+func (s *Store) PurgeOlderThan(ctx context.Context, cutoff time.Time) (PurgeResult, error) {
+	return s.purgeWhere(ctx, "started_at < ?", cutoff.UnixNano())
+}
+
+// PurgeUnpriced deletes requests matching purgeUnpricedWhere (D5) and their
+// warnings, reconciling affected sessions the same way PurgeOlderThan does.
+// unknown-model rows and priced rows are untouched — the COALESCE keeps
+// unknown-model out of the "unpriced" bucket, and a row with cost_usd set
+// is not unpriced at all.
+func (s *Store) PurgeUnpriced(ctx context.Context) (PurgeResult, error) {
+	return s.purgeWhere(ctx, purgeUnpricedWhere)
+}
+
+// CountPurgeable and PurgeableBytes preview PurgeOlderThan's exact
+// predicate (started_at < cutoff) without deleting anything, so the
+// Settings tab's confirmation is informed by a real number. oldest/newest
+// are nil whenever the eligible count is 0 — MIN/MAX over an empty set is
+// SQL NULL and cannot scan into a value time.Time, the same trap
+// reconcileSession avoids by scanning into sql.NullInt64.
+func (s *Store) CountPurgeable(ctx context.Context, cutoff time.Time) (count int, oldest, newest *time.Time, err error) {
+	var oldestNS, newestNS sql.NullInt64
+	err = s.reader.QueryRowContext(ctx,
+		"SELECT COUNT(*), MIN(started_at), MAX(started_at) FROM requests WHERE started_at < ?",
+		cutoff.UnixNano(),
+	).Scan(&count, &oldestNS, &newestNS)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("store: count purgeable: %w", err)
+	}
+	if oldestNS.Valid {
+		t := time.Unix(0, oldestNS.Int64).UTC()
+		oldest = &t
+	}
+	if newestNS.Valid {
+		t := time.Unix(0, newestNS.Int64).UTC()
+		newest = &t
+	}
+	return count, oldest, newest, nil
+}
+
+// PurgeableBytes previews PurgeOlderThan's reclaimable bytes: an
+// approximate, linear-in-eligible-rows scan of the eligible set's stored
+// bodies. COALESCE is load-bearing — SUM over zero rows is SQL NULL, and
+// zero eligible rows is a supported state (a cutoff older than every row),
+// not a corner. A row whose bodies are NULL contributes nothing
+// (LENGTH(NULL) is NULL and SUM skips it), so body-less rows are
+// undercounted; fine at this tool's scale.
+func (s *Store) PurgeableBytes(ctx context.Context, cutoff time.Time) (int64, error) {
+	var n int64
+	err := s.reader.QueryRowContext(ctx,
+		"SELECT COALESCE(SUM(LENGTH(req_body)+LENGTH(resp_body)), 0) FROM requests WHERE started_at < ?",
+		cutoff.UnixNano(),
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: purgeable bytes: %w", err)
 	}
 	return n, nil
+}
+
+// CountUnpriced and UnpricedBytes preview PurgeUnpriced's exact predicate
+// (purgeUnpricedWhere) — not interchangeable with CountPurgeable/
+// PurgeableBytes above, which preview a different predicate entirely.
+func (s *Store) CountUnpriced(ctx context.Context) (int, error) {
+	var n int
+	err := s.reader.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM requests WHERE "+purgeUnpricedWhere,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count unpriced: %w", err)
+	}
+	return n, nil
+}
+
+// UnpricedBytes previews PurgeUnpriced's reclaimable bytes, same COALESCE
+// and same approximation as PurgeableBytes above.
+func (s *Store) UnpricedBytes(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.reader.QueryRowContext(ctx,
+		"SELECT COALESCE(SUM(LENGTH(req_body)+LENGTH(resp_body)), 0) FROM requests WHERE "+purgeUnpricedWhere,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: unpriced bytes: %w", err)
+	}
+	return n, nil
+}
+
+// Vacuum runs VACUUM on the writer connection — the only path to it from
+// outside this package, since writer is unexported. Opt-in and never
+// automatic (R3): VACUUM needs free space on the order of the database's
+// size and takes an exclusive lock that blocks ingest for as long as it
+// runs, which is also why it is not part of the RetentionPurger seam
+// internal/api uses — the dashboard never offers it, only `lens purge
+// --vacuum` (br-GI-17-08).
+func (s *Store) Vacuum(ctx context.Context) error {
+	if _, err := s.writer.ExecContext(ctx, "VACUUM"); err != nil {
+		return fmt.Errorf("store: vacuum: %w", err)
+	}
+	return nil
 }
 
 // reconcileSession recomputes sessionID's row from whatever requests/warnings
