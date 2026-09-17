@@ -383,6 +383,175 @@ func TestStatsIncludesCostSourceBreakdown(t *testing.T) {
 	}
 }
 
+// getStats issues GET /api/stats with query and returns the decoded body,
+// failing on any non-200.
+func getStats(t *testing.T, handler http.Handler, query string) statsResponse {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/stats"+query, nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/stats%s: status = %d, want 200: %s", query, rr.Code, rr.Body.String())
+	}
+	return decodeJSON[statsResponse](t, rr.Body)
+}
+
+// TestStatsGranularityParam covers br-GI-21-03's granularity contract: each
+// valid value selects a bucket format, and the response echoes the one that
+// was actually applied rather than leaving the client to infer it.
+func TestStatsGranularityParam(t *testing.T) {
+	st := newTestStore(t)
+	// One row at a fixed instant, so each granularity's bucket label is
+	// deterministic: 2026-03-01T00:00Z is a Sunday, which %W numbers as week
+	// 08 of 2026.
+	at := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	seedRequest(t, st, func(r *store.Request) { r.StartedAt = at })
+	handler, _, _, _ := newTestAPI(t, st)
+
+	cases := []struct {
+		granularity string
+		wantLabel   func(string) bool
+		labelDesc   string
+	}{
+		{"hour", func(s string) bool { return s == "2026-03-01T00:00" }, `"2026-03-01T00:00"`},
+		{"day", func(s string) bool { return s == "2026-03-01" }, `"2026-03-01"`},
+		{"week", func(s string) bool { return len(s) == 8 && strings.HasPrefix(s, "2026-W") }, `"2026-Www"`},
+		{"month", func(s string) bool { return s == "2026-03" }, `"2026-03"`},
+	}
+	for _, tc := range cases {
+		got := getStats(t, handler, "?granularity="+tc.granularity)
+		if got.Granularity != tc.granularity {
+			t.Errorf("granularity=%s: echoed %q, want %q", tc.granularity, got.Granularity, tc.granularity)
+		}
+		if len(got.ByPeriod) != 1 {
+			t.Fatalf("granularity=%s: got %d buckets, want 1 (%+v)", tc.granularity, len(got.ByPeriod), got.ByPeriod)
+		}
+		if label := got.ByPeriod[0].Period; !tc.wantLabel(label) {
+			t.Errorf("granularity=%s: bucket label %q, want %s", tc.granularity, label, tc.labelDesc)
+		}
+		if got.ByPeriod[0].RequestCount != 1 {
+			t.Errorf("granularity=%s: bucket RequestCount = %d, want 1", tc.granularity, got.ByPeriod[0].RequestCount)
+		}
+	}
+
+	// Absent defaults to day, and says so in the response.
+	got := getStats(t, handler, "")
+	if got.Granularity != "day" {
+		t.Errorf("absent granularity: echoed %q, want %q", got.Granularity, "day")
+	}
+}
+
+// TestStatsInvalidGranularityIs400 pins the API-layer half of the two-layer
+// granularity validation: an unknown value is rejected before any store call,
+// so the store's own whitelist never has to be the first line of defense.
+func TestStatsInvalidGranularityIs400(t *testing.T) {
+	st := newTestStore(t)
+	seedRequest(t, st, func(r *store.Request) { r.InputTokens = 10; r.OutputTokens = 20 })
+	handler, _, _, _ := newTestAPI(t, st)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/stats?granularity=fortnight", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+	body := decodeJSON[map[string]string](t, rr.Body)
+	if body["error"] == "" {
+		t.Errorf("body = %+v, want an error message", body)
+	}
+
+	// The seeded row is still there and still reported: the rejected request
+	// did not consume or partially execute anything.
+	got := getStats(t, handler, "")
+	if got.Summary.RequestCount != 1 {
+		t.Errorf("after rejected request: RequestCount = %d, want 1", got.Summary.RequestCount)
+	}
+}
+
+func TestStatsMalformedUntilIs400(t *testing.T) {
+	st := newTestStore(t)
+	handler, _, _, _ := newTestAPI(t, st)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/stats?until=notatime", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestStatsUntilNarrowsEveryField is the cross-field guard: until has to bound
+// all four aggregates, not just the period breakdown. If only StatsByPeriod
+// learned about it, the summary beside the chart would describe a wider window
+// than the chart — the "two numbers that cannot be read as agreeing" failure,
+// which looks like arithmetic that does not add up rather than a crash.
+func TestStatsUntilNarrowsEveryField(t *testing.T) {
+	st := newTestStore(t)
+	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	for _, off := range []time.Duration{time.Hour, 2 * time.Hour, 5 * time.Hour} {
+		seedRequest(t, st, func(r *store.Request) { r.StartedAt = base.Add(off) })
+	}
+	handler, _, _, _ := newTestAPI(t, st)
+
+	cutoff := base.Add(3 * time.Hour)
+	since := base.Format(time.RFC3339)
+	until := cutoff.Format(time.RFC3339)
+
+	got := getStats(t, handler, "?since="+since+"&until="+until)
+	if got.Since.Format(time.RFC3339) != since {
+		t.Errorf("echoed since = %s, want %s", got.Since.Format(time.RFC3339), since)
+	}
+	if got.Until.Format(time.RFC3339) != until {
+		t.Errorf("echoed until = %s, want %s", got.Until.Format(time.RFC3339), until)
+	}
+	if got.Summary.RequestCount != 2 {
+		t.Errorf("summary RequestCount = %d, want 2", got.Summary.RequestCount)
+	}
+	if n := sumCounts(got.ByModel, func(m store.ModelStat) int { return m.RequestCount }); n != 2 {
+		t.Errorf("by_model totals %d calls, want 2", n)
+	}
+	if n := sumCounts(got.CostSources, func(c store.CostSourceStat) int { return c.RequestCount }); n != 2 {
+		t.Errorf("cost_sources totals %d calls, want 2", n)
+	}
+	if n := sumCounts(got.ByPeriod, func(p store.PeriodStat) int { return p.RequestCount }); n != 2 {
+		t.Errorf("by_period totals %d calls, want 2", n)
+	}
+}
+
+// sumCounts totals a count field across rows, for comparing two breakdowns
+// that should describe the same window.
+func sumCounts[T any](rows []T, count func(T) int) int {
+	n := 0
+	for _, r := range rows {
+		n += count(r)
+	}
+	return n
+}
+
+// TestStatsSinceAfterUntilIsEmpty pins that an inverted window is a legitimate
+// empty answer, not a rejection: the bounds are independently settable by the
+// client, and a range with nothing in it is a normal thing to ask for.
+func TestStatsSinceAfterUntilIsEmpty(t *testing.T) {
+	st := newTestStore(t)
+	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	seedRequest(t, st, func(r *store.Request) { r.StartedAt = base })
+	handler, _, _, _ := newTestAPI(t, st)
+
+	since := base.Add(time.Hour).Format(time.RFC3339)
+	until := base.Format(time.RFC3339)
+	got := getStats(t, handler, "?since="+since+"&until="+until)
+
+	if got.Summary == nil || got.Summary.RequestCount != 0 {
+		t.Errorf("summary = %+v, want RequestCount 0", got.Summary)
+	}
+	if len(got.ByPeriod) != 0 {
+		t.Errorf("by_period = %+v, want empty", got.ByPeriod)
+	}
+	if len(got.ByModel) != 0 {
+		t.Errorf("by_model = %+v, want empty", got.ByModel)
+	}
+	if len(got.CostSources) != 0 {
+		t.Errorf("cost_sources = %+v, want empty", got.CostSources)
+	}
+}
+
 func TestListWarningsFilteredByKind(t *testing.T) {
 	st := newTestStore(t)
 	r1 := seedRequest(t, st, nil)

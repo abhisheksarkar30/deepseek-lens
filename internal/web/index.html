@@ -67,8 +67,36 @@
         <tbody></tbody>
       </table>
     </div>
-    <h3>Calls per day</h3>
+    <div class="stats-controls">
+      <label>Granularity
+        <select id="stats-granularity">
+          <option value="hour">Hour</option>
+          <option value="day" selected>Day</option>
+          <option value="week">Week</option>
+          <option value="month">Month</option>
+        </select>
+      </label>
+      <label>From <input type="date" id="stats-from"></label>
+      <label>To <input type="date" id="stats-to"></label>
+    </div>
+    <!-- The metric buttons carry .metric, not .tab, and deliberately no
+         data-view: showView() sweeps every .tab to re-apply active from
+         data-view on each view transition, which would deselect the chosen
+         metric every time the user returns to this tab. -->
+    <div class="metric-toggle" id="stats-metric">
+      <button class="metric active" data-metric="count" type="button">Calls</button>
+      <button class="metric" data-metric="tokens" type="button">Tokens</button>
+      <button class="metric" data-metric="cost" type="button">Cost</button>
+    </div>
+    <h3 id="stats-chart-title">Calls per day</h3>
     <svg id="stats-chart" viewBox="0 0 600 200" preserveAspectRatio="xMidYMid meet" role="img" aria-label="calls per day line chart"></svg>
+    <h3>History</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Period</th><th>Calls</th><th>Tokens</th><th>Cost</th></tr></thead>
+        <tbody id="stats-history"></tbody>
+      </table>
+    </div>
     <h3>By model</h3>
     <div class="table-wrap">
       <table>

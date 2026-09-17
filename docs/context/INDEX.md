@@ -57,7 +57,18 @@ ADR).
 
 ## Last generated / refreshed
 
-2026-09-17, REFRESH mode, scoped to the GI-17 pricing-retention-purge story
+2026-09-17, REFRESH mode, scoped to the GI-21 stats-by-period story (`GI-21-stats-by-period` branch)
+— `store.StatsByDay` generalized to `StatsByPeriod(ctx, since, until, granularity)` over four
+granularities, with `DayStat`/`Day` renamed to `PeriodStat`/`Period`; `GET /api/stats` gained the
+`granularity` and `until` query params and renamed its `by_day` response field to `by_period`, and
+`lens stats --json` followed with the same key rename; the Stats tab gained the granularity/From/To
+controls, the metric toggle, and the history table (`api-surface.md`, `data-model.md`). This refresh
+also recomputed **every** `internal/api/api.go` citation in `api-surface.md`: the bead expected four
+drifted rows, but the whole citation set had drifted (+59 to +140 lines across twenty-one citations,
+the ten handler-citing route rows spanning +85 to +124), so the class was corrected rather than the
+four instances.
+
+Previously: 2026-09-17, REFRESH mode, scoped to the GI-17 pricing-retention-purge story
 (`GI-17-pricing-retention-purge` branch) — `retention_days` config and the scheduled/startup purge,
 `GET /api/prices` / `POST /api/prices`, `GET /api/retention` / `POST /api/purge`, the twelfth CLI
 subcommand `lens purge`, and the Settings tab. This is also the bead (br-GI-17-11) that amended

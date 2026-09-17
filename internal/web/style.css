@@ -282,6 +282,38 @@ td.price-cell input {
 #settings-older-than-confirm button, #settings-unpriced-confirm button { margin-right: 8px; }
 #settings-older-than-result, #settings-unpriced-result { margin-top: 8px; font-size: 0.85rem; }
 
+/* Navigational filters, so they take the pager's var(--border) language, not
+   td.price-cell's var(--accent) (which signals "directly editable data"). */
+.stats-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+}
+.stats-controls select,
+.stats-controls input[type="date"] {
+  background: var(--bg-alt);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+
+/* The look is copied from .tab, not shared with its selector: showView() sweeps
+   every .tab to re-apply active from data-view, which would clear the chosen
+   metric on each view transition. */
+.metric {
+  background: var(--bg-alt);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.metric.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+
 svg#stats-chart {
   width: 100%;
   height: auto;

@@ -156,7 +156,7 @@ func runChecks(cfg *config.Config) []doctorCheck {
 	// package.
 	checks = append(checks, doctorCheck{"wal_mode", statusPass, "enabled (forced by store.Open)"})
 
-	sum, err := st.StatsSummary(context.Background(), time.Time{})
+	sum, err := st.StatsSummary(context.Background(), time.Time{}, time.Time{})
 	if err != nil {
 		checks = append(checks, doctorCheck{"row_count", statusFail, err.Error()})
 	} else {
