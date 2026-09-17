@@ -196,3 +196,12 @@ type CostSourceStat struct {
 	RequestCount int
 	CostUSDTotal float64
 }
+
+// PurgeResult is what PurgeOlderThan and PurgeUnpriced both return —
+// exported because it crosses into internal/api, where POST /api/purge
+// reports it for either mode. No json tags, same convention as the rest of
+// this file: internal/api owns the tagged wire shape.
+type PurgeResult struct {
+	Deleted            int64 // requests removed
+	SessionsReconciled int   // distinct sessions touched
+}

@@ -67,7 +67,9 @@ func runPrices(args []string, w io.Writer, path string) error {
 	return printPrices(w, path, tbl)
 }
 
-// applySet parses "model.field=rate" into tbl.
+// applySet parses "model.field=rate" into tbl, using internal/pricing's
+// exported checks so the CLI and Save share one guard rather than each
+// keeping its own copy.
 func applySet(tbl pricing.Table, kv string) error {
 	key, val, ok := strings.Cut(kv, "=")
 	if !ok {
@@ -77,12 +79,15 @@ func applySet(tbl pricing.Table, kv string) error {
 	if !ok || model == "" {
 		return fmt.Errorf("--set %q: want model.field=rate", kv)
 	}
+	if err := pricing.CheckModel(model); err != nil {
+		return fmt.Errorf("--set %q: %w", kv, err)
+	}
 	rate, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
 	if err != nil {
 		return fmt.Errorf("--set %q: invalid rate %q: want a number", kv, val)
 	}
-	if rate < 0 {
-		return fmt.Errorf("--set %q: rate must not be negative", kv)
+	if err := pricing.CheckRate(rate); err != nil {
+		return fmt.Errorf("--set %q: %w", kv, err)
 	}
 	r := tbl[model]
 	if err := r.Set(field, rate); err != nil {

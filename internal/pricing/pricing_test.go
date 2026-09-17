@@ -1,10 +1,13 @@
 package pricing
 
 import (
+	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -425,5 +428,177 @@ func TestLoaderWithNoFileIsUnpriced(t *testing.T) {
 	l := NewLoader(filepath.Join(t.TempDir(), "absent.toml"))
 	if got := l.Table()["deepseek-flash"].Source(); got != SourceUnpriced {
 		t.Errorf("source = %q, want %q", got, SourceUnpriced)
+	}
+}
+
+// TestSaveRejectsInvalidModelName covers br-GI-17-01: a model name
+// containing a newline, '=', '.', or a space is rejected with ErrInvalidName
+// and the target file is left byte-for-byte unchanged.
+func TestSaveRejectsInvalidModelName(t *testing.T) {
+	for _, bad := range []string{"x\nfoo", "x=foo", "a.b", "a b"} {
+		t.Run(bad, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "prices.toml")
+			seed := Table{"deepseek-flash": {Input: f(0.28)}}
+			if err := Save(path, seed); err != nil {
+				t.Fatalf("seeding Save: %v", err)
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading seeded file: %v", err)
+			}
+
+			err = Save(path, Table{bad: {Input: f(0.1)}})
+			if !errors.Is(err, ErrInvalidName) {
+				t.Fatalf("Save(%q) error = %v, want ErrInvalidName", bad, err)
+			}
+
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading file after rejected Save: %v", err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Errorf("rejected Save changed the file:\n before %q\n after  %q", before, after)
+			}
+		})
+	}
+}
+
+// TestSaveRejectsInvalidRate covers the shared ErrInvalidRate check: NaN,
+// +Inf, -Inf, and a negative rate are all rejected; 0 is accepted and reads
+// back distinct from unset.
+func TestSaveRejectsInvalidRate(t *testing.T) {
+	for name, v := range map[string]float64{
+		"NaN":  math.NaN(),
+		"+Inf": math.Inf(1),
+		"-Inf": math.Inf(-1),
+		"-1":   -1,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "prices.toml")
+			err := Save(path, Table{"deepseek-flash": {Input: f(v)}})
+			if !errors.Is(err, ErrInvalidRate) {
+				t.Fatalf("Save(rate=%v) error = %v, want ErrInvalidRate", v, err)
+			}
+		})
+	}
+
+	path := filepath.Join(t.TempDir(), "prices.toml")
+	if err := Save(path, Table{"deepseek-flash": {Input: f(0)}}); err != nil {
+		t.Fatalf("Save(rate=0): %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if in := got["deepseek-flash"].Input; in == nil || *in != 0 {
+		t.Errorf("input = %v, want a non-nil 0 (a free model, distinct from unset)", in)
+	}
+}
+
+// TestParseTableRejectsDottedBareModelLine pins the D4 tightening: a bare
+// model line containing '.' cannot round-trip through Save (Save writes
+// model+"."+field, and parseTable cuts at the first '.'), so it is now a
+// parse error rather than silently accepted.
+func TestParseTableRejectsDottedBareModelLine(t *testing.T) {
+	_, err := parseTable("deepseek.v2\n")
+	if err == nil {
+		t.Fatal("parseTable accepted a dotted bare model line")
+	}
+	if !errors.Is(err, ErrInvalidName) {
+		t.Errorf("error = %v, want it to wrap ErrInvalidName", err)
+	}
+}
+
+// TestSaveIsAtomicUnderConcurrentReaders is br-GI-17-01's actual P0 claim.
+// The property that distinguishes temp-file+rename from truncate-in-place
+// (os.WriteFile with O_TRUNC) is only observable from a reader racing a
+// writer: a reader landing inside the old code's write window sees an
+// *empty* file, and parseTable("") returns an empty table with *no error*
+// (table.go's Load then merges Default() and the caller never learns
+// anything was wrong — the exact silent-corruption defect this bead exists
+// to close). So this drives a real writer against a real reader and asserts
+// every successful read is one of the two tables actually written — never
+// an empty one, and never a partially-written (parse-error) one.
+//
+// A raw os.ReadFile can still fail with a transient "access denied"/sharing
+// violation while the rename is in flight — Windows opens files without
+// FILE_SHARE_DELETE by default, so MoveFileEx briefly excludes a concurrent
+// Open, unlike POSIX rename(2). That is not the defect: it is a visible,
+// retryable I/O error, and the production reader (Loader.Table()) already
+// treats any Load error as "keep the last good table"
+// (TestLoaderTakesEffectWithoutRestart pins that for a malformed edit). So
+// this test tolerates read errors but asserts none of them is a parse
+// error — a parse error would mean the reader saw a truncated write, which
+// only a non-atomic Save could produce.
+func TestSaveIsAtomicUnderConcurrentReaders(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "prices.toml")
+	tblA := Table{"deepseek-flash": {Input: f(0.28)}}
+	tblB := Table{"deepseek-flash": {Input: f(0.31)}}
+	if err := Save(path, tblA); err != nil {
+		t.Fatalf("seeding Save: %v", err)
+	}
+
+	const iterations = 300
+	stop := make(chan struct{})
+	var readErrs, parseErrs, emptyReads, wrongReads int
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			got, err := Load(path)
+			mu.Lock()
+			switch {
+			case err != nil:
+				readErrs++
+				// A parse error (as opposed to a plain I/O open failure)
+				// means Load got as far as reading bytes and rejecting
+				// them — that would mean it saw a torn write.
+				if strings.Contains(err.Error(), "line ") {
+					parseErrs++
+				}
+			case got["deepseek-flash"].Input == nil:
+				emptyReads++
+			case *got["deepseek-flash"].Input != 0.28 && *got["deepseek-flash"].Input != 0.31:
+				wrongReads++
+			}
+			mu.Unlock()
+		}
+	}()
+
+	for i := 0; i < iterations; i++ {
+		tbl := tblA
+		if i%2 == 1 {
+			tbl = tblB
+		}
+		if err := Save(path, tbl); err != nil {
+			t.Fatalf("iteration %d: Save: %v", i, err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	t.Logf("%d concurrent reads raced the writer, %d of them errored (expected on Windows — see comment above)", iterations, readErrs)
+	if parseErrs != 0 {
+		t.Errorf("%d reads hit a parse error (want 0 — that means a torn/truncated write was observed)", parseErrs)
+	}
+	if wrongReads != 0 {
+		t.Errorf("%d reads returned a rate that was neither table written (want 0 — that means corrupted content)", wrongReads)
+	}
+	if emptyReads != 0 {
+		t.Errorf("%d concurrent reads saw an empty/unset table (want 0 — that is the truncate-in-place defect this bead fixes)", emptyReads)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(dir, ".prices-*.tmp"))
+	if len(matches) != 0 {
+		t.Errorf("left %d .tmp file(s) behind: %v", len(matches), matches)
 	}
 }

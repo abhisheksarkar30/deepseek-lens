@@ -45,15 +45,16 @@ together at once; every other CLI command opens the store or dashboard API on it
 | `internal/consumer` | The cold-path pipeline: drains the sink, runs parse → session → cost → insert (batched) → analyzers → session fold, with full per-call error containment | [internal/consumer/consumer.go](../../internal/consumer/consumer.go) |
 | `internal/store` | SQLite persistence: one writer connection (`SetMaxOpenConns(1)`), up to 4 reader connections, WAL mode | [internal/store/store.go](../../internal/store/store.go), [internal/store/schema.sql](../../internal/store/schema.sql) |
 | `internal/replay` | Pure helpers for `lens replay`: JSON-path body edits, outcome diffing | [internal/replay/edit.go](../../internal/replay/edit.go), [internal/replay/replay.go](../../internal/replay/replay.go) |
-| `internal/api` | Dashboard's read-only JSON API + SSE broker + the one write route (`POST /api/requests/{id}/replay`) + embedded static asset mount | [internal/api/api.go](../../internal/api/api.go), [internal/api/broker.go](../../internal/api/broker.go) |
+| `internal/api` | Dashboard's mostly-read JSON API + SSE broker + three write routes (`POST /api/requests/{id}/replay`, `POST /api/prices`, `POST /api/purge`) + embedded static asset mount | [internal/api/api.go](../../internal/api/api.go), [internal/api/broker.go](../../internal/api/broker.go) |
 | `internal/web` | `go:embed`-ed dashboard assets (`index.html`, `app.js`, `style.css`) | [internal/web/embed.go](../../internal/web/embed.go) |
-| `internal/cli` | Eleven subcommand implementations (`doctor`, `serve`, `ls`, `show`, `tail`, `stats`, `sessions`, `warnings`, `export`, `prices`, `replay`) | [internal/cli/](../../internal/cli/) |
+| `internal/cli` | Twelve subcommand implementations (`doctor`, `serve`, `ls`, `show`, `tail`, `stats`, `sessions`, `warnings`, `export`, `prices`, `replay`, `purge`) | [internal/cli/](../../internal/cli/) |
 
 ## Cross-cutting concerns
 
 - **Auth**: none. The proxy and dashboard bind loopback-only by default
-  (`config.Validate`'s `validateLoopback`); `--allow-remote` is required to bind elsewhere. The one
-  state-changing route, replay, adds its own Origin/Host allowlist instead of a credential — see
+  (`config.Validate`'s `validateLoopback`); `--allow-remote` is required to bind elsewhere. The three
+  state-changing routes — replay, prices, and purge — share one Origin/Host allowlist
+  (`replayOriginReject`, parameterized by action) instead of a credential — see
   [security-and-permissions.md](security-and-permissions.md).
 - **Logging**: stdlib `log` package only, to stderr (`log.Printf` throughout
   [internal/consumer/consumer.go](../../internal/consumer/consumer.go) and

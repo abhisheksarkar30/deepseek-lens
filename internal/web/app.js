@@ -20,6 +20,14 @@ function fmtCost(v) {
   return "$" + v.toFixed(4);
 }
 
+function fmtBytes(n) {
+  n = n || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + " GB";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + " MB";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + " KB";
+  return n + " B";
+}
+
 // isUnpriced is the one place "this call has no cost" is decided — a null
 // CostUSD, not a zero one, since a free/zero-cost call is still priced.
 function isUnpriced(costUSD) {
@@ -167,6 +175,19 @@ const state = {
   // the replay editor only when it is true: the endpoint answers 403 when
   // replay is off, so the button is inert rather than offered and broken.
   replayEnabled: false,
+  // settingsPrices is GET/POST /api/prices's last-known-good response body —
+  // the source both the table render and an edit's "whole row" POST read
+  // from, so a rejected edit has something to revert to that is not the
+  // value that was just rejected. settingsPriceDirty is the one flag R7
+  // asks for: true from the moment a cell is opened for editing until the
+  // save that follows it resolves successfully.
+  settingsPrices: null,
+  settingsPriceDirty: false,
+  // settingsRetention is GET /api/retention's last-known response — the
+  // confirm steps read their numbers from here rather than re-fetching, so
+  // "the numbers on the confirm step are the preview's" (br-GI-17-10) holds
+  // even if the preview is a moment old.
+  settingsRetention: null,
 };
 
 function bumpTotals(req) {
@@ -195,7 +216,7 @@ function renderTotals() {
 
 // ---- tab navigation ---------------------------------------------------
 
-const views = ["feed", "warnings", "stats", "sessions"];
+const views = ["feed", "warnings", "stats", "sessions", "settings"];
 function showView(name) {
   for (const v of views) {
     document.getElementById("view-" + v).hidden = v !== name;
@@ -215,6 +236,17 @@ function showView(name) {
   }
   if (name === "stats") loadStats();
   if (name === "sessions") loadSessions();
+  if (name === "settings") loadSettings();
+}
+
+// reloadDataViews re-fetches the feed, Stats and Sessions data after a
+// purge (R5) — those three describe rows that may no longer exist, and the
+// cheapest correct thing is to re-ask for what could be on screen next,
+// rather than inventing a new SSE event type to announce a delete.
+function reloadDataViews() {
+  loadInitialFeed();
+  loadStats();
+  loadSessions();
 }
 
 document.getElementById("tabs").addEventListener("click", (e) => {
@@ -649,6 +681,318 @@ async function openSession(id) {
 document.getElementById("session-detail-close").addEventListener("click", () => {
   document.getElementById("session-detail").hidden = true;
 });
+
+// ---- settings: pricing (br-GI-17-09) -----------------------------------
+
+// RATE_FIELDS pairs each POST /api/prices "rates" key with its column
+// header — the four rate fields the route takes as one whole-row PATCH-like
+// write (D3), never a per-field endpoint.
+const RATE_FIELDS = [
+  ["input", "Input"],
+  ["output", "Output"],
+  ["cache_read", "Cache read"],
+  ["cache_write", "Cache write"],
+];
+
+// loadSettings is the Settings tab's showView load hook: it fans out to the
+// two independent sections (pricing, retention/purge) rather than one fetch
+// carrying both, since GET /api/prices and GET /api/retention are two
+// routes with two unwired-503 states that must not depend on each other.
+function loadSettings() {
+  loadSettingsPrices();
+  loadSettingsRetention();
+}
+
+async function loadSettingsPrices() {
+  const errEl = document.getElementById("settings-price-error");
+  const wrap = document.getElementById("settings-price-wrap");
+  try {
+    const res = await fetch("/api/prices");
+    if (res.status === 503) {
+      // Unwired (no SetPricing in serve.go) is a plain message, not an
+      // empty table — an empty table would read as "no models configured"
+      // rather than "pricing isn't available at all".
+      wrap.hidden = true;
+      errEl.textContent = "Pricing is unavailable on this server.";
+      errEl.hidden = false;
+      return;
+    }
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { msg = (await res.json()).error || msg; } catch (e) { /* ignore */ }
+      throw new Error(msg);
+    }
+    const data = await res.json();
+    errEl.hidden = true;
+    wrap.hidden = false;
+    state.settingsPrices = data;
+    renderSettingsPrices(data);
+  } catch (e) {
+    console.error("loadSettingsPrices", e);
+    wrap.hidden = true;
+    errEl.textContent = "Failed to load pricing: " + (e.message || e);
+    errEl.hidden = false;
+  }
+}
+
+// priceSourceBadge follows costBadge's pattern: the glyph — here the source
+// word itself — never carries meaning alone, so title and aria-label always
+// say the same thing a sighted user reads from the badge's colour.
+function priceSourceBadge(source) {
+  const label = `source: ${source}`;
+  const cls = source === "configured" ? "badge" : "badge warn";
+  return `<span class="${cls}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${escapeHtml(source)}</span>`;
+}
+
+// rateCellHTML renders null as a genuinely empty cell (D3's convention: "no
+// rate configured" and "this model is free" are different statements) and 0
+// as the digit "0" — the two must never collapse into the same rendering.
+function rateCellHTML(model, key) {
+  const v = model[key];
+  const display = v === null || v === undefined ? "" : String(v);
+  return `<td class="price-cell" data-field="${key}">${escapeHtml(display)}</td>`;
+}
+
+function renderSettingsPrices(data) {
+  document.getElementById("settings-price-path").textContent = data.path;
+  document.getElementById("settings-peak-multiplier").textContent = data.peak_multiplier;
+  const body = document.getElementById("settings-price-body");
+  body.innerHTML = (data.models || []).map((m) => `<tr data-model="${escapeHtml(m.model)}">
+    <td>${escapeHtml(m.model)}</td>
+    ${RATE_FIELDS.map(([key]) => rateCellHTML(m, key)).join("")}
+    <td>${priceSourceBadge(m.source)}</td>
+  </tr>`).join("") || `<tr><td colspan="6" class="hint">No models configured.</td></tr>`;
+}
+
+function settingsPriceMessage(text) {
+  const el = document.getElementById("settings-price-msg");
+  if (!text) { el.hidden = true; return; }
+  el.textContent = text;
+  el.hidden = false;
+}
+
+// Click-to-edit is delegated on the tbody rather than wired per cell, so a
+// re-render (after every save) never has to re-attach listeners.
+document.getElementById("settings-price-body").addEventListener("click", (e) => {
+  const cell = e.target.closest("td.price-cell");
+  if (!cell || cell.querySelector("input")) return;
+  startEditingPriceCell(cell);
+});
+
+function startEditingPriceCell(cell) {
+  const orig = cell.textContent;
+  cell.dataset.orig = orig;
+  cell.innerHTML = `<input type="text" inputmode="decimal" value="${escapeHtml(orig)}">`;
+  const input = cell.querySelector("input");
+  input.focus();
+  input.select();
+  state.settingsPriceDirty = true;
+
+  let finished = false;
+  const finish = (commit) => {
+    if (finished) return; // Enter then blur on the same input would otherwise fire twice
+    finished = true;
+    if (commit) savePriceCell(cell, input.value);
+    else cell.textContent = cell.dataset.orig;
+  };
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); finish(true); }
+    else if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
+// savePriceCell sends the edited field's whole row (D3): the other three
+// rates come from the last-known-good response, not from whatever is
+// currently on screen, so a save can never resend a value the server has
+// not actually confirmed.
+async function savePriceCell(cell, rawValue) {
+  const row = cell.closest("tr");
+  const model = row.dataset.model;
+  const field = cell.dataset.field;
+  const trimmed = rawValue.trim();
+
+  let value = null;
+  if (trimmed !== "") {
+    value = Number(trimmed);
+    if (!Number.isFinite(value)) {
+      cell.textContent = cell.dataset.orig;
+      settingsPriceMessage(`"${trimmed}" is not a number — left unset.`);
+      return;
+    }
+  }
+
+  const known = ((state.settingsPrices || {}).models || []).find((m) => m.model === model) || {};
+  const rates = {
+    input: known.input, output: known.output,
+    cache_read: known.cache_read, cache_write: known.cache_write,
+  };
+  rates[field] = value;
+
+  cell.textContent = trimmed === "" ? "" : String(value);
+  try {
+    const res = await fetch("/api/prices", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, rates }),
+    });
+    let body = {};
+    try { body = await res.json(); } catch (e) { /* keep the default below */ }
+    if (!res.ok) throw new Error(body.error || res.statusText);
+
+    // Re-render from the response, never from local state (R1): this is
+    // what turns a concurrent `lens prices --set` into "the table now shows
+    // the value that won" instead of a UI that silently disagrees with the
+    // file on disk.
+    state.settingsPrices = body;
+    state.settingsPriceDirty = false;
+    settingsPriceMessage("");
+    renderSettingsPrices(body);
+  } catch (e) {
+    // Rejected: leave the table on the server's last-known state, not the
+    // value that was just refused, and say why.
+    state.settingsPriceDirty = true;
+    settingsPriceMessage(`Save failed: ${e.message || e}`);
+    if (state.settingsPrices) renderSettingsPrices(state.settingsPrices);
+  }
+}
+
+// ---- settings: retention and purge (br-GI-17-10) -----------------------
+//
+// This is the only place in the product a click deletes captured data
+// irreversibly, which is why every action here is preview-then-confirm and
+// why VACUUM is never offered (R3): it takes an exclusive lock that blocks
+// capture for as long as it runs, which is the wrong shape for a browser
+// button with no progress feedback. `lens purge --vacuum` is where it
+// belongs.
+
+async function loadSettingsRetention() {
+  const errEl = document.getElementById("settings-retention-error");
+  const wrap = document.getElementById("settings-retention-wrap");
+  try {
+    const res = await fetch("/api/retention");
+    if (res.status === 503) {
+      wrap.hidden = true;
+      errEl.textContent = "Retention and purge are unavailable on this server.";
+      errEl.hidden = false;
+      return;
+    }
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { msg = (await res.json()).error || msg; } catch (e) { /* ignore */ }
+      throw new Error(msg);
+    }
+    const data = await res.json();
+    errEl.hidden = true;
+    wrap.hidden = false;
+    state.settingsRetention = data;
+    renderSettingsRetention(data);
+  } catch (e) {
+    console.error("loadSettingsRetention", e);
+    wrap.hidden = true;
+    errEl.textContent = "Failed to load retention: " + (e.message || e);
+    errEl.hidden = false;
+  }
+}
+
+// renderSettingsRetention draws the two-state summary and rebuilds both
+// confirm panels' copy from the fresh preview. days<=0 ("keep forever") and
+// days>0 are the two readings of an unconfigured threshold, and only one is
+// true — the older-than action must be ABSENT (hidden), not merely
+// disabled, in the former: a greyed button still reads as "there is
+// something to purge here".
+function renderSettingsRetention(data) {
+  const summary = document.getElementById("settings-retention-summary");
+  const olderThanAction = document.getElementById("settings-older-than-action");
+
+  if (data.days <= 0) {
+    summary.textContent = "Retention is off (keep forever). Set --retention-days, " +
+      "LENS_RETENTION_DAYS, or retention_days in config.toml to enable it.";
+    olderThanAction.hidden = true;
+    document.getElementById("settings-older-than-confirm").hidden = true;
+  } else {
+    const eligible = data.eligible_requests > 0
+      ? `${data.eligible_requests} request(s), ~${fmtBytes(data.eligible_bytes)}` +
+        ` (${data.oldest} to ${data.newest})`
+      : "nothing to purge";
+    summary.textContent = `Retention is configured to ${data.days} day(s). ` +
+      `Cutoff: ${data.cutoff}. Eligible now: ${eligible}.`;
+    olderThanAction.hidden = false;
+    document.getElementById("settings-older-than-confirm-text").textContent =
+      data.eligible_requests > 0
+        ? `This deletes ${data.eligible_requests} request(s) older than ${data.cutoff} ` +
+          `(~${fmtBytes(data.eligible_bytes)}). This cannot be undone.`
+        : `Nothing is older than ${data.cutoff} right now — there is nothing to delete.`;
+  }
+
+  // The unpriced action is independent of days (D10/D11): it stays
+  // available under "keep forever", and its confirm copy always names the
+  // figure as the positive-token unpriced count — a strict SUBSET of the
+  // Stats tab's larger "unpriced N" (which has no token condition), so the
+  // two on-screen figures differ by design and the label is what keeps that
+  // reading as intended rather than as a contradiction.
+  document.getElementById("settings-unpriced-confirm-text").textContent =
+    `This deletes ${data.unpriced_requests} unpriced request(s) with at least one token ` +
+    `(~${fmtBytes(data.unpriced_bytes)}) — a subset of the Stats tab's larger "unpriced" count, ` +
+    `which also includes zero-token rows. This cannot be undone.`;
+}
+
+document.getElementById("settings-older-than-btn").addEventListener("click", () => {
+  const panel = document.getElementById("settings-older-than-confirm");
+  panel.hidden = false;
+  panel.scrollIntoView({ block: "nearest" });
+});
+document.getElementById("settings-older-than-cancel-btn").addEventListener("click", () => {
+  document.getElementById("settings-older-than-confirm").hidden = true;
+});
+document.getElementById("settings-older-than-confirm-btn").addEventListener("click", (e) => {
+  const days = (state.settingsRetention || {}).days;
+  if (!days || days <= 0) return; // the panel that offers this is hidden in this state; belt
+  runPurgeAction("older_than", days, e.currentTarget, "settings-older-than-result");
+});
+
+document.getElementById("settings-unpriced-btn").addEventListener("click", () => {
+  const panel = document.getElementById("settings-unpriced-confirm");
+  panel.hidden = false;
+  panel.scrollIntoView({ block: "nearest" });
+});
+document.getElementById("settings-unpriced-cancel-btn").addEventListener("click", () => {
+  document.getElementById("settings-unpriced-confirm").hidden = true;
+});
+document.getElementById("settings-unpriced-confirm-btn").addEventListener("click", (e) => {
+  runPurgeAction("unpriced", 0, e.currentTarget, "settings-unpriced-result");
+});
+
+// runPurgeAction issues the one POST /api/purge the confirm click commits
+// to. The button is disabled for the duration so a second click (or a
+// double-click on the confirm) cannot fire the action twice, and a failed
+// POST surfaces its message in place rather than silently reloading
+// anything — reloadDataViews only runs after a confirmed success.
+async function runPurgeAction(mode, days, button, resultElId) {
+  const result = document.getElementById(resultElId);
+  button.disabled = true;
+  result.textContent = "purging…";
+  try {
+    const body = mode === "older_than" ? { mode, days } : { mode };
+    const res = await fetch("/api/purge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* keep the default below */ }
+    if (!res.ok) throw new Error(data.error || res.statusText);
+
+    result.textContent = `Deleted ${data.deleted} request(s), reconciled ${data.sessions_reconciled} session(s).`;
+    button.closest(".detail-panel").hidden = true;
+    reloadDataViews();
+    loadSettingsRetention();
+  } catch (e) {
+    result.textContent = `Purge failed: ${e.message || e}`;
+  } finally {
+    button.disabled = false;
+  }
+}
 
 // ---- request detail modal ----------------------------------------------
 

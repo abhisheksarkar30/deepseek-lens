@@ -269,3 +269,106 @@ func TestValidateReplayCostThresholdUSD(t *testing.T) {
 		}
 	}
 }
+
+func TestRetentionDaysPrecedence(t *testing.T) {
+	t.Run("unset defaults to zero", func(t *testing.T) {
+		freshHome(t)
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.RetentionDays != 0 {
+			t.Errorf("RetentionDays = %d, want 0", cfg.RetentionDays)
+		}
+	})
+
+	t.Run("file only", func(t *testing.T) {
+		home := freshHome(t)
+		writeConfigFile(t, home, "RetentionDays = 30\n")
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.RetentionDays != 30 {
+			t.Errorf("RetentionDays = %d, want file value 30", cfg.RetentionDays)
+		}
+	})
+
+	t.Run("env overrides file", func(t *testing.T) {
+		home := freshHome(t)
+		writeConfigFile(t, home, "RetentionDays = 30\n")
+		t.Setenv("LENS_RETENTION_DAYS", "14")
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.RetentionDays != 14 {
+			t.Errorf("RetentionDays = %d, want env value 14", cfg.RetentionDays)
+		}
+	})
+
+	t.Run("flag overrides env", func(t *testing.T) {
+		freshHome(t)
+		t.Setenv("LENS_RETENTION_DAYS", "14")
+		cfg, err := Load([]string{"-retention-days", "7"})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.RetentionDays != 7 {
+			t.Errorf("RetentionDays = %d, want flag value 7", cfg.RetentionDays)
+		}
+	})
+}
+
+func TestValidateRejectsNegativeRetentionDays(t *testing.T) {
+	t.Run("direct", func(t *testing.T) {
+		cfg := Default()
+		cfg.RetentionDays = -1
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("Validate: expected error for RetentionDays=-1, got nil")
+		}
+	})
+
+	t.Run("via file", func(t *testing.T) {
+		home := freshHome(t)
+		writeConfigFile(t, home, "RetentionDays = -1\n")
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("Validate: expected error for RetentionDays=-1 from file, got nil")
+		}
+	})
+
+	t.Run("via env", func(t *testing.T) {
+		freshHome(t)
+		t.Setenv("LENS_RETENTION_DAYS", "-1")
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("Validate: expected error for RetentionDays=-1 from env, got nil")
+		}
+	})
+
+	t.Run("via flag", func(t *testing.T) {
+		freshHome(t)
+		cfg, err := Load([]string{"-retention-days", "-1"})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("Validate: expected error for RetentionDays=-1 from flag, got nil")
+		}
+	})
+
+	for _, v := range []int{0, 1, 365} {
+		cfg := Default()
+		cfg.RetentionDays = v
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate: expected no error for RetentionDays=%d, got %v", v, err)
+		}
+	}
+}

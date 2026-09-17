@@ -19,6 +19,7 @@
     <button class="tab" data-view="warnings" type="button">Warnings</button>
     <button class="tab" data-view="stats" type="button">Stats</button>
     <button class="tab" data-view="sessions" type="button">Sessions</button>
+    <button class="tab" data-view="settings" type="button">Settings</button>
   </nav>
 </header>
 
@@ -113,6 +114,58 @@
           <tbody id="session-calls"></tbody>
         </table>
       </div>
+    </div>
+  </section>
+
+  <section id="view-settings" class="view" hidden>
+    <h3>Pricing</h3>
+    <p class="hint">Rates are US dollars per 1,000,000 tokens, read from and written to
+      <code id="settings-price-path"></code> — a peak multiplier of
+      <strong id="settings-peak-multiplier"></strong>&times; applies where the upstream signals
+      a peak window. An empty cell means no rate is configured for that field; editing a cell
+      and leaving it blank unsets it.</p>
+    <div id="settings-price-error" class="hint" hidden></div>
+    <div id="settings-price-msg" class="hint" hidden></div>
+    <div id="settings-price-wrap" class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Model</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th>Source</th>
+          </tr>
+        </thead>
+        <tbody id="settings-price-body"></tbody>
+      </table>
+    </div>
+
+    <h3>Data</h3>
+    <div id="settings-retention-error" class="hint" hidden></div>
+    <div id="settings-retention-wrap">
+      <p id="settings-retention-summary" class="hint"></p>
+
+      <div id="settings-older-than-action" hidden>
+        <button id="settings-older-than-btn" class="danger" type="button">Purge rows older than the configured retention&hellip;</button>
+        <div id="settings-older-than-confirm" class="detail-panel" hidden>
+          <p id="settings-older-than-confirm-text"></p>
+          <button id="settings-older-than-confirm-btn" class="danger" type="button">Confirm delete</button>
+          <button id="settings-older-than-cancel-btn" type="button">Cancel</button>
+          <div id="settings-older-than-result" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <div id="settings-unpriced-action">
+        <button id="settings-unpriced-btn" class="danger" type="button">Purge unpriced rows&hellip;</button>
+        <div id="settings-unpriced-confirm" class="detail-panel" hidden>
+          <p id="settings-unpriced-confirm-text"></p>
+          <button id="settings-unpriced-confirm-btn" class="danger" type="button">Confirm delete</button>
+          <button id="settings-unpriced-cancel-btn" type="button">Cancel</button>
+          <div id="settings-unpriced-result" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <p class="hint">Deleting rows does not shrink the database file — SQLite keeps the freed pages
+        for reuse. To reclaim disk, run <code>lens purge --vacuum</code> from the command line; the
+        dashboard never runs <code>VACUUM</code>, since it takes an exclusive lock that blocks
+        capture for as long as it runs.</p>
     </div>
   </section>
 </main>
