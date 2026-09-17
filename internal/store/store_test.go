@@ -451,7 +451,7 @@ func TestStatsSummary(t *testing.T) {
 		t.Fatalf("InsertRequest(r2): %v", err)
 	}
 
-	sum, err := s.StatsSummary(ctx, base.Add(-time.Hour))
+	sum, err := s.StatsSummary(ctx, base.Add(-time.Hour), time.Time{})
 	if err != nil {
 		t.Fatalf("StatsSummary: %v", err)
 	}
@@ -513,6 +513,69 @@ func TestStatsByDay(t *testing.T) {
 	}
 	if counts["2026-01-03"] != 3 {
 		t.Errorf("2026-01-03: got %d want 3", counts["2026-01-03"])
+	}
+}
+
+// TestStatsWindowUntilBound pins the two ways the shared statsWindow helper
+// can go wrong silently. Both failures are "returns the wrong number", not
+// "returns an error", so nothing else in the suite would catch them.
+func TestStatsWindowUntilBound(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cutoff := base.Add(2*time.Hour + 30*time.Minute)
+
+	for _, at := range []time.Time{base.Add(time.Hour), base.Add(2 * time.Hour), base.Add(3 * time.Hour)} {
+		r := fullRequest()
+		r.StartedAt = at
+		if _, err := s.InsertRequest(ctx, r); err != nil {
+			t.Fatalf("InsertRequest: %v", err)
+		}
+	}
+
+	// since set, until absent: every row from since forward, no upper cutoff.
+	// This is the case an unconditional zero-value until would silently break
+	// — time.Time{}.UnixNano() is a large negative number, so `started_at < ?`
+	// would exclude all three rows and this would read 0.
+	sum, err := s.StatsSummary(ctx, base, time.Time{})
+	if err != nil {
+		t.Fatalf("StatsSummary(since, no until): %v", err)
+	}
+	if sum.RequestCount != 3 {
+		t.Errorf("since set, until absent: got %d rows want 3", sum.RequestCount)
+	}
+
+	// An explicit until excludes rows at or after it (exclusive upper).
+	sum, err = s.StatsSummary(ctx, base, cutoff)
+	if err != nil {
+		t.Fatalf("StatsSummary(since, until): %v", err)
+	}
+	if sum.RequestCount != 2 {
+		t.Errorf("until bound: got %d rows want 2", sum.RequestCount)
+	}
+
+	// StatsByModel sees the same window through the same helper — the
+	// cross-method check that catches the helper being wired into only one of
+	// the five methods.
+	byModel, err := s.StatsByModel(ctx, base, cutoff)
+	if err != nil {
+		t.Fatalf("StatsByModel(since, until): %v", err)
+	}
+	modelRows := 0
+	for _, m := range byModel {
+		modelRows += m.RequestCount
+	}
+	if modelRows != 2 {
+		t.Errorf("StatsByModel until bound: got %d rows want 2", modelRows)
+	}
+
+	// since > until is a well-formed empty window, not an error.
+	sum, err = s.StatsSummary(ctx, cutoff, base)
+	if err != nil {
+		t.Fatalf("StatsSummary(since > until): %v", err)
+	}
+	if sum.RequestCount != 0 {
+		t.Errorf("since > until: got %d rows want 0", sum.RequestCount)
 	}
 }
 
@@ -1326,7 +1389,7 @@ func TestListRequestsPerformanceAndLimits(t *testing.T) {
 		budget = 5 * time.Second
 	}
 	start := time.Now()
-	if _, err := s.StatsSummary(ctx, base.Add(-time.Hour)); err != nil {
+	if _, err := s.StatsSummary(ctx, base.Add(-time.Hour), time.Time{}); err != nil {
 		t.Fatalf("StatsSummary: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > budget {

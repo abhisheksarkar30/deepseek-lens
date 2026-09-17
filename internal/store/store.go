@@ -355,6 +355,38 @@ func requestWhere(f Filter) (string, []interface{}) {
 	return " WHERE " + strings.Join(where, " AND "), args
 }
 
+// statsWindow builds the WHERE clause shared by every stats aggregate,
+// returning it with its leading " WHERE " already applied — so callers just
+// concatenate, and an unbounded window yields "" matching every row.
+//
+// Both bounds are appended *conditionally*, requestWhere's shape, and that is
+// load-bearing rather than stylistic. The stats methods used to inline
+// since.UnixNano() unconditionally, which works for the lower bound only
+// because a zero time.Time's UnixNano() is a large negative number — smaller
+// than any real started_at, so it reads as "unbounded". That same trick is
+// destructive as an upper bound: an unset until would exclude every row and
+// every stats query would silently return zero.
+//
+// started_at is deliberately unqualified: the one caller that joins
+// (StatsSummary's warnings count) joins `requests` to `warnings`, which has no
+// started_at of its own, so SQLite resolves the bare name unambiguously.
+func statsWindow(since, until time.Time) (string, []interface{}) {
+	var where []string
+	var args []interface{}
+	if !since.IsZero() {
+		where = append(where, "started_at >= ?")
+		args = append(args, since.UnixNano())
+	}
+	if !until.IsZero() {
+		where = append(where, "started_at < ?")
+		args = append(args, until.UnixNano())
+	}
+	if len(where) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(where, " AND "), args
+}
+
 // ListRequests returns a page of requests matching f, newest first, starting
 // at f.Offset. f.Limit <= 0 is capped at DefaultLimit — never unbounded.
 func (s *Store) ListRequests(ctx context.Context, f Filter) ([]*Request, error) {
@@ -401,9 +433,11 @@ func (s *Store) CountRequests(ctx context.Context, f Filter) (int, error) {
 }
 
 // StatsSummary aggregates counts, token totals, cost, and warning count
-// over requests started at or after since, plus P50/P95 duration.
-func (s *Store) StatsSummary(ctx context.Context, since time.Time) (*Summary, error) {
+// over requests in [since, until) — an unset bound being unbounded on that
+// side — plus P50/P95 duration.
+func (s *Store) StatsSummary(ctx context.Context, since, until time.Time) (*Summary, error) {
 	sum := &Summary{}
+	where, args := statsWindow(since, until)
 	row := s.reader.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
@@ -414,20 +448,19 @@ func (s *Store) StatsSummary(ctx context.Context, since time.Time) (*Summary, er
 			COALESCE(SUM(cache_read_tokens), 0),
 			COALESCE(SUM(cost_usd), 0),
 			COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0)
-		FROM requests WHERE started_at >= ?`, since.UnixNano())
+		FROM requests`+where, args...)
 	if err := row.Scan(&sum.RequestCount, &sum.ErrorCount, &sum.InputTokens, &sum.OutputTokens,
 		&sum.CacheCreationTokens, &sum.CacheReadTokens, &sum.CostUSDTotal, &sum.UnpricedCount); err != nil {
 		return nil, fmt.Errorf("store: stats summary: %w", err)
 	}
 
 	wrow := s.reader.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM warnings w JOIN requests r ON r.id = w.request_id WHERE r.started_at >= ?`,
-		since.UnixNano())
+		SELECT COUNT(*) FROM warnings w JOIN requests r ON r.id = w.request_id`+where, args...)
 	if err := wrow.Scan(&sum.WarningCount); err != nil {
 		return nil, fmt.Errorf("store: stats summary: warnings: %w", err)
 	}
 
-	p50, p95, err := s.durationPercentiles(ctx, since)
+	p50, p95, err := s.durationPercentiles(ctx, since, until)
 	if err != nil {
 		return nil, err
 	}
@@ -438,10 +471,11 @@ func (s *Store) StatsSummary(ctx context.Context, since time.Time) (*Summary, er
 }
 
 // durationPercentiles returns the P50/P95 request duration in milliseconds
-// over requests started at or after since, using the nearest-rank method.
-func (s *Store) durationPercentiles(ctx context.Context, since time.Time) (p50, p95 float64, err error) {
+// over requests in [since, until), using the nearest-rank method.
+func (s *Store) durationPercentiles(ctx context.Context, since, until time.Time) (p50, p95 float64, err error) {
+	where, args := statsWindow(since, until)
 	rows, err := s.reader.QueryContext(ctx,
-		"SELECT duration_ns FROM requests WHERE started_at >= ? ORDER BY duration_ns", since.UnixNano())
+		"SELECT duration_ns FROM requests"+where+" ORDER BY duration_ns", args...)
 	if err != nil {
 		return 0, 0, fmt.Errorf("store: duration percentiles: %w", err)
 	}
@@ -478,16 +512,17 @@ func percentileMs(sortedNs []int64, p float64) float64 {
 }
 
 // StatsByModel aggregates request count, token totals, and cost per model
-// (model_resolved when known, else model_requested), for dashboard charts.
-func (s *Store) StatsByModel(ctx context.Context, since time.Time) ([]ModelStat, error) {
+// (model_resolved when known, else model_requested), for dashboard charts,
+// over requests in [since, until).
+func (s *Store) StatsByModel(ctx context.Context, since, until time.Time) ([]ModelStat, error) {
+	where, args := statsWindow(since, until)
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT CASE WHEN model_resolved <> '' THEN model_resolved ELSE model_requested END,
 			COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0),
 			COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0)
-		FROM requests
-		WHERE started_at >= ?
+		FROM requests`+where+`
 		GROUP BY 1
-		ORDER BY 2 DESC`, since.UnixNano())
+		ORDER BY 2 DESC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: stats by model: %w", err)
 	}
@@ -537,14 +572,14 @@ func (s *Store) StatsByDay(ctx context.Context, since time.Time) ([]DayStat, err
 // by a writer with no price table — is reported as "unpriced", because those
 // are exactly the rows with no cost_usd either; folding them in keeps the
 // label set closed to the four real sources.
-func (s *Store) StatsByCostSource(ctx context.Context, since time.Time) ([]CostSourceStat, error) {
+func (s *Store) StatsByCostSource(ctx context.Context, since, until time.Time) ([]CostSourceStat, error) {
+	where, args := statsWindow(since, until)
 	rows, err := s.reader.QueryContext(ctx, `
 		SELECT COALESCE(cost_source, 'unpriced'),
 			COUNT(*), COALESCE(SUM(cost_usd), 0)
-		FROM requests
-		WHERE started_at >= ?
+		FROM requests`+where+`
 		GROUP BY 1
-		ORDER BY 2 DESC`, since.UnixNano())
+		ORDER BY 2 DESC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: stats by cost source: %w", err)
 	}
