@@ -5,32 +5,32 @@
 Two HTTP surfaces run in one process (`lens serve`): the **proxy listener** (no routes — a
 transparent reverse proxy, see [workflows.md](workflows.md)) and the **dashboard listener**, whose
 JSON API is documented here. Registered in the `mux.Handle*` block at
-[internal/api/api.go:82-97](../../internal/api/api.go).
+[internal/api/api.go:141-158](../../internal/api/api.go).
 
 ## REST / RPC
 
 | Method | Path | Auth | Summary | Response | Evidence |
 |---|---|---|---|---|---|
-| GET | `/api/requests` | none (loopback-only) | List captured requests; query params `limit`, `offset`, `since` (duration or RFC3339), `session`, `model`, `warn`, `errors` | `[]store.Request` + page headers | [internal/api/api.go:217-277](../../internal/api/api.go) |
-| GET | `/api/requests/{id}` | none | One request + its attached warnings | `requestDetail{*store.Request, Warnings}` | [internal/api/api.go:278-308](../../internal/api/api.go) |
-| POST | `/api/requests/{id}/replay` | **Origin/Host allowlist + opt-in flag** (see below) | Re-sends a captured request's body (optionally edited) through the live proxy | `replay.Result{ID, Captured, Status, Outcome}` | [internal/api/api.go:356-468](../../internal/api/api.go) |
-| GET | `/api/stats` | none | Aggregate stats: summary, by-model, by-day, by-cost-source; query param `since` | `statsResponse` | [internal/api/api.go:652-700](../../internal/api/api.go) |
-| GET | `/api/warnings/summary` | none | Warning counts grouped by `(kind, severity)` over the **whole** table; query params `since`, `kind`, `severity`. **No `limit`/`offset`** | `[]store.WarningGroup` | [internal/api/api.go:701-718](../../internal/api/api.go) |
-| GET | `/api/warnings` | none | List warnings; query params `limit`, `offset`, `since`, `kind`, `severity` | `[]store.Warning` + page headers | [internal/api/api.go:719-754](../../internal/api/api.go) |
-| GET | `/api/sessions` | none | List sessions with running totals; query params `limit`, `offset` | `[]store.Session` + page headers | [internal/api/api.go:755-803](../../internal/api/api.go) |
-| GET | `/api/sessions/{id}` | none | One session + its calls (chronological) + union of its warnings | `sessionDetail{*store.Session, Calls, Warnings}` | [internal/api/api.go:804-851](../../internal/api/api.go) |
-| GET | `/api/stream` | none | Server-Sent Events feed of `{type:"request", id}` / `{type:"warnings", id, warnings}` events | SSE `text/event-stream` | [internal/api/api.go:852-903](../../internal/api/api.go) |
-| GET | `/api/health` | none | Sink accepted/dropped counts, consumer processed/failed/flushes, last-write age, `replay_enabled` | `healthResponse` | [internal/api/api.go:904-923](../../internal/api/api.go) |
+| GET | `/api/requests` | none (loopback-only) | List captured requests; query params `limit`, `offset`, `since` (duration or RFC3339), `session`, `model`, `warn`, `errors` | `[]store.Request` + page headers | [internal/api/api.go:302-353](../../internal/api/api.go) |
+| GET | `/api/requests/{id}` | none | One request + its attached warnings | `requestDetail{*store.Request, Warnings}` | [internal/api/api.go:363-387](../../internal/api/api.go) |
+| POST | `/api/requests/{id}/replay` | **Origin/Host allowlist + opt-in flag** (see below) | Re-sends a captured request's body (optionally edited) through the live proxy | `replay.Result{ID, Captured, Status, Outcome}` | [internal/api/api.go:442-532](../../internal/api/api.go) |
+| GET | `/api/stats` | none | Aggregate stats: summary, by-model, by-period, by-cost-source; query params `since`, `until`, and `granularity` (`hour`, `day`, `week`, or `month`; default `day`) — the two bounds are half-open `[since, until)`, and an unrecognized `granularity` is a 400 rather than a silent fallback | `statsResponse` | [internal/api/api.go:765-807](../../internal/api/api.go) |
+| GET | `/api/warnings/summary` | none | Warning counts grouped by `(kind, severity)` over the **whole** table; query params `since`, `kind`, `severity`. **No `limit`/`offset`** | `[]store.WarningGroup` | [internal/api/api.go:825-841](../../internal/api/api.go) |
+| GET | `/api/warnings` | none | List warnings; query params `limit`, `offset`, `since`, `kind`, `severity` | `[]store.Warning` + page headers | [internal/api/api.go:843-877](../../internal/api/api.go) |
+| GET | `/api/sessions` | none | List sessions with running totals; query params `limit`, `offset` | `[]store.Session` + page headers | [internal/api/api.go:879-908](../../internal/api/api.go) |
+| GET | `/api/sessions/{id}` | none | One session + its calls (chronological) + union of its warnings | `sessionDetail{*store.Session, Calls, Warnings}` | [internal/api/api.go:928-971](../../internal/api/api.go) |
+| GET | `/api/stream` | none | Server-Sent Events feed of `{type:"request", id}` / `{type:"warnings", id, warnings}` events | SSE `text/event-stream` | [internal/api/api.go:976-1010](../../internal/api/api.go) |
+| GET | `/api/health` | none | Sink accepted/dropped counts, consumer processed/failed/flushes, last-write age, `replay_enabled` | `healthResponse` | [internal/api/api.go:1028-1047](../../internal/api/api.go) |
 | GET | `/api/prices` | none | Effective price table, resolved fresh from `~/.deepseek-lens/prices.toml` on every call (no cache) | `pricesResponse{Path, PeakMultiplier, Models}` | [internal/api/prices.go:35-52](../../internal/api/prices.go) |
 | POST | `/api/prices` | **Origin/Host allowlist** (`replayOriginReject`, action `"prices"`) | Replaces one model's rates wholesale (whole-row write, D3); an omitted field and an explicit `null` both unset it | `pricesResponse` (the post-write table) | [internal/api/prices.go:82-120](../../internal/api/prices.go) |
 | GET | `/api/retention` | none | Retention config plus both purge previews (age-based and unpriced) in one round trip, so a confirm dialog shows a real count | `retentionResponse` | [internal/api/purge.go:19-81](../../internal/api/purge.go) |
 | POST | `/api/purge` | **Origin/Host allowlist** (`replayOriginReject`, action `"purge"`) | Deletes rows by `mode`: `older_than` (requires `days > 0`) or `unpriced` — the destructive route | `purgeResponse{Mode, Deleted, SessionsReconciled}` | [internal/api/purge.go:104-152](../../internal/api/purge.go) |
-| GET/* | `/` (catch-all) | none | Serves the embedded dashboard static assets (`internal/web`) | HTML/CSS/JS | [internal/api/api.go:97](../../internal/api/api.go) |
+| GET/* | `/` (catch-all) | none | Serves the embedded dashboard static assets (`internal/web`) | HTML/CSS/JS | [internal/api/api.go:158](../../internal/api/api.go) |
 
 Every GET route but the catch-all is wrapped by `methodGet`, which rejects non-GET methods with a
-JSON 405 ([internal/api/api.go:105-113](../../internal/api/api.go)). All routes **except the three
+JSON 405 ([internal/api/api.go:168-176](../../internal/api/api.go)). All routes **except the three
 POST write routes** (replay, prices, purge) are read-only and rely on loopback binding for their "no
-auth needed" rationale ([internal/api/api.go:96-104](../../internal/api/api.go), and see
+auth needed" rationale ([internal/api/api.go:163-167](../../internal/api/api.go), and see
 [security-and-permissions.md](security-and-permissions.md)).
 
 ### Pagination contract (the three list routes)
@@ -53,15 +53,15 @@ and `/api/warnings` — the handler passes the *same* `store.Filter` to its list
 call, so the total and the page can never describe two different sets. `/api/sessions` has no
 filterable column: its list call takes the window, but `CountSessions` takes no filter at all and
 returns the whole table, so there is no filter for the total and the page to disagree on
-([internal/api/api.go:254-261](../../internal/api/api.go),
-[internal/api/api.go:741-746](../../internal/api/api.go),
-[internal/api/api.go:770-777](../../internal/api/api.go)).
+([internal/api/api.go:339-346](../../internal/api/api.go),
+[internal/api/api.go:865-870](../../internal/api/api.go),
+[internal/api/api.go:894-901](../../internal/api/api.go)).
 
 > **`X-Limit` is the applied page size, not the requested one.** When `?limit` is absent the request
 > carries `0` but the store applies `DefaultLimit`, so the header reports `1000`, not `0`. A
 > header-driven consumer computing `nextOffset = offset + X-Limit` depends on this: the raw `0` would
 > leave it stuck on page 1 forever with no error to explain why
-> ([internal/api/api.go:159-188](../../internal/api/api.go), and the regression test
+> ([internal/api/api.go:222-248](../../internal/api/api.go), and the regression test
 > `TestPageHeaderLimitIsEffective` in [internal/api/pagination_test.go](../../internal/api/pagination_test.go)).
 
 `/api/warnings/summary` is **deliberately unpaginated** and carries none of these headers. A
@@ -73,14 +73,14 @@ warning); the covering index `idx_warnings_kind_severity_created_at` keeps that 
 
 ### The three write routes' shared guard
 
-`replayOriginReject` ([internal/api/api.go:639-697](../../internal/api/api.go)) is one Origin/Host
+`replayOriginReject` ([internal/api/api.go:698-720](../../internal/api/api.go)) is one Origin/Host
 allowlist, parameterized by an `action` string for its error message, applied before any bytes are
 sent or any row is touched. All three write routes call it — nothing here is replay-specific
 anymore:
 
 1. `POST /api/requests/{id}/replay` — the project's **only billable** route, and the only one gated
    by an additional opt-in flag (`replayEnabled`, off by default; `lens serve --replay` turns it on,
-   [internal/api/api.go:357-362](../../internal/api/api.go)). Query params: `?set=<jsonpath>=<value>`
+   [internal/api/api.go:443-448](../../internal/api/api.go)). Query params: `?set=<jsonpath>=<value>`
    (repeatable, body edits) and `?no_capture=true` (send without recording).
 2. `POST /api/prices` — always on; rejects malformed/unknown-field bodies and invalid rates before
    writing (see [internal/api/prices.go](../../internal/api/prices.go)).
@@ -112,7 +112,7 @@ and CLAUDE.md's two-writers invariant.
 
 ## Representative payloads
 
-`healthResponse` (from `/api/health`, [internal/api/api.go:888-902](../../internal/api/api.go)):
+`healthResponse` (from `/api/health`, [internal/api/api.go:1028-1047](../../internal/api/api.go)):
 
 ```json
 {

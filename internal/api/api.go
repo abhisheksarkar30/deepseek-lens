@@ -31,10 +31,10 @@ import (
 type Store interface {
 	GetRequest(ctx context.Context, id int64) (*store.Request, error)
 	ListRequests(ctx context.Context, f store.Filter) ([]*store.Request, error)
-	StatsSummary(ctx context.Context, since time.Time) (*store.Summary, error)
-	StatsByModel(ctx context.Context, since time.Time) ([]store.ModelStat, error)
-	StatsByDay(ctx context.Context, since time.Time) ([]store.DayStat, error)
-	StatsByCostSource(ctx context.Context, since time.Time) ([]store.CostSourceStat, error)
+	StatsSummary(ctx context.Context, since, until time.Time) (*store.Summary, error)
+	StatsByModel(ctx context.Context, since, until time.Time) ([]store.ModelStat, error)
+	StatsByPeriod(ctx context.Context, since, until time.Time, granularity string) ([]store.PeriodStat, error)
+	StatsByCostSource(ctx context.Context, since, until time.Time) ([]store.CostSourceStat, error)
 	ListSessions(ctx context.Context, f store.Filter) ([]*store.Session, error)
 	GetSession(ctx context.Context, id string) (*store.Session, error)
 	ListWarnings(ctx context.Context, f store.Filter) ([]*store.Warning, error)
@@ -247,12 +247,13 @@ func writePageHeaders(w http.ResponseWriter, total, limit, offset int) {
 	h.Set("X-Offset", strconv.Itoa(offset))
 }
 
-// parseSinceParam reads ?since as a Go duration ("24h") or an RFC3339
-// timestamp, mirroring internal/cli's parseSince. Absent means the zero
-// Time, which every store method already treats as "since the beginning of
-// time" (Filter.Since.IsZero() / a very small UnixNano()).
-func parseSinceParam(r *http.Request) (time.Time, error) {
-	s := r.URL.Query().Get("since")
+// parseTimeBoundParam reads the named query param as a Go duration ("24h") or
+// an RFC3339 timestamp, mirroring internal/cli's parseSince. Absent means the
+// zero Time, which the store reads as "unbounded on that side" — see
+// statsWindow: an absent upper bound must mean unbounded, not a zero instant,
+// or it would exclude every row.
+func parseTimeBoundParam(r *http.Request, key string) (time.Time, error) {
+	s := r.URL.Query().Get(key)
 	if s == "" {
 		return time.Time{}, nil
 	}
@@ -262,7 +263,28 @@ func parseSinceParam(r *http.Request) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t, nil
 	}
-	return time.Time{}, fmt.Errorf("invalid since %q: want a duration like 24h or an RFC3339 timestamp", s)
+	return time.Time{}, fmt.Errorf("invalid %s %q: want a duration like 24h or an RFC3339 timestamp", key, s)
+}
+
+// parseSinceParam is parseTimeBoundParam for ?since, kept because three routes
+// that predate the second bound (listRequests, warningsSummary, listWarnings)
+// read only that one.
+func parseSinceParam(r *http.Request) (time.Time, error) {
+	return parseTimeBoundParam(r, "since")
+}
+
+// parseGranularityParam reads ?granularity, defaulting to "day" when absent.
+// An unknown value is rejected here so the store's own whitelist stays defense
+// in depth rather than the only check — no such request ever reaches a query.
+func parseGranularityParam(r *http.Request) (string, error) {
+	g := r.URL.Query().Get("granularity")
+	switch g {
+	case "":
+		return "day", nil
+	case "hour", "day", "week", "month":
+		return g, nil
+	}
+	return "", fmt.Errorf("invalid granularity %q: want hour, day, week, or month", g)
 }
 
 func parseBoolParam(r *http.Request, key string) (bool, error) {
@@ -710,10 +732,18 @@ func loopbackHost(host string) bool {
 }
 
 type statsResponse struct {
-	Since   time.Time         `json:"since"`
-	Summary *store.Summary    `json:"summary"`
-	ByModel []store.ModelStat `json:"by_model"`
-	ByDay   []store.DayStat   `json:"by_day"`
+	Since time.Time `json:"since"`
+	// Until is echoed so the client can tell a bounded window from an
+	// unbounded one without re-deriving it from the request it just made.
+	Until time.Time `json:"until"`
+	// Granularity is the bucket size actually applied, echoed for the same
+	// reason: an absent ?granularity= means "day", and the response says so.
+	Granularity string            `json:"granularity"`
+	Summary     *store.Summary    `json:"summary"`
+	ByModel     []store.ModelStat `json:"by_model"`
+	// ByPeriod buckets the window by Granularity. Buckets with no rows are
+	// absent rather than zero-filled, so the series can be non-contiguous.
+	ByPeriod []store.PeriodStat `json:"by_period"`
 	// CostSources is the cost-source breakdown: how many calls in the window
 	// were priced, approximate, unpriced, or for a model the table does not
 	// know. The dashboard needs it because a cost total alone cannot say
@@ -721,36 +751,58 @@ type statsResponse struct {
 	CostSources []store.CostSourceStat `json:"cost_sources"`
 }
 
+// stats serves the Stats tab's one fetch. since and until are independent
+// bounds — [since, until), an absent one being unbounded on its side — so the
+// window can be an arbitrary past span (a distant week or month), not just a
+// rolling "last N units up to now". since > until is deliberately not
+// rejected: it is a well-formed empty window, and every field below answers
+// "no rows" correctly for it.
+//
+// Every aggregate here is bounded by the same window. That is the point of
+// passing since/until to all four: a summary describing a different span than
+// the chart beside it is the "two numbers on one screen that cannot be read as
+// agreeing" failure the cost-source breakdown already exists to prevent.
 func (a *api) stats(w http.ResponseWriter, r *http.Request) {
-	since, err := parseSinceParam(r)
+	since, err := parseTimeBoundParam(r, "since")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	until, err := parseTimeBoundParam(r, "until")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	granularity, err := parseGranularityParam(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	summary, err := a.store.StatsSummary(r.Context(), since)
+	summary, err := a.store.StatsSummary(r.Context(), since, until)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	byModel, err := a.store.StatsByModel(r.Context(), since)
+	byModel, err := a.store.StatsByModel(r.Context(), since, until)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	byDay, err := a.store.StatsByDay(r.Context(), since)
+	byPeriod, err := a.store.StatsByPeriod(r.Context(), since, until, granularity)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	costSources, err := a.store.StatsByCostSource(r.Context(), since)
+	costSources, err := a.store.StatsByCostSource(r.Context(), since, until)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	writeJSON(w, http.StatusOK, statsResponse{
-		Since: since, Summary: summary, ByModel: byModel, ByDay: byDay, CostSources: costSources,
+		Since: since, Until: until, Granularity: granularity,
+		Summary: summary, ByModel: byModel, ByPeriod: byPeriod, CostSources: costSources,
 	})
 }
 

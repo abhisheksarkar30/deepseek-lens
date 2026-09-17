@@ -177,10 +177,13 @@ type ModelStat struct {
 	UnpricedCount int
 }
 
-// DayStat is one row of StatsByDay's result, Day formatted "2006-01-02" in
-// UTC. UnpricedCount is that day's share of Summary.UnpricedCount.
-type DayStat struct {
-	Day           string
+// PeriodStat is one row of StatsByPeriod's result. Period is formatted per
+// the requested granularity, all UTC: hour "2006-01-02T15:00", day
+// "2006-01-02", week "2006-W02" (SQLite's %W — Monday-first week-of-year, not
+// ISO-8601 numbering), month "2006-01". UnpricedCount is that period's share
+// of Summary.UnpricedCount.
+type PeriodStat struct {
+	Period        string
 	RequestCount  int
 	InputTokens   int64
 	OutputTokens  int64

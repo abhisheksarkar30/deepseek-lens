@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -451,7 +452,7 @@ func TestStatsSummary(t *testing.T) {
 		t.Fatalf("InsertRequest(r2): %v", err)
 	}
 
-	sum, err := s.StatsSummary(ctx, base.Add(-time.Hour))
+	sum, err := s.StatsSummary(ctx, base.Add(-time.Hour), time.Time{})
 	if err != nil {
 		t.Fatalf("StatsSummary: %v", err)
 	}
@@ -479,40 +480,197 @@ func TestStatsSummary(t *testing.T) {
 	}
 }
 
-func TestStatsByDay(t *testing.T) {
+func TestStatsByPeriod(t *testing.T) {
+	ctx := context.Background()
+
+	// seed inserts one request at each of at and returns the store.
+	seed := func(t *testing.T, at ...time.Time) *Store {
+		t.Helper()
+		s := newTestStore(t)
+		for _, when := range at {
+			r := fullRequest()
+			r.StartedAt = when
+			if _, err := s.InsertRequest(ctx, r); err != nil {
+				t.Fatalf("InsertRequest: %v", err)
+			}
+		}
+		return s
+	}
+	// buckets runs StatsByPeriod and returns the period labels in order.
+	buckets := func(t *testing.T, s *Store, since, until time.Time, gran string) []string {
+		t.Helper()
+		stats, err := s.StatsByPeriod(ctx, since, until, gran)
+		if err != nil {
+			t.Fatalf("StatsByPeriod(%s): %v", gran, err)
+		}
+		out := make([]string, 0, len(stats))
+		for _, p := range stats {
+			out = append(out, p.Period)
+		}
+		return out
+	}
+
+	t.Run("day", func(t *testing.T) {
+		day1 := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+		day2 := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+		day3 := time.Date(2026, 1, 3, 10, 0, 0, 0, time.UTC)
+		s := seed(t, day1, day1, day2, day3, day3, day3)
+
+		stats, err := s.StatsByPeriod(ctx, day1.Add(-time.Hour), time.Time{}, "day")
+		if err != nil {
+			t.Fatalf("StatsByPeriod: %v", err)
+		}
+		if len(stats) != 3 {
+			t.Fatalf("got %d buckets want 3", len(stats))
+		}
+		counts := map[string]int{}
+		for _, p := range stats {
+			counts[p.Period] = p.RequestCount
+		}
+		if counts["2026-01-01"] != 2 {
+			t.Errorf("2026-01-01: got %d want 2", counts["2026-01-01"])
+		}
+		if counts["2026-01-02"] != 1 {
+			t.Errorf("2026-01-02: got %d want 1", counts["2026-01-02"])
+		}
+		if counts["2026-01-03"] != 3 {
+			t.Errorf("2026-01-03: got %d want 3", counts["2026-01-03"])
+		}
+	})
+
+	t.Run("hour", func(t *testing.T) {
+		// Either side of an hour boundary: 13:59:30 and 14:00:30.
+		s := seed(t,
+			time.Date(2026, 1, 1, 13, 59, 30, 0, time.UTC),
+			time.Date(2026, 1, 1, 14, 0, 30, 0, time.UTC))
+		got := buckets(t, s, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), time.Time{}, "hour")
+		want := []string{"2026-01-01T13:00", "2026-01-01T14:00"}
+		if !slices.Equal(got, want) {
+			t.Errorf("hour buckets: got %v want %v", got, want)
+		}
+	})
+
+	t.Run("week", func(t *testing.T) {
+		// Sunday 23:59 and Monday 00:01 straddle a %W week boundary. Jan 5
+		// 2026 is the first Monday of the year, so Jan 11 falls in week 01 and
+		// Jan 12 in week 02.
+		s := seed(t,
+			time.Date(2026, 1, 11, 23, 59, 0, 0, time.UTC),
+			time.Date(2026, 1, 12, 0, 1, 0, 0, time.UTC))
+		got := buckets(t, s, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), time.Time{}, "week")
+		want := []string{"2026-W01", "2026-W02"}
+		if !slices.Equal(got, want) {
+			t.Errorf("week buckets: got %v want %v", got, want)
+		}
+	})
+
+	t.Run("month", func(t *testing.T) {
+		// Jan 31 23:59 and Feb 1 00:01 straddle a month boundary.
+		s := seed(t,
+			time.Date(2026, 1, 31, 23, 59, 0, 0, time.UTC),
+			time.Date(2026, 2, 1, 0, 1, 0, 0, time.UTC))
+		got := buckets(t, s, time.Time{}, time.Time{}, "month")
+		want := []string{"2026-01", "2026-02"}
+		if !slices.Equal(got, want) {
+			t.Errorf("month buckets: got %v want %v", got, want)
+		}
+	})
+
+	t.Run("invalid granularity", func(t *testing.T) {
+		s := seed(t, time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC))
+		stats, err := s.StatsByPeriod(ctx, time.Time{}, time.Time{}, "fortnight")
+		if err == nil {
+			t.Fatal("StatsByPeriod(fortnight): got nil error, want non-nil")
+		}
+		if len(stats) != 0 {
+			t.Errorf("StatsByPeriod(fortnight): got %d rows, want none", len(stats))
+		}
+	})
+
+	t.Run("until excludes later buckets", func(t *testing.T) {
+		day1 := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+		day2 := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+		day3 := time.Date(2026, 1, 3, 10, 0, 0, 0, time.UTC)
+		s := seed(t, day1, day2, day3)
+
+		got := buckets(t, s, day1.Add(-time.Hour), day2, "day")
+		want := []string{"2026-01-01"}
+		if !slices.Equal(got, want) {
+			t.Errorf("until bound: got %v want %v", got, want)
+		}
+	})
+
+	t.Run("since after until is empty, not an error", func(t *testing.T) {
+		day3 := time.Date(2026, 1, 3, 10, 0, 0, 0, time.UTC)
+		s := seed(t, day3)
+
+		got := buckets(t, s, day3.Add(time.Hour), day3, "day")
+		if len(got) != 0 {
+			t.Errorf("since > until: got %v, want no buckets", got)
+		}
+	})
+}
+
+// TestStatsWindowUntilBound pins the two ways the shared statsWindow helper
+// can go wrong silently. Both failures are "returns the wrong number", not
+// "returns an error", so nothing else in the suite would catch them.
+func TestStatsWindowUntilBound(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	day1 := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
-	day2 := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
-	day3 := time.Date(2026, 1, 3, 10, 0, 0, 0, time.UTC)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cutoff := base.Add(2*time.Hour + 30*time.Minute)
 
-	for _, d := range []time.Time{day1, day1, day2, day3, day3, day3} {
+	for _, at := range []time.Time{base.Add(time.Hour), base.Add(2 * time.Hour), base.Add(3 * time.Hour)} {
 		r := fullRequest()
-		r.StartedAt = d
+		r.StartedAt = at
 		if _, err := s.InsertRequest(ctx, r); err != nil {
 			t.Fatalf("InsertRequest: %v", err)
 		}
 	}
 
-	stats, err := s.StatsByDay(ctx, day1.Add(-time.Hour))
+	// since set, until absent: every row from since forward, no upper cutoff.
+	// This is the case an unconditional zero-value until would silently break
+	// — time.Time{}.UnixNano() is a large negative number, so `started_at < ?`
+	// would exclude all three rows and this would read 0.
+	sum, err := s.StatsSummary(ctx, base, time.Time{})
 	if err != nil {
-		t.Fatalf("StatsByDay: %v", err)
+		t.Fatalf("StatsSummary(since, no until): %v", err)
 	}
-	if len(stats) != 3 {
-		t.Fatalf("got %d buckets want 3", len(stats))
+	if sum.RequestCount != 3 {
+		t.Errorf("since set, until absent: got %d rows want 3", sum.RequestCount)
 	}
-	counts := map[string]int{}
-	for _, d := range stats {
-		counts[d.Day] = d.RequestCount
+
+	// An explicit until excludes rows at or after it (exclusive upper).
+	sum, err = s.StatsSummary(ctx, base, cutoff)
+	if err != nil {
+		t.Fatalf("StatsSummary(since, until): %v", err)
 	}
-	if counts["2026-01-01"] != 2 {
-		t.Errorf("2026-01-01: got %d want 2", counts["2026-01-01"])
+	if sum.RequestCount != 2 {
+		t.Errorf("until bound: got %d rows want 2", sum.RequestCount)
 	}
-	if counts["2026-01-02"] != 1 {
-		t.Errorf("2026-01-02: got %d want 1", counts["2026-01-02"])
+
+	// StatsByModel sees the same window through the same helper — the
+	// cross-method check that catches the helper being wired into only one of
+	// the five methods.
+	byModel, err := s.StatsByModel(ctx, base, cutoff)
+	if err != nil {
+		t.Fatalf("StatsByModel(since, until): %v", err)
 	}
-	if counts["2026-01-03"] != 3 {
-		t.Errorf("2026-01-03: got %d want 3", counts["2026-01-03"])
+	modelRows := 0
+	for _, m := range byModel {
+		modelRows += m.RequestCount
+	}
+	if modelRows != 2 {
+		t.Errorf("StatsByModel until bound: got %d rows want 2", modelRows)
+	}
+
+	// since > until is a well-formed empty window, not an error.
+	sum, err = s.StatsSummary(ctx, cutoff, base)
+	if err != nil {
+		t.Fatalf("StatsSummary(since > until): %v", err)
+	}
+	if sum.RequestCount != 0 {
+		t.Errorf("since > until: got %d rows want 0", sum.RequestCount)
 	}
 }
 
@@ -1326,7 +1484,7 @@ func TestListRequestsPerformanceAndLimits(t *testing.T) {
 		budget = 5 * time.Second
 	}
 	start := time.Now()
-	if _, err := s.StatsSummary(ctx, base.Add(-time.Hour)); err != nil {
+	if _, err := s.StatsSummary(ctx, base.Add(-time.Hour), time.Time{}); err != nil {
 		t.Fatalf("StatsSummary: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > budget {

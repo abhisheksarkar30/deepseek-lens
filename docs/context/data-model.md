@@ -22,7 +22,7 @@ transaction ([internal/store/store.go:879-884](../../internal/store/store.go)).
 
 Go types mirroring these tables live in
 [internal/store/types.go](../../internal/store/types.go): `Request`, `Session`, `Warning`, plus
-the query-only shapes `Filter`, `Summary`, `ModelStat`, `DayStat`, `CostSourceStat`, and
+the query-only shapes `Filter`, `Summary`, `ModelStat`, `PeriodStat`, `CostSourceStat`, and
 `WarningGroup` (one row of `WarningSummary`'s result: a `(kind, severity)` pair, its `Count`, and its
 `LastSeen`). `WarningGroup` carries **no `json` tags**, matching the convention for every type
 crossing the API/SSE broker — so its served keys are the capitalized Go field names and
