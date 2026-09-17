@@ -25,13 +25,13 @@ func Stats(args []string) error {
 }
 
 type statsJSON struct {
-	Since          time.Time         `json:"since"`
-	Summary        *store.Summary    `json:"summary"`
-	ByModel        []store.ModelStat `json:"by_model"`
-	ByDay          []store.DayStat   `json:"by_day"`
-	BySession      []*store.Session  `json:"by_session,omitempty"`
-	WarningsByKind map[string]int    `json:"warnings_by_kind"`
-	MeanDurationMs float64           `json:"mean_duration_ms"`
+	Since          time.Time          `json:"since"`
+	Summary        *store.Summary     `json:"summary"`
+	ByModel        []store.ModelStat  `json:"by_model"`
+	ByPeriod       []store.PeriodStat `json:"by_period"`
+	BySession      []*store.Session   `json:"by_session,omitempty"`
+	WarningsByKind map[string]int     `json:"warnings_by_kind"`
+	MeanDurationMs float64            `json:"mean_duration_ms"`
 }
 
 func runStats(args []string, w io.Writer, st *store.Store) error {
@@ -51,15 +51,17 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 	}
 
 	ctx := context.Background()
-	summary, err := st.StatsSummary(ctx, sinceTime)
+	// until stays unbounded and the bucket size stays "day" on every CLI call:
+	// `lens stats` has no --until flag and has only ever shown day buckets.
+	summary, err := st.StatsSummary(ctx, sinceTime, time.Time{})
 	if err != nil {
 		return fmt.Errorf("stats: summary: %w", err)
 	}
-	byModel, err := st.StatsByModel(ctx, sinceTime)
+	byModel, err := st.StatsByModel(ctx, sinceTime, time.Time{})
 	if err != nil {
 		return fmt.Errorf("stats: by model: %w", err)
 	}
-	byDay, err := st.StatsByDay(ctx, sinceTime)
+	byDay, err := st.StatsByPeriod(ctx, sinceTime, time.Time{}, "day")
 	if err != nil {
 		return fmt.Errorf("stats: by day: %w", err)
 	}
@@ -103,7 +105,7 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 
 	if *jsonOut {
 		return json.NewEncoder(w).Encode(statsJSON{
-			Since: sinceTime, Summary: summary, ByModel: byModel, ByDay: byDay, BySession: bySession,
+			Since: sinceTime, Summary: summary, ByModel: byModel, ByPeriod: byDay, BySession: bySession,
 			WarningsByKind: byKind, MeanDurationMs: meanMs,
 		})
 	}
@@ -155,7 +157,7 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 			rows := make([][]string, 0, len(byDay))
 			for _, d := range byDay {
 				rows = append(rows, []string{
-					d.Day,
+					d.Period,
 					strconv.Itoa(d.RequestCount),
 					fmt.Sprintf("%s/%s", humanTokens(d.InputTokens), humanTokens(d.OutputTokens)),
 					costCell(d.CostUSDTotal, d.RequestCount, d.UnpricedCount),
