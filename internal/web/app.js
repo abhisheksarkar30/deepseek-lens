@@ -188,6 +188,14 @@ const state = {
   // "the numbers on the confirm step are the preview's" (br-GI-17-10) holds
   // even if the preview is a moment old.
   settingsRetention: null,
+  // statsMetric / statsByPeriod / statsGranularity are the Stats tab's
+  // retained view. The metric toggle re-renders the chart from the rows
+  // already fetched — all three metrics share one request — and loadStats()
+  // is re-entered on every visit to the tab and after a purge, neither of
+  // which should reset the user's chosen metric.
+  statsMetric: "count",
+  statsByPeriod: [],
+  statsGranularity: "day",
 };
 
 function bumpTotals(req) {
@@ -409,15 +417,110 @@ async function showWarningDetail(kind, severity, resetOffset) {
 
 // ---- stats ----------------------------------------------------------------
 
+// STATS_METRICS maps a metric toggle button's data-metric to the row field it
+// plots and the formatter for the value it writes on the axis. One
+// parameterized chart, not three near-duplicate renderers that differ only in
+// the field they read.
+const STATS_METRICS = {
+  count: {
+    label: "Calls",
+    value: (d) => d.RequestCount,
+    axis: (v) => String(v),
+  },
+  tokens: {
+    label: "Tokens",
+    value: (d) => (d.InputTokens || 0) + (d.OutputTokens || 0),
+    axis: fmtTokens,
+  },
+  cost: {
+    label: "Cost",
+    value: (d) => d.CostUSDTotal,
+    // fmtCost, not fmtCostTotal: the axis marker is a bare Math.max() scalar
+    // with no link back to the bucket that produced it, so there is no
+    // UnpricedCount to pass. The history table below is where fmtCostTotal
+    // belongs, per row, where the count is available.
+    axis: fmtCost,
+  },
+};
+
+// FROM_LOOKBACK_MS bounds an unset From when the granularity changes: hour
+// granularity over a long-retained install would otherwise render years of
+// buckets. month is 0 because all-time is already readable at that bucket
+// size. This is a UI default only — the API never rejects a large window.
+const FROM_LOOKBACK_MS = { hour: 24 * 3600e3, day: 30 * 86400e3, week: 90 * 86400e3, month: 0 };
+
+// utcDayBound turns an <input type="date"> value (YYYY-MM-DD) into the RFC3339
+// UTC-midnight bound the API's since/until expect. The explicit T00:00:00Z
+// suffix pins UTC midnight regardless of the browser's local zone. The To
+// bound is the start of the NEXT day, because until is exclusive-upper:
+// [start, next-start) covers the whole picked day with no double-counted
+// boundary row — so "To: March 5" reads as "through the end of March 5 UTC",
+// not "up to March 5 00:00".
+function utcDayBound(dateStr, endExclusive) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr + "T00:00:00Z");
+  if (isNaN(d.getTime())) return "";
+  if (endExclusive) d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+function statsValue(id) {
+  const el = document.getElementById(id);
+  return el ? el.value : "";
+}
+
 async function loadStats() {
   try {
-    const data = await fetchJSON("/api/stats");
+    // An empty From/To sends no since/until at all, which is the unbounded
+    // all-time window this tab has always shown — the two-bound form is a
+    // superset of the old one-bound behavior, not a change to it.
+    const granularity = statsValue("stats-granularity") || "day";
+    const from = utcDayBound(statsValue("stats-from"), false);
+    const to = utcDayBound(statsValue("stats-to"), true);
+    const params = new URLSearchParams({ granularity });
+    if (from) params.set("since", from);
+    if (to) params.set("until", to);
+
+    const data = await fetchJSON("/api/stats?" + params.toString());
     renderStatsSummary(data.summary, data.cost_sources || []);
-    renderStatsChart(data.by_day || []);
+    const byPeriod = data.by_period || [];
+    // One fetched row set, two views: the chart plots it and the table reads
+    // it out exactly. Both are retained so the metric toggle can re-render
+    // without a second request.
+    state.statsByPeriod = byPeriod;
+    state.statsGranularity = granularity;
+    renderStatsChart(byPeriod, granularity);
+    renderStatsHistoryTable(byPeriod);
     renderStatsByModel(data.by_model || []);
+    renderStatsHeading(granularity);
   } catch (e) {
     console.error("loadStats", e);
   }
+}
+
+// renderStatsHeading keeps the chart's visible title and its aria-label
+// describing what is actually plotted. Both track the metric toggle, which
+// re-renders without refetching.
+function renderStatsHeading(granularity) {
+  const metric = STATS_METRICS[state.statsMetric] || STATS_METRICS.count;
+  const title = `${metric.label} per ${granularity}`;
+  const h = document.getElementById("stats-chart-title");
+  if (h) h.textContent = title;
+  const svg = document.getElementById("stats-chart");
+  if (svg) svg.setAttribute("aria-label", title + " line chart");
+}
+
+// statsXLabel extracts the readable part of a bucket label. An hour bucket
+// ("2026-09-17T14:00") yields its time half; day, week and month labels all
+// drop their leading year and dash ("03-01", "W08", "03"). A uniform
+// .slice(5) would print 11 characters per hour tick, unreadable at density.
+function statsXLabel(period, granularity) {
+  const s = String(period);
+  if (granularity === "hour") {
+    const parts = s.split("T");
+    return parts.length > 1 ? parts[1] : s;
+  }
+  return s.slice(5);
 }
 
 function renderStatsSummary(s, costSources) {
@@ -444,42 +547,59 @@ function renderStatsSummary(s, costSources) {
   body.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
 }
 
-function renderStatsChart(byDay) {
+function renderStatsChart(byPeriod, granularity) {
   const svg = document.getElementById("stats-chart");
   const W = 600, H = 200, padL = 34, padB = 20, padT = 10, padR = 10;
-  if (byDay.length === 0) {
+  const metric = STATS_METRICS[state.statsMetric] || STATS_METRICS.count;
+  if (byPeriod.length === 0) {
     svg.innerHTML = `<text x="16" y="100">no data yet</text>`;
     return;
   }
-  const maxCount = Math.max(1, ...byDay.map((d) => d.RequestCount));
+  const maxValue = Math.max(1, ...byPeriod.map((d) => metric.value(d)));
   const plotW = W - padL - padR;
   const plotH = H - padT - padB;
-  const step = byDay.length > 1 ? plotW / (byDay.length - 1) : 0;
+  const step = byPeriod.length > 1 ? plotW / (byPeriod.length - 1) : 0;
 
-  const points = byDay.map((d, i) => {
+  const points = byPeriod.map((d, i) => {
     const x = padL + i * step;
-    const y = padT + plotH - (d.RequestCount / maxCount) * plotH;
+    const y = padT + plotH - (metric.value(d) / maxValue) * plotH;
     return [x, y];
   });
 
   const linePath = points.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
   const dots = points.map((p) => `<circle class="point" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.5"></circle>`).join("");
 
-  const everyN = Math.ceil(byDay.length / 6) || 1;
-  const labels = byDay.map((d, i) => (i % everyN === 0
-    ? `<text x="${points[i][0].toFixed(1)}" y="${H - 4}" text-anchor="middle">${escapeHtml(d.Day.slice(5))}</text>`
+  const everyN = Math.ceil(byPeriod.length / 6) || 1;
+  const labels = byPeriod.map((d, i) => (i % everyN === 0
+    ? `<text x="${points[i][0].toFixed(1)}" y="${H - 4}" text-anchor="middle">${escapeHtml(statsXLabel(d.Period, granularity))}</text>`
     : "")).join("");
 
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.innerHTML = `
     <line class="axis" x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}"></line>
     <line class="axis" x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}"></line>
-    <text x="4" y="${padT + 8}">${maxCount}</text>
+    <text x="4" y="${padT + 8}">${escapeHtml(metric.axis(maxValue))}</text>
     <text x="4" y="${padT + plotH}">0</text>
     <path class="line" d="${linePath}"></path>
     ${dots}
     ${labels}
   `;
+}
+
+// renderStatsHistoryTable reads out the same buckets the chart plots, exactly
+// rather than by eye — a line can be eyeballed, a period's tokens cannot.
+// Deliberately uncapped, no pager: this is a single-user local tool, and the
+// row count is bounded in practice by FROM_LOOKBACK_MS. Add the .pager pattern
+// if a wide hand-picked window ever proves tedious.
+function renderStatsHistoryTable(byPeriod) {
+  const body = document.getElementById("stats-history");
+  if (!body) return;
+  body.innerHTML = byPeriod.map((p) => `<tr>
+    <td>${escapeHtml(p.Period)}</td>
+    <td>${p.RequestCount}</td>
+    <td>${fmtTokens((p.InputTokens || 0) + (p.OutputTokens || 0))}</td>
+    <td>${fmtCostTotal(p.CostUSDTotal, p.UnpricedCount || 0)}</td>
+  </tr>`).join("") || `<tr><td colspan="4" class="hint">No data yet.</td></tr>`;
 }
 
 function renderStatsByModel(byModel) {
@@ -492,6 +612,36 @@ function renderStatsByModel(byModel) {
     <td>${fmtTokens(m.InputTokens)}/${fmtTokens(m.OutputTokens)}</td>
     <td>${fmtCostTotal(m.CostUSDTotal, m.UnpricedCount || 0)}</td>
   </tr>`).join("") || `<tr><td colspan="4" class="hint">No data yet.</td></tr>`;
+}
+
+// The metric toggle re-renders from the retained row set: switching metric is
+// a view change over rows already fetched, not a reason to re-ask the server.
+document.getElementById("stats-metric").addEventListener("click", (e) => {
+  const btn = e.target.closest(".metric");
+  if (!btn) return;
+  const metric = btn.dataset.metric;
+  state.statsMetric = STATS_METRICS[metric] ? metric : "count";
+  for (const b of e.currentTarget.querySelectorAll(".metric")) {
+    b.classList.toggle("active", b === btn);
+  }
+  renderStatsChart(state.statsByPeriod, state.statsGranularity);
+  renderStatsHeading(state.statsGranularity);
+});
+
+document.getElementById("stats-granularity").addEventListener("change", () => {
+  // An hour view over an empty From would render years of buckets, so default
+  // From to a sane lookback the first time — but never overwrite a date the
+  // user typed, which is why this only fills an empty field.
+  const fromEl = document.getElementById("stats-from");
+  const lookback = FROM_LOOKBACK_MS[statsValue("stats-granularity")] || 0;
+  if (!fromEl.value && lookback > 0) {
+    fromEl.value = new Date(Date.now() - lookback).toISOString().slice(0, 10);
+  }
+  loadStats();
+});
+
+for (const id of ["stats-from", "stats-to"]) {
+  document.getElementById(id).addEventListener("change", loadStats);
 }
 
 // ---- pager ------------------------------------------------------------
