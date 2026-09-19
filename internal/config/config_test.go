@@ -4,7 +4,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 )
 
 // clearLensEnv unsets (via empty value, which Load treats as unset) every
@@ -151,6 +154,8 @@ ReplayEnabled = true
 ReplayCostThresholdUSD = 1.5
 ModelMap = "opus:deepseek-v4-pro,*:deepseek-flash"
 ModelMaxTokens = "deepseek-v4-pro:1"
+OffPeakDates = "2027-10-01..2027-10-07"
+WorkDates = "2027-10-10"
 `)
 
 	cfg, err := Load(nil)
@@ -172,6 +177,8 @@ ModelMaxTokens = "deepseek-v4-pro:1"
 		ReplayCostThresholdUSD: 1.5,
 		ModelMap:               "opus:deepseek-v4-pro,*:deepseek-flash",
 		ModelMaxTokens:         "deepseek-v4-pro:1",
+		OffPeakDates:           "2027-10-01..2027-10-07",
+		WorkDates:              "2027-10-10",
 	}
 	if *cfg != *want {
 		t.Errorf("Load() = %+v, want %+v", *cfg, *want)
@@ -370,5 +377,155 @@ func TestValidateRejectsNegativeRetentionDays(t *testing.T) {
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("Validate: expected no error for RetentionDays=%d, got %v", v, err)
 		}
+	}
+}
+
+// TestCalendarDatesPrecedence mirrors TestRetentionDaysPrecedence for both new
+// keys. The resolved value is the string as supplied — Load does not parse the
+// grammar, Validate does.
+func TestCalendarDatesPrecedence(t *testing.T) {
+	const (
+		offFlag = "2027-01-01..2027-01-03"
+		offEnv  = "2027-02-01"
+		offFile = "2027-03-01"
+		wFlag   = "2027-01-09"
+		wEnv    = "2027-02-06"
+		wFile   = "2027-03-06"
+	)
+
+	t.Run("unset takes the default const", func(t *testing.T) {
+		freshHome(t)
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.OffPeakDates != DefaultOffPeakDates {
+			t.Errorf("OffPeakDates = %q, want the default", cfg.OffPeakDates)
+		}
+		if cfg.WorkDates != DefaultWorkDates {
+			t.Errorf("WorkDates = %q, want the default", cfg.WorkDates)
+		}
+	})
+
+	t.Run("file only", func(t *testing.T) {
+		home := freshHome(t)
+		writeConfigFile(t, home, "OffPeakDates = "+offFile+"\nWorkDates = "+wFile+"\n")
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.OffPeakDates != offFile || cfg.WorkDates != wFile {
+			t.Errorf("got (%q, %q), want the file values (%q, %q)", cfg.OffPeakDates, cfg.WorkDates, offFile, wFile)
+		}
+	})
+
+	t.Run("env overrides file", func(t *testing.T) {
+		home := freshHome(t)
+		writeConfigFile(t, home, "OffPeakDates = "+offFile+"\nWorkDates = "+wFile+"\n")
+		t.Setenv("LENS_OFF_PEAK_DATES", offEnv)
+		t.Setenv("LENS_WORK_DATES", wEnv)
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.OffPeakDates != offEnv || cfg.WorkDates != wEnv {
+			t.Errorf("got (%q, %q), want the env values (%q, %q)", cfg.OffPeakDates, cfg.WorkDates, offEnv, wEnv)
+		}
+	})
+
+	t.Run("flag overrides env", func(t *testing.T) {
+		freshHome(t)
+		t.Setenv("LENS_OFF_PEAK_DATES", offEnv)
+		t.Setenv("LENS_WORK_DATES", wEnv)
+		cfg, err := Load([]string{"-off-peak-dates", offFlag, "-work-dates", wFlag})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.OffPeakDates != offFlag || cfg.WorkDates != wFlag {
+			t.Errorf("got (%q, %q), want the flag values (%q, %q)", cfg.OffPeakDates, cfg.WorkDates, offFlag, wFlag)
+		}
+	})
+}
+
+// TestDefaultCalendarParsesAndCoversTheCurrentYear is the check that the
+// shipped calendar is not a typo: it must parse, and it must actually name
+// 2026 — a default that parsed but named 2025 would leave every date in the
+// story still mispriced and no test above would notice.
+func TestDefaultCalendarParsesAndCoversTheCurrentYear(t *testing.T) {
+	cal, err := pricing.NewCalendar(DefaultOffPeakDates, DefaultWorkDates)
+	if err != nil {
+		t.Fatalf("NewCalendar(DefaultOffPeakDates, DefaultWorkDates): %v", err)
+	}
+	if !cal.Covers(2026) {
+		t.Error("the shipped default calendar does not cover 2026")
+	}
+	// The two sets must be disjoint or NewCalendar would have rejected them;
+	// this pins the count too, one row per holiday the notice declares.
+	off, work := cal.DateSets()
+	if n := strings.Count(off, ",") + 1; n != 7 {
+		t.Errorf("DefaultOffPeakDates has %d items, want the notice's 7 holiday ranges", n)
+	}
+	if n := strings.Count(off, ".."); n != 7 {
+		t.Errorf("DefaultOffPeakDates has %d ranges, want 7 — an expanded default no longer reads like the notice it cites", n)
+	}
+	if n := strings.Count(work, ",") + 1; n != 6 {
+		t.Errorf("DefaultWorkDates has %d items, want the notice's 6 make-up work days", n)
+	}
+}
+
+func TestValidateRejectsMalformedCalendar(t *testing.T) {
+	cases := []struct {
+		name, off, work, wantNamed string
+	}{
+		{"missing zero-pad", "2026-1-1", "", `"2026-1-1"`},
+		{"reversed range", "2026-03-05..2026-03-01", "", `"2026-03-05..2026-03-01"`},
+		{"trailing comma", "2026-01-01,", "", "empty item"},
+		{"malformed work date", "", "2026-1-4", `"2026-1-4"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.OffPeakDates, cfg.WorkDates = tc.off, tc.work
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatal("Validate: expected an error for a malformed calendar, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantNamed) {
+				t.Errorf("error %q does not name the offending item %s", err, tc.wantNamed)
+			}
+		})
+	}
+}
+
+// TestValidateRejectsDateInBothSets is the case that only passes because
+// Validate hands both strings to one NewCalendar call: validating each string
+// on its own would parse both happily and never see the contradiction.
+func TestValidateRejectsDateInBothSets(t *testing.T) {
+	cfg := Default()
+	cfg.OffPeakDates = "2026-10-01..2026-10-07"
+	cfg.WorkDates = "2026-10-03"
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate: expected an error for a date in both sets, got nil")
+	}
+	if !strings.Contains(err.Error(), "2026-10-03") {
+		t.Errorf("error %q does not name the contradictory date", err)
+	}
+}
+
+func TestValidateAcceptsCustomCalendar(t *testing.T) {
+	for _, tc := range []struct{ name, off, work string }{
+		{"a single date each", "2026-10-01", "2026-10-10"},
+		{"a range and a date", "2026-10-01..2026-10-07", "2026-10-10"},
+		{"both empty", "", ""},
+		{"the shipped default", DefaultOffPeakDates, DefaultWorkDates},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.OffPeakDates, cfg.WorkDates = tc.off, tc.work
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate: unexpected error: %v", err)
+			}
+		})
 	}
 }
