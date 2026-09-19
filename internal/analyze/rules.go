@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/parse"
-	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
 
@@ -251,19 +250,25 @@ func ruleUpstreamError(in ruleInput) []store.Warning {
 
 // rulePeakPricing names the calls DeepSeek billed at its 2x peak rate, so a
 // doubled cost_usd has an explanation attached rather than looking like
-// unexplained drift. It fires only when the call was actually priced and
-// carried spend: a nil CostUSD is an unpriced call, and a configured model
-// with zero tokens prices to a real, non-nil 0 — neither is something this
-// rule can honestly claim was "billed at peak".
+// unexplained drift.
+//
+// It asks Calendar.PeakPriced — the same predicate the per-session rollup
+// calls — so the badge on a row and the header above it cannot restate the
+// gate and drift apart. That predicate also carries the "only when the call
+// was actually priced and carried spend" test this rule used to open with: a
+// nil CostUSD is an unpriced call, and a configured model with zero tokens
+// prices to a real, non-nil 0 — neither is something this rule can honestly
+// claim was "billed at peak".
+//
+// The sentence names a working day rather than Mon-Fri. A 调休 make-up day is
+// a Saturday that the calendar calls a work day, so the rule fires on it; a
+// Mon-Fri window would then be false on the one day it was shown.
 func rulePeakPricing(in ruleInput) []store.Warning {
-	if in.req.CostUSD == nil || *in.req.CostUSD <= 0 {
-		return nil
-	}
-	if !pricing.IsPeak(in.req.StartedAt) {
+	if !in.opts.calendar.PeakPriced(in.req.StartedAt, in.req.CostUSD) {
 		return nil
 	}
 	return []store.Warning{warn(KindPeakPricing, sevWarn,
-		"this call landed inside DeepSeek's peak-pricing window (01:00-04:00 or 06:00-10:00 UTC, Mon-Fri); cost_usd reflects the 2x peak rate", "")}
+		"this call landed inside DeepSeek's peak-pricing window (01:00-04:00 or 06:00-10:00 UTC, on a working day); cost_usd reflects the 2x peak rate", "")}
 }
 
 // apiError is the error object's shape on the Anthropic-compatible wire:
