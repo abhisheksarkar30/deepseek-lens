@@ -21,7 +21,7 @@ func TestComputeUnpricedIsNeverZero(t *testing.T) {
 	// The model is present, its rates are not: the whole point of the bead is
 	// that this is nil, not 0 — 0 reads as "this call was free".
 	tbl := Table{"deepseek-flash": {}}
-	got := Compute("deepseek-flash", parse.Usage{InputTokens: 100, OutputTokens: 50}, tbl, time.Time{})
+	got := Compute("deepseek-flash", parse.Usage{InputTokens: 100, OutputTokens: 50}, tbl, time.Time{}, Calendar{})
 	if got.Amount != nil {
 		t.Errorf("Amount = %d, want nil for an unpriced model", *got.Amount)
 	}
@@ -32,7 +32,7 @@ func TestComputeUnpricedIsNeverZero(t *testing.T) {
 
 func TestComputeUnknownModel(t *testing.T) {
 	tbl := Table{"deepseek-flash": {Input: f(0.28)}}
-	got := Compute("gpt-9", parse.Usage{InputTokens: 100}, tbl, time.Time{})
+	got := Compute("gpt-9", parse.Usage{InputTokens: 100}, tbl, time.Time{}, Calendar{})
 	if got.Amount != nil {
 		t.Errorf("Amount = %d, want nil for a model not in the table", *got.Amount)
 	}
@@ -43,7 +43,7 @@ func TestComputeUnknownModel(t *testing.T) {
 
 func TestComputeConfiguredMillionTokens(t *testing.T) {
 	tbl := Table{"deepseek-flash": {Input: f(0.28)}}
-	got := Compute("deepseek-flash", parse.Usage{InputTokens: 1_000_000}, tbl, time.Time{})
+	got := Compute("deepseek-flash", parse.Usage{InputTokens: 1_000_000}, tbl, time.Time{}, Calendar{})
 	if got.Amount == nil {
 		t.Fatal("Amount = nil, want 280000 micro-dollars")
 	}
@@ -61,7 +61,7 @@ func TestComputeConfiguredMixed(t *testing.T) {
 	tbl := Table{"deepseek-flash": {Input: f(0.28), Output: f(0.42), CacheRead: f(0.07)}}
 	got := Compute("deepseek-flash", parse.Usage{
 		InputTokens: 1000, OutputTokens: 500, CacheReadTokens: 300,
-	}, tbl, time.Time{})
+	}, tbl, time.Time{}, Calendar{})
 	if got.Amount == nil {
 		t.Fatal("Amount = nil, want 511 micro-dollars")
 	}
@@ -75,7 +75,7 @@ func TestComputeConfiguredMixed(t *testing.T) {
 
 func TestComputeZeroTokensIsARealZero(t *testing.T) {
 	tbl := Table{"deepseek-flash": {Input: f(0.28), Output: f(0.42)}}
-	got := Compute("deepseek-flash", parse.Usage{}, tbl, time.Time{})
+	got := Compute("deepseek-flash", parse.Usage{}, tbl, time.Time{}, Calendar{})
 	if got.Amount == nil {
 		t.Fatal("Amount = nil, want a non-nil 0 for a configured model with no tokens")
 	}
@@ -100,7 +100,7 @@ func TestComputeNoDriftOverManyCalls(t *testing.T) {
 
 	var totalMicros int64
 	for i := 0; i < calls; i++ {
-		got := Compute("deepseek-flash", parse.Usage{InputTokens: 1}, tbl, time.Time{})
+		got := Compute("deepseek-flash", parse.Usage{InputTokens: 1}, tbl, time.Time{}, Calendar{})
 		if got.Amount == nil {
 			t.Fatalf("call %d: Amount = nil", i)
 		}
@@ -122,13 +122,13 @@ func TestComputeNoDriftOverManyCalls(t *testing.T) {
 // down — otherwise "always rounds up" would pass the first assertion.
 func TestComputeRoundsHalfUp(t *testing.T) {
 	half := Table{"deepseek-flash": {Input: f(0.50)}}
-	got := Compute("deepseek-flash", parse.Usage{InputTokens: 1}, half, time.Time{})
+	got := Compute("deepseek-flash", parse.Usage{InputTokens: 1}, half, time.Time{}, Calendar{})
 	if got.Amount == nil || *got.Amount != 1 {
 		t.Errorf("1 token at $0.50/M = 0.5 µ$, got %v, want 1 (half-up, not truncation)", got.Amount)
 	}
 
 	below := Table{"deepseek-flash": {Input: f(0.28)}}
-	got = Compute("deepseek-flash", parse.Usage{InputTokens: 1}, below, time.Time{})
+	got = Compute("deepseek-flash", parse.Usage{InputTokens: 1}, below, time.Time{}, Calendar{})
 	if got.Amount == nil || *got.Amount != 0 {
 		t.Errorf("1 token at $0.28/M = 0.28 µ$, got %v, want 0 (below half rounds down)", got.Amount)
 	}
@@ -136,7 +136,7 @@ func TestComputeRoundsHalfUp(t *testing.T) {
 
 func TestComputeCacheReadAtCacheRate(t *testing.T) {
 	tbl := Table{"deepseek-flash": {Input: f(1.00), CacheRead: f(0.25)}}
-	got := Compute("deepseek-flash", parse.Usage{CacheReadTokens: 400}, tbl, time.Time{})
+	got := Compute("deepseek-flash", parse.Usage{CacheReadTokens: 400}, tbl, time.Time{}, Calendar{})
 	if got.Amount == nil || *got.Amount != 100 {
 		t.Errorf("Amount = %v, want 100 µ$ (400 tokens at the $0.25/M cache-read rate)", got.Amount)
 	}
@@ -147,7 +147,7 @@ func TestComputeCacheReadAtCacheRate(t *testing.T) {
 
 func TestComputeCacheReadWithoutCacheRateIsApproximate(t *testing.T) {
 	tbl := Table{"deepseek-flash": {Input: f(1.00)}}
-	got := Compute("deepseek-flash", parse.Usage{CacheReadTokens: 400}, tbl, time.Time{})
+	got := Compute("deepseek-flash", parse.Usage{CacheReadTokens: 400}, tbl, time.Time{}, Calendar{})
 	if got.Amount == nil || *got.Amount != 400 {
 		t.Errorf("Amount = %v, want 400 µ$ (400 tokens at the input rate)", got.Amount)
 	}
@@ -170,7 +170,7 @@ func TestComputeUnpricedBeatsApproximate(t *testing.T) {
 		{"unpriced", "deepseek-flash", Table{"deepseek-flash": {}}, SourceUnpriced},
 		{"unknown", "gpt-9", Table{"deepseek-flash": {Input: f(1)}}, SourceUnknownModel},
 	} {
-		got := Compute(tc.model, parse.Usage{CacheReadTokens: 400}, tc.tbl, time.Time{})
+		got := Compute(tc.model, parse.Usage{CacheReadTokens: 400}, tc.tbl, time.Time{}, Calendar{})
 		if got.Source != tc.want || got.Amount != nil {
 			t.Errorf("%s: got {%v, %q}, want {nil, %q}", tc.name, got.Amount, got.Source, tc.want)
 		}
@@ -204,7 +204,7 @@ func TestIsPeakBoundariesWeekday(t *testing.T) {
 		{"10:00", d(10, 0), false},
 	}
 	for _, tc := range cases {
-		if got := IsPeak(tc.t); got != tc.want {
+		if got := (Calendar{}).IsPeak(tc.t); got != tc.want {
 			t.Errorf("%s: IsPeak = %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -217,7 +217,7 @@ func TestIsPeakWeekendNeverPeaks(t *testing.T) {
 		time.Date(2026, 9, 13, 2, 0, 0, 0, time.UTC), // Sunday
 		time.Date(2026, 9, 13, 7, 0, 0, 0, time.UTC), // Sunday
 	} {
-		if IsPeak(tt) {
+		if (Calendar{}).IsPeak(tt) {
 			t.Errorf("IsPeak(%s) = true, want false (weekend)", tt)
 		}
 	}
@@ -229,10 +229,10 @@ func TestIsPeakUsesUTCNotLocal(t *testing.T) {
 	utc := time.Date(2026, 9, 11, 7, 0, 0, 0, time.UTC) // Friday, 07:00 UTC: inside the window
 	loc := time.FixedZone("UTC+5", 5*60*60)
 	local := utc.In(loc) // same instant; wall-clock hour 12 in this zone (outside every window)
-	if !IsPeak(utc) {
+	if !(Calendar{}).IsPeak(utc) {
 		t.Error("IsPeak(utc) = false, want true")
 	}
-	if !IsPeak(local) {
+	if !(Calendar{}).IsPeak(local) {
 		t.Error("IsPeak(local) = false, want true — same instant as utc, must classify the same regardless of location")
 	}
 }
@@ -241,7 +241,7 @@ func TestIsPeakZeroTimeIsOffPeak(t *testing.T) {
 	// time.Time{} is Jan 1, year 1, 00:00 UTC — a Monday, hour 0. Off-peak, so
 	// br-GI-4-02's mechanical time.Time{} edits preserve every existing
 	// assertion's meaning.
-	if IsPeak(time.Time{}) {
+	if (Calendar{}).IsPeak(time.Time{}) {
 		t.Error("IsPeak(time.Time{}) = true, want false")
 	}
 }
@@ -249,8 +249,8 @@ func TestIsPeakZeroTimeIsOffPeak(t *testing.T) {
 func TestComputePeakIsExactlyDoubleOffPeak(t *testing.T) {
 	tbl := Table{"deepseek-flash": {Input: f(0.28)}}
 	usage := parse.Usage{InputTokens: 1_000_000}
-	off := Compute("deepseek-flash", usage, tbl, friOff)
-	peak := Compute("deepseek-flash", usage, tbl, friPeak)
+	off := Compute("deepseek-flash", usage, tbl, friOff, Calendar{})
+	peak := Compute("deepseek-flash", usage, tbl, friPeak, Calendar{})
 	if off.Amount == nil || peak.Amount == nil {
 		t.Fatalf("off.Amount=%v peak.Amount=%v, want both priced", off.Amount, peak.Amount)
 	}
@@ -266,19 +266,70 @@ func TestComputePeakIsExactlyDoubleOffPeak(t *testing.T) {
 func TestComputePeakRoundsSumNotTotal(t *testing.T) {
 	tbl := Table{"deepseek-flash": {Input: f(0.25)}}
 	usage := parse.Usage{InputTokens: 1}
-	off := Compute("deepseek-flash", usage, tbl, friOff)
+	off := Compute("deepseek-flash", usage, tbl, friOff, Calendar{})
 	if off.Amount == nil || *off.Amount != 0 {
 		t.Fatalf("off-peak Amount = %v, want 0 (0.25 µ$ rounds down)", off.Amount)
 	}
-	peak := Compute("deepseek-flash", usage, tbl, friPeak)
+	peak := Compute("deepseek-flash", usage, tbl, friPeak, Calendar{})
 	if peak.Amount == nil || *peak.Amount != 1 {
 		t.Errorf("peak Amount = %v, want 1 (round(2*0.25)=round(0.5)=1, not 2*round(0.25)=0)", peak.Amount)
 	}
 }
 
+// TestComputeHolidayIsOffPeak is the story's headline case: 2026-10-01 is
+// National Day, a Thursday, which the window-and-weekend rule alone prices at
+// peak and DeepSeek bills off-peak for the whole day.
+func TestComputeHolidayIsOffPeak(t *testing.T) {
+	cal := mustCal(t, "2026-10-01", "")
+	tbl := Table{"deepseek-flash": {Input: f(0.28)}}
+	usage := parse.Usage{InputTokens: 1_000_000}
+
+	holiday := Compute("deepseek-flash", usage, tbl, at(2026, 10, 1, 2, 0), cal)
+	// The same Thursday one week later is not a holiday, and is the control:
+	// without it, a Compute that priced everything off-peak would pass.
+	ordinary := Compute("deepseek-flash", usage, tbl, at(2026, 10, 8, 2, 0), cal)
+
+	if holiday.Amount == nil || ordinary.Amount == nil {
+		t.Fatalf("holiday=%v ordinary=%v, want both priced", holiday.Amount, ordinary.Amount)
+	}
+	if *ordinary.Amount != 2**holiday.Amount {
+		t.Errorf("the ordinary Thursday = %d µ$, want exactly 2x the holiday's %d", *ordinary.Amount, *holiday.Amount)
+	}
+	// And the absolute value, so a Compute that halved *both* would still fail.
+	if *holiday.Amount != 280000 {
+		t.Errorf("holiday = %d µ$, want 280000 (1M tokens at the $0.28/M off-peak rate)", *holiday.Amount)
+	}
+}
+
+// TestComputeWorkDayIsPeakInsideWindowOnly pins that a 调休 make-up work day
+// beats the weekend rule *inside* the window and changes nothing outside it —
+// the asymmetry a whole-day-peak reading would get wrong.
+func TestComputeWorkDayIsPeakInsideWindowOnly(t *testing.T) {
+	cal := mustCal(t, "", "2026-10-10") // a Saturday, and a make-up work day
+	tbl := Table{"deepseek-flash": {Input: f(0.28)}}
+	usage := parse.Usage{InputTokens: 1_000_000}
+
+	inWindow := Compute("deepseek-flash", usage, tbl, at(2026, 10, 10, 2, 0), cal)
+	offWindow := Compute("deepseek-flash", usage, tbl, at(2026, 10, 10, 20, 0), cal)
+	plainSat := Compute("deepseek-flash", usage, tbl, at(2026, 10, 17, 2, 0), cal)
+
+	if inWindow.Amount == nil || offWindow.Amount == nil || plainSat.Amount == nil {
+		t.Fatalf("in=%v off=%v plain=%v, want all three priced", inWindow.Amount, offWindow.Amount, plainSat.Amount)
+	}
+	if *inWindow.Amount != 560000 {
+		t.Errorf("in-window on the work day = %d µ$, want 560000 (2x the $0.28/M rate)", *inWindow.Amount)
+	}
+	if *offWindow.Amount != 280000 {
+		t.Errorf("off-window on the work day = %d µ$, want 280000 (1x — the work set is window-scoped, not whole-day)", *offWindow.Amount)
+	}
+	if *plainSat.Amount != 280000 {
+		t.Errorf("an ordinary Saturday = %d µ$, want 280000 (1x — the weekend rule still holds)", *plainSat.Amount)
+	}
+}
+
 func TestComputeUnpricedAtPeak(t *testing.T) {
 	tbl := Table{"deepseek-flash": {}}
-	got := Compute("deepseek-flash", parse.Usage{InputTokens: 100}, tbl, friPeak)
+	got := Compute("deepseek-flash", parse.Usage{InputTokens: 100}, tbl, friPeak, Calendar{})
 	if got.Amount != nil || got.Source != SourceUnpriced {
 		t.Errorf("got {%v, %q}, want {nil, %q}", got.Amount, got.Source, SourceUnpriced)
 	}
@@ -286,7 +337,7 @@ func TestComputeUnpricedAtPeak(t *testing.T) {
 
 func TestComputeUnknownModelAtPeak(t *testing.T) {
 	tbl := Table{"deepseek-flash": {Input: f(0.28)}}
-	got := Compute("gpt-9", parse.Usage{InputTokens: 100}, tbl, friPeak)
+	got := Compute("gpt-9", parse.Usage{InputTokens: 100}, tbl, friPeak, Calendar{})
 	if got.Amount != nil || got.Source != SourceUnknownModel {
 		t.Errorf("got {%v, %q}, want {nil, %q}", got.Amount, got.Source, SourceUnknownModel)
 	}
@@ -294,7 +345,7 @@ func TestComputeUnknownModelAtPeak(t *testing.T) {
 
 func TestComputeApproximateAtPeakUsesPeakMultipliedInputRate(t *testing.T) {
 	tbl := Table{"deepseek-flash": {Input: f(1.00)}}
-	got := Compute("deepseek-flash", parse.Usage{CacheReadTokens: 400}, tbl, friPeak)
+	got := Compute("deepseek-flash", parse.Usage{CacheReadTokens: 400}, tbl, friPeak, Calendar{})
 	if got.Amount == nil || *got.Amount != 800 {
 		t.Errorf("Amount = %v, want 800 µ$ (400 tokens at the peak-multiplied $2.00/M input rate)", got.Amount)
 	}

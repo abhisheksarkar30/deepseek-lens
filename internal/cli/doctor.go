@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
 
@@ -64,6 +65,12 @@ func runDoctor(args []string, w io.Writer) error {
 		{"replay_enabled", fmt.Sprintf("%t", cfg.ReplayEnabled)},
 		{"replay_cost_threshold_usd", fmt.Sprintf("%.4f", cfg.ReplayCostThresholdUSD)},
 		{"retention_days", fmt.Sprintf("%d", cfg.RetentionDays)},
+		// The calendar changes how money is computed, so it belongs in the one
+		// command whose job is "what is this install actually configured to
+		// do" — the shipped default is a dated fact, and this is where a user
+		// reads which dates it actually names.
+		{"off_peak_dates", cfg.OffPeakDates},
+		{"work_dates", cfg.WorkDates},
 	}
 	fmt.Fprint(w, table([]string{"FIELD", "VALUE"}, cfgRows, 0))
 
@@ -133,6 +140,28 @@ func runChecks(cfg *config.Config) []doctorCheck {
 	checks = append(checks, doctorCheck{"schema_version", statusPass, "n/a — no migrations table in v1"})
 
 	checks = append(checks, providerHookCheck(cfg))
+
+	// The shipped date set is a dated fact that cannot update itself, so the
+	// mitigation is to make its expiry visible: the year it names is checked,
+	// and a year it does not name WARNs rather than FAILs. This check must be
+	// incapable of FAIL — runDoctor turns a FAIL into a non-zero exit, and a
+	// coding session must not stop working because the user has not yet
+	// updated a date list (CLAUDE.md's "fail open", applied to config).
+	//
+	// A malformed date does reach here: runChecks short-circuits on nothing,
+	// so config_valid has already FAILed and this pass still runs. The error
+	// is dropped rather than appended as a second FAIL — the malformed string
+	// is reported once, by the check that owns it.
+	if cal, err := pricing.NewCalendar(cfg.OffPeakDates, cfg.WorkDates); err == nil {
+		year := time.Now().Year()
+		if cal.Covers(year) {
+			checks = append(checks, doctorCheck{"peak_calendar", statusPass,
+				fmt.Sprintf("off-peak/work date sets cover %d", year)})
+		} else {
+			checks = append(checks, doctorCheck{"peak_calendar", statusWarn,
+				fmt.Sprintf("no configured date set names %d — peak pricing may be overstating that year's holidays", year)})
+		}
+	}
 
 	// Sink accepted/dropped and consumer last-write age live only in a
 	// running `lens serve` process's memory, so doctor reads them from that

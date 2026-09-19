@@ -30,24 +30,6 @@ const PeakMultiplier = 2.0
 // re-derived from the float on every priced category.
 var peakRat = new(big.Rat).SetFloat64(PeakMultiplier)
 
-// IsPeak reports whether t falls inside DeepSeek's peak-pricing window:
-// 01:00-04:00 or 06:00-10:00 UTC, Monday through Friday. Weekends never
-// peak.
-//
-// This window is duplicated from two implementations lens cannot import —
-// agentic-ai-artifacts's hooks/deepseek-peak-guard.sh and
-// hooks/deepseek-auto-toggle.js — so it is now the third copy; keep it in
-// sync with both by hand.
-func IsPeak(t time.Time) bool {
-	u := t.UTC()
-	dow := u.Weekday()
-	if dow == time.Saturday || dow == time.Sunday {
-		return false
-	}
-	hour := u.Hour()
-	return (hour >= 1 && hour < 4) || (hour >= 6 && hour < 10)
-}
-
 // CostSource's four values. Every surface that shows a cost shows the source
 // alongside it when it is not SourceConfigured.
 const (
@@ -126,18 +108,22 @@ type Cost struct {
 // Compute prices one call against table, at the time it was placed. Rates
 // are per million tokens and one token at $R/M costs R micro-dollars, so the
 // arithmetic is `tokens × rate` summed over the four categories and rounded
-// half-up to a whole micro-dollar once, at the end. When at falls inside
-// DeepSeek's peak-pricing window (IsPeak), every rate is multiplied by
-// PeakMultiplier first — applied to the rates, before summation, as an exact
-// big.Rat multiply, so a peak call is priced exactly PeakMultiplier times
-// its off-peak amount rather than a second rounding of the total.
+// half-up to a whole micro-dollar once, at the end. When cal.IsPeak(at) — the
+// window, the weekend rule, and the configured holiday calendar — every rate
+// is multiplied by PeakMultiplier first, applied to the rates before
+// summation as an exact big.Rat multiply, so a peak call is priced exactly
+// PeakMultiplier times its off-peak amount rather than a second rounding of
+// the total.
+//
+// The peak question is asked once, into a local, so the two multiply sites
+// below cannot disagree about the instant they were given.
 //
 // Precedence, in order: a model absent from the table is "unknown-model" and
 // a present model with no input rate is "unpriced" — neither wins to
 // "approximate", because there is no rate at all to apply to any category.
 // Only once a call is priced does a category with tokens but no configured
 // rate of its own fall back to the input rate and downgrade the source.
-func Compute(model string, usage parse.Usage, table Table, at time.Time) Cost {
+func Compute(model string, usage parse.Usage, table Table, at time.Time, cal Calendar) Cost {
 	r, known := table[model]
 	if !known {
 		return Cost{Source: SourceUnknownModel}
@@ -146,7 +132,8 @@ func Compute(model string, usage parse.Usage, table Table, at time.Time) Cost {
 	if !ok { // nil, NaN, or Inf: nothing to price against
 		return Cost{Source: SourceUnpriced}
 	}
-	if IsPeak(at) {
+	peak := cal.IsPeak(at)
+	if peak {
 		inputRate = new(big.Rat).Mul(inputRate, peakRat)
 	}
 
@@ -159,7 +146,7 @@ func Compute(model string, usage parse.Usage, table Table, at time.Time) Cost {
 		rr, ok := ratOf(rate)
 		if !ok {
 			rr, approx = inputRate, true
-		} else if IsPeak(at) {
+		} else if peak {
 			rr = new(big.Rat).Mul(rr, peakRat)
 		}
 		total.Add(total, new(big.Rat).Mul(rr, new(big.Rat).SetInt64(int64(tokens))))

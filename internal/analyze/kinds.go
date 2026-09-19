@@ -90,7 +90,7 @@ var allKinds = []KindInfo{
 	},
 	{
 		KindPeakPricing,
-		"The call landed inside DeepSeek's 01:00-04:00 or 06:00-10:00 UTC (Mon-Fri) peak-pricing window, so `cost_usd` reflects DeepSeek's 2x peak rate rather than the configured off-peak one.",
+		"The call landed inside DeepSeek's 01:00-04:00 or 06:00-10:00 UTC peak-pricing window on a working day, so `cost_usd` reflects DeepSeek's 2x peak rate rather than the configured off-peak one.",
 	},
 }
 

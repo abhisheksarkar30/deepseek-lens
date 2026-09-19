@@ -12,6 +12,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	// config -> pricing is the one import edge this package adds that is not
+	// stdlib. It exists so Validate can reject a malformed calendar using the
+	// same grammar NewCalendar parses, rather than a second date parser here
+	// that could accept something pricing would then read differently. There
+	// is no cycle: pricing imports only internal/parse (br-GI-24-03).
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 )
 
 // DefaultModelMap is the built-in client-model → DeepSeek-model table
@@ -35,6 +42,32 @@ const DefaultModelMap = "opus:deepseek-v4-pro,sonnet:deepseek-flash,haiku:deepse
 // visibly capped, so the exact figures matter less than their being editable.
 const DefaultModelMaxTokens = "deepseek-v4-pro:64000,deepseek-flash:32000"
 
+// DefaultOffPeakDates is the 2026 statutory-holiday set — DeepSeek bills these
+// days off-peak for the whole day, where lens would otherwise charge peak for
+// any of them that falls on a weekday (19 of the 33 in 2026).
+//
+// Source: 国办发明电〔2025〕7号 (2025-11-04), the State Council's 2026 notice,
+// re-checked date by date rather than taken from its prose. The seven ranges
+// are the notice's own (元旦, 春节, 清明, 劳动节, 端午, 中秋, 国庆) and are
+// kept unexpanded so the default reads like the document it cites.
+//
+// The calendar cannot be computed — it is administratively declared each year
+// — so it is data, and it goes stale on 2027-01-01. `lens doctor` warns when
+// it no longer covers the current year.
+const DefaultOffPeakDates = "2026-01-01..2026-01-03,2026-02-15..2026-02-23,2026-04-04..2026-04-06,2026-05-01..2026-05-05,2026-06-19..2026-06-21,2026-09-25..2026-09-27,2026-10-01..2026-10-07"
+
+// DefaultWorkDates is the 2026 调休 make-up work-day set — the days the notice
+// designates as working days to compensate for a holiday bridge.
+//
+// Every one of the six falls on a weekend, so this set is the only way to
+// express them: without it each is priced off-peak by the weekend rule
+// regardless of the holiday calendar. Under the same D3 rules as the off-peak
+// set they are window-scoped rather than whole-day, so they change nothing
+// outside 01:00-04:00 and 06:00-10:00 UTC.
+//
+// DeepSeek's own treatment of 调休 is unverified — see the README.
+const DefaultWorkDates = "2026-01-04,2026-02-14,2026-02-28,2026-05-09,2026-09-20,2026-10-10"
+
 // Config is the effective, fully-resolved configuration for lens.
 type Config struct {
 	ProxyAddr         string
@@ -54,6 +87,12 @@ type Config struct {
 	ReplayCostThresholdUSD float64
 	ModelMap               string // client-model → DeepSeek-model table; see DefaultModelMap
 	ModelMaxTokens         string // DeepSeek-model → max_tokens ceiling; see DefaultModelMaxTokens
+	// OffPeakDates and WorkDates are the peak calendar's two date sets, in the
+	// grammar pricing.NewCalendar parses: comma-separated YYYY-MM-DD or
+	// inclusive YYYY-MM-DD..YYYY-MM-DD items. A malformed one is fatal rather
+	// than skipped, unlike ModelMap — see DefaultOffPeakDates.
+	OffPeakDates string
+	WorkDates    string
 	// RetentionDays is how long a request row is kept before serve purges
 	// it; 0 (the default) means keep forever, matching this repo's fail-open
 	// posture — nothing is deleted on an unconfigured install. A negative
@@ -80,6 +119,8 @@ func Default() *Config {
 		ReplayCostThresholdUSD: 0.25,
 		ModelMap:               DefaultModelMap,
 		ModelMaxTokens:         DefaultModelMaxTokens,
+		OffPeakDates:           DefaultOffPeakDates,
+		WorkDates:              DefaultWorkDates,
 		RetentionDays:          0,
 	}
 }
@@ -127,6 +168,8 @@ var fieldsByEnv = map[string]string{
 	"LENS_REPLAY_COST_THRESHOLD_USD": "ReplayCostThresholdUSD",
 	"LENS_MODEL_MAP":                 "ModelMap",
 	"LENS_MODEL_MAX_TOKENS":          "ModelMaxTokens",
+	"LENS_OFF_PEAK_DATES":            "OffPeakDates",
+	"LENS_WORK_DATES":                "WorkDates",
 	"LENS_RETENTION_DAYS":            "RetentionDays",
 }
 
@@ -205,6 +248,10 @@ func applyKV(cfg *Config, kv map[string]string) error {
 			cfg.ModelMap = val
 		case "ModelMaxTokens":
 			cfg.ModelMaxTokens = val
+		case "OffPeakDates":
+			cfg.OffPeakDates = val
+		case "WorkDates":
+			cfg.WorkDates = val
 		case "RetentionDays":
 			cfg.RetentionDays, err = strconv.Atoi(val)
 		default:
@@ -236,6 +283,8 @@ func applyFlags(cfg *Config, args []string) error {
 		"replay needs --yes above this original-call cost in US dollars")
 	fs.StringVar(&cfg.ModelMap, "model-map", cfg.ModelMap, "client-model to DeepSeek-model map, e.g. \"opus:deepseek-v4-pro,*:deepseek-flash\"")
 	fs.StringVar(&cfg.ModelMaxTokens, "model-max-tokens", cfg.ModelMaxTokens, "per-DeepSeek-model max_tokens ceiling, e.g. \"deepseek-v4-pro:64000\"")
+	fs.StringVar(&cfg.OffPeakDates, "off-peak-dates", cfg.OffPeakDates, "peak calendar: off-peak (holiday) dates, e.g. \"2026-10-01..2026-10-07\"")
+	fs.StringVar(&cfg.WorkDates, "work-dates", cfg.WorkDates, "peak calendar: 调休 make-up work dates, e.g. \"2026-10-10\"")
 	fs.IntVar(&cfg.RetentionDays, "retention-days", cfg.RetentionDays, "purge requests older than this many days; 0 means keep forever")
 	return fs.Parse(args)
 }
@@ -313,6 +362,13 @@ func (c *Config) Validate() error {
 	}
 	if c.RetentionDays < 0 {
 		return fmt.Errorf("config: validate: RetentionDays: must not be negative, got %d", c.RetentionDays)
+	}
+	// Both sets in one call, which is what makes the "a date is in both" case
+	// reachable — validating each string alone would parse both happily and
+	// never see the contradiction. The error already names the offending item
+	// or date; wrapping it with the field names adds which key it came from.
+	if _, err := pricing.NewCalendar(c.OffPeakDates, c.WorkDates); err != nil {
+		return fmt.Errorf("config: validate: OffPeakDates/WorkDates: %w", err)
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/parse"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
 
@@ -521,7 +522,7 @@ func TestAnalyzeStampsRowIDAndTime(t *testing.T) {
 // table rather than the built-in one — the path `lens serve` takes with
 // whatever the user put in their config file.
 func TestRulesWithConfiguredModelMap(t *testing.T) {
-	rules := NewRules("fable:deepseek-v4-pro,*:deepseek-v4-pro", "deepseek-v4-pro:100")
+	rules := NewRules("fable:deepseek-v4-pro,*:deepseek-v4-pro", "deepseek-v4-pro:100", pricing.Calendar{})
 	meta := parse.Meta{ModelRequested: "FABLE-9", MaxTokens: 200}
 
 	got := rules.Analyze(meta, parse.Usage{}, &store.Request{})
@@ -539,7 +540,7 @@ func TestRulesWithConfiguredModelMap(t *testing.T) {
 // TestMaxTokensCeilingUnknownIsSkipped: a model config has no ceiling for
 // must skip the rule silently rather than warn off a guess.
 func TestMaxTokensCeilingUnknownIsSkipped(t *testing.T) {
-	r := NewRules("opus:deepseek-v4-pro", "deepseek-flash:1000")
+	r := NewRules("opus:deepseek-v4-pro", "deepseek-flash:1000", pricing.Calendar{})
 	got := r.Analyze(parse.Meta{ModelRequested: "claude-opus-5", MaxTokens: 999999}, parse.Usage{}, &store.Request{})
 	if len(got) != 1 || got[0].Kind != "model_remapped" {
 		t.Fatalf("got %s, want only the model_remapped warning", format(got))
@@ -552,7 +553,7 @@ func TestMaxTokensCeilingUnknownIsSkipped(t *testing.T) {
 func TestNewRulesFallsBackToDefaults(t *testing.T) {
 	for _, in := range []string{"", "   ", "no-colon-here", "opus:"} {
 		t.Run(in, func(t *testing.T) {
-			got := NewRules(in, in).Analyze(parse.Meta{ModelRequested: "claude-opus-5"}, parse.Usage{}, &store.Request{})
+			got := NewRules(in, in, pricing.Calendar{}).Analyze(parse.Meta{ModelRequested: "claude-opus-5"}, parse.Usage{}, &store.Request{})
 			if len(got) != 1 || got[0].Severity != "info" {
 				t.Fatalf("got %s, want the built-in defaults' info-severity remap", format(got))
 			}
@@ -621,6 +622,106 @@ func TestRulePeakPricing(t *testing.T) {
 		if got[0].Kind != string(KindTopPClamped) || got[1].Kind != string(KindPeakPricing) {
 			t.Errorf("got kinds [%q, %q], want [%q, %q] — the rule table's order",
 				got[0].Kind, got[1].Kind, KindTopPClamped, KindPeakPricing)
+		}
+	})
+}
+
+// The two calendars TestRulePeakPricingHonoursTheCalendar needs, one date
+// each: a National Day weekday the State Council declared a rest day, and a
+// 调休 make-up Saturday it declared a work day.
+var (
+	nationalDayCal = mustCalendar("2026-10-01", "")
+	makeupDayCal   = mustCalendar("", "2026-02-14")
+)
+
+// mustCalendar builds a Calendar from the same two config strings a user
+// would write. A parse failure here is a broken fixture, not a test outcome,
+// so it panics rather than threading a *testing.T through a package-level var.
+func mustCalendar(offPeak, work string) pricing.Calendar {
+	cal, err := pricing.NewCalendar(offPeak, work)
+	if err != nil {
+		panic(err)
+	}
+	return cal
+}
+
+// TestRulePeakPricingHonoursTheCalendar is br-GI-24-04's case list: what the
+// rule does once the calendar is not the zero value.
+//
+// Rules come from NewRules with both table strings empty, which is the
+// documented fall-back to the built-in model map — the point of these cases
+// is the calendar, and an explicitly-passed map would only add noise.
+func TestRulePeakPricingHonoursTheCalendar(t *testing.T) {
+	cleanMeta := parse.Meta{ModelRequested: "deepseek-v4-pro"}
+
+	// 02:00 UTC on National Day: inside the window, but the calendar says the
+	// whole day is off-peak, so DeepSeek did not bill this at 2x.
+	t.Run("holiday weekday fires nothing", func(t *testing.T) {
+		req := &store.Request{
+			StartedAt: time.Date(2026, 10, 1, 2, 0, 0, 0, time.UTC),
+			CostUSD:   fp(0.28),
+		}
+		got := NewRules("", "", nationalDayCal).Analyze(cleanMeta, parse.Usage{}, req)
+		if len(got) != 0 {
+			t.Errorf("got %s, want no warnings on a declared rest day", format(got))
+		}
+
+		// Positive control: the same instant on the calendar's next ordinary
+		// weekday does fire, so the empty result above is the calendar's
+		// doing and not a mistyped time that landed outside the window.
+		next := &store.Request{StartedAt: time.Date(2026, 10, 8, 2, 0, 0, 0, time.UTC), CostUSD: fp(0.56)}
+		if got := NewRules("", "", nationalDayCal).Analyze(cleanMeta, parse.Usage{}, next); len(got) != 1 {
+			t.Errorf("got %s, want the peak_pricing warning on the next ordinary Thursday", format(got))
+		}
+	})
+
+	// 02:00 UTC on a 调休 Saturday: a weekend by the clock, a work day by the
+	// calendar, so the window applies and the rule fires — on a day a
+	// "Mon-Fri" sentence would have called impossible.
+	t.Run("调休 Saturday fires", func(t *testing.T) {
+		req := &store.Request{
+			StartedAt: time.Date(2026, 2, 14, 2, 0, 0, 0, time.UTC),
+			CostUSD:   fp(0.56),
+		}
+		got := NewRules("", "", makeupDayCal).Analyze(cleanMeta, parse.Usage{}, req)
+		if len(got) != 1 || got[0].Kind != string(KindPeakPricing) {
+			t.Fatalf("got %s, want exactly one peak_pricing warning", format(got))
+		}
+		if strings.Contains(got[0].Detail, "Mon-Fri") {
+			t.Errorf("detail = %q, still claims a Mon-Fri window it fired outside of", got[0].Detail)
+		}
+	})
+
+	// The "was it actually priced" gate, asserted through the shared
+	// predicate with a calendar that has dates in it — a holiday calendar
+	// must not turn a nil or a real-$0 cost into a peak claim either.
+	for _, tc := range []struct {
+		name string
+		cost *float64
+	}{
+		{"nil cost", nil},
+		{"pointer to zero", fp(0)},
+	} {
+		t.Run("unpriced at peak raises nothing: "+tc.name, func(t *testing.T) {
+			req := &store.Request{StartedAt: friPeak, CostUSD: tc.cost}
+			got := NewRules("", "", nationalDayCal).Analyze(cleanMeta, parse.Usage{}, req)
+			if len(got) != 0 {
+				t.Errorf("got %s, want no warnings for a call that was never billed", format(got))
+			}
+		})
+	}
+
+	// The regression guard for the in-package defaultRules: a zero calendar
+	// is still the old window-and-weekend rule.
+	t.Run("zero calendar is unchanged", func(t *testing.T) {
+		req := &store.Request{StartedAt: friPeak, CostUSD: fp(0.28)}
+		if got := NewRules("", "", pricing.Calendar{}).Analyze(cleanMeta, parse.Usage{}, req); len(got) != 1 {
+			t.Errorf("got %s, want the peak_pricing warning on a plain weekday", format(got))
+		}
+
+		wknd := &store.Request{StartedAt: friWknd, CostUSD: fp(0.28)}
+		if got := NewRules("", "", pricing.Calendar{}).Analyze(cleanMeta, parse.Usage{}, wknd); len(got) != 0 {
+			t.Errorf("got %s, want no warnings on a weekend", format(got))
 		}
 	})
 }

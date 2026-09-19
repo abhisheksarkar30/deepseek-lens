@@ -18,6 +18,7 @@ import (
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/parse"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
 
@@ -53,6 +54,12 @@ type Rules struct {
 	modelMap  []modelMapping
 	fallback  string
 	maxTokens map[string]int
+	// calendar decides peak vs off-peak for rulePeakPricing. It is the third
+	// config-resolved table baked into the value, which is why it arrives
+	// through NewRules rather than a setter: once the parameter exists no
+	// caller can forget to install it, and a forgotten calendar would price
+	// holidays at 2x while every test still passed.
+	calendar pricing.Calendar
 }
 
 // NewRules resolves the engine's tables from config's raw delimited strings
@@ -65,10 +72,14 @@ type Rules struct {
 // non-numeric ceiling is skipped, not fatal. There is no per-entry format
 // for Config.Validate to check, and a skipped entry degrades to the default
 // or to "ceiling unknown" instead of refusing to start.
-func NewRules(modelMap, maxTokens string) Rules {
+// calendar is the peak calendar the peak_pricing rule asks; the zero value is
+// the window-and-weekend rule with no holidays, which is what every caller
+// written before br-GI-24 wants.
+func NewRules(modelMap, maxTokens string, calendar pricing.Calendar) Rules {
 	r := Rules{
 		modelMap:  parseMappings(modelMap),
 		maxTokens: parseCeilings(maxTokens),
+		calendar:  calendar,
 	}
 	if len(r.modelMap) == 0 {
 		r.modelMap = parseMappings(config.DefaultModelMap)
@@ -86,7 +97,7 @@ func NewRules(modelMap, maxTokens string) Rules {
 
 // defaultRules is NewRules over the built-in defaults, resolved once so
 // Analyze costs nothing per call.
-var defaultRules = NewRules(config.DefaultModelMap, config.DefaultModelMaxTokens)
+var defaultRules = NewRules(config.DefaultModelMap, config.DefaultModelMaxTokens, pricing.Calendar{})
 
 // Analyze runs the rule table against the built-in default model map. It is
 // the bead's entry point and the config-free one; the running pipeline calls
