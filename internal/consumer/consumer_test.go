@@ -88,7 +88,7 @@ func runClosed(t *testing.T, c *Consumer, sk *sink.Sink, calls []*sink.CapturedC
 func TestDropDetectionEndToEnd(t *testing.T) {
 	st := newTestStore(t)
 	sk := sink.New(16)
-	c := New(sk, st, nil, analyze.NewRules("", ""))
+	c := New(sk, st, nil, analyze.NewRules("", "", pricing.Calendar{}))
 
 	call := simpleCall()
 	call.ReqHeaders = http.Header{"Content-Type": {"application/json"}}
