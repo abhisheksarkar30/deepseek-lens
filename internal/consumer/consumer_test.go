@@ -948,6 +948,52 @@ func TestCostStepPricesAtCallsOwnStartedAt(t *testing.T) {
 	}
 }
 
+// TestCostStepPricesAHolidayAtOffPeak is br-GI-24-02's integration case, and
+// the extension of the test above: with a holiday installed on the calendar,
+// a peak-window instant on that date prices at 1x while the same instant on
+// the adjacent ordinary weekday still prices at 2x. The paired assertion is
+// what makes the calendar provably in force rather than coincidentally
+// irrelevant — a Consumer that ignored SetCalendar would fail the first leg,
+// and one that priced everything off-peak would fail the second.
+func TestCostStepPricesAHolidayAtOffPeak(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, nil)
+	c.SetPriceTable(pricing.Table{"deepseek-flash": {Input: rate(0.28)}})
+	cal, err := pricing.NewCalendar("2026-10-01", "") // National Day, a Thursday
+	if err != nil {
+		t.Fatalf("NewCalendar: %v", err)
+	}
+	c.SetCalendar(cal)
+
+	holiday := pricedCall("deepseek-flash", 1_000_000)
+	holiday.StartedAt = time.Date(2026, 10, 1, 2, 0, 0, 0, time.UTC) // Thursday, inside the window
+	ordinary := pricedCall("deepseek-flash", 1_000_000)
+	ordinary.StartedAt = time.Date(2026, 10, 8, 2, 0, 0, 0, time.UTC) // the next Thursday, not a holiday
+
+	runClosed(t, c, sk, []*sink.CapturedCall{holiday, ordinary})
+
+	rows := waitForRows(t, st, 2)
+	var holidayCost, ordinaryCost *float64
+	for _, r := range rows {
+		switch {
+		case r.StartedAt.Equal(holiday.StartedAt):
+			holidayCost = r.CostUSD
+		case r.StartedAt.Equal(ordinary.StartedAt):
+			ordinaryCost = r.CostUSD
+		}
+	}
+	if holidayCost == nil || ordinaryCost == nil {
+		t.Fatalf("holidayCost=%v ordinaryCost=%v, want both rows found and priced", holidayCost, ordinaryCost)
+	}
+	if *holidayCost != 0.28 {
+		t.Errorf("holiday CostUSD = %v, want 0.28 (1x — DeepSeek bills the whole day off-peak)", *holidayCost)
+	}
+	if *ordinaryCost != 0.56 {
+		t.Errorf("ordinary Thursday CostUSD = %v, want 0.56 (2x — the calendar did not remove peak pricing)", *ordinaryCost)
+	}
+}
+
 // TestCostStepLeavesUnpricedRowsNull is the other half: the shipped table
 // knows the model but has no rates, so cost_usd stays NULL and the source
 // says "unpriced" — never 0, which would read as "this call was free".

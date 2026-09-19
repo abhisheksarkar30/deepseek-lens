@@ -43,12 +43,13 @@ cost := pricing.Compute(req.ModelResolved, usage, c.prices.Table(), req.StartedA
 
 The zero `Calendar` is a valid default here, so an un-wired consumer behaves exactly as today.
 
-**4. This bead leaves `internal/analyze` non-compiling, on purpose.** Removing `pricing.IsPeak` breaks its one production caller, `internal/analyze/rules.go:262` — repaired by br-GI-24-04, which rewrites that line to `in.opts.calendar.PeakPriced(...)`. Because `internal/consumer/consumer_test.go` imports `internal/analyze` (its `NewRules` call at `:91`), **`go test ./internal/consumer/...` does not build either until br-GI-24-04 lands**, so the new holiday-priced case below is *authored* here but first *runs* at br-GI-24-06 (which restores the full build). This bead's own gate is therefore:
+**4. This bead leaves `internal/analyze` non-compiling, on purpose.** Removing `pricing.IsPeak` breaks its one production caller, `internal/analyze/rules.go:262` — repaired by br-GI-24-04, which rewrites that line to `in.opts.calendar.PeakPriced(...)`. **`internal/consumer` does not build either, and not only its tests: `internal/consumer/consumer.go:26` imports `internal/analyze` directly.** So the new holiday-priced case below is *authored* here but first *runs* at br-GI-24-06 (which restores the full build). This bead's own gate is therefore one line:
 
 ```
 go test ./internal/pricing/...      # the only package it fully owns that still builds
-go build ./internal/consumer/       # consumer.go itself does not import analyze
 ```
+
+*Corrected during implementation.* This note previously claimed `consumer.go` does not import `analyze` and that `go build ./internal/consumer/` would therefore succeed, attributing the break to `consumer_test.go:91`'s `NewRules` call alone. `consumer.go:26` has imported `analyze` all along, so the package stops building with the rest of the tree; the break is wider than stated but is the same predicted transient one, and br-GI-24-06's own note already scopes it correctly ("the tree does not compile outside `internal/analyze` + `internal/pricing`"). No design decision changes.
 
 Do **not** treat `go build ./...` failing as a regression in this bead — that is expected and repaired in the graph (the same transient break GI-21's br-GI-21-01 documents for its own signature change).
 
@@ -63,7 +64,7 @@ Deleting the package function rather than keeping it as a shim is deliberate: tw
 - `Compute` takes a `Calendar`; a call at a configured `offPeak` date is priced at exactly 1× the ordinary off-peak amount (integer equality on micro-dollars, no tolerance).
 - `Compute` asks `cal.IsPeak` once per call, not twice.
 - `pricing.IsPeak` no longer exists as a package-level symbol (`pricing.` has no `IsPeak` function in godoc).
-- `Consumer.SetCalendar` exists, mirrors `SetPriceTable`, and leaving it unset is legal (`go build ./internal/consumer/` succeeds; a Consumer built with no calendar prices on the window-and-weekend rule).
+- `Consumer.SetCalendar` exists, mirrors `SetPriceTable`, and leaving it unset is legal: a Consumer built with no calendar prices on the window-and-weekend rule. (It cannot be *compiled* until br-GI-24-04 lands — see the transient-break note.)
 - Every one of the **18** `Compute` call sites in `internal/pricing/pricing_test.go` (grep-derived) is updated and passes a zero `Calendar{}`; the **5** assertion sites of the old `IsPeak` tests across **4** functions become method calls on a zero calendar, **unchanged in expectation**.
 - `go test ./internal/pricing/...` passes. `go build ./...` is **not** expected to succeed (analyze breaks on the removed symbol) — see the transient-break note above.
 
