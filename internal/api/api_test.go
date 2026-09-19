@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
 )
@@ -190,6 +191,10 @@ type sessionDetailJSON struct {
 	ID       string          `json:"ID"`
 	Calls    []store.Request `json:"calls"`
 	Warnings []store.Warning `json:"warnings"`
+	Peak     struct {
+		Calls   int     `json:"calls"`
+		CostUSD float64 `json:"cost_usd"`
+	} `json:"peak"`
 }
 
 // TestGetSessionListsCallsChronologically is the bead's API integration case:
@@ -263,6 +268,173 @@ func TestGetSessionListsCallsChronologically(t *testing.T) {
 	if !kinds["cache_control_ignored"] || !kinds["param_ignored"] {
 		t.Errorf("warnings = %+v, want one of each kind", got.Warnings)
 	}
+}
+
+// peakAt and offAt share the fixture instants internal/analyze's own
+// peak-pricing cases use: 07:00 UTC inside the window, 20:00 UTC outside it,
+// on the same ordinary Friday (2026-09-11).
+var (
+	peakAt = time.Date(2026, 9, 11, 7, 0, 0, 0, time.UTC)
+	offAt  = time.Date(2026, 9, 11, 20, 0, 0, 0, time.UTC)
+)
+
+// callSeed is one call to plant in a session: when it started and what it
+// cost. A nil cost is an unpriced call.
+type callSeed struct {
+	at   time.Time
+	cost *float64
+}
+
+// seedSession plants seeds as a session's calls and upserts the session row
+// with total as its TotalCostUSD, returning the inserted calls (ids set) in
+// seed order. The calls go through seedRequest, so they carry whatever the
+// rest of the suite's default request does.
+func seedSession(t *testing.T, st *store.Store, sid string, total float64, seeds ...callSeed) []*store.Request {
+	t.Helper()
+	inserted := make([]*store.Request, 0, len(seeds))
+	for _, s := range seeds {
+		inserted = append(inserted, seedRequest(t, st, func(r *store.Request) {
+			r.StartedAt = s.at
+			r.CostUSD = s.cost
+			id := sid
+			r.SessionID = &id
+		}))
+	}
+	if err := st.UpsertSession(context.Background(), &store.Session{
+		ID: sid, FirstSeen: peakAt.Add(-time.Hour), LastSeen: peakAt,
+		RequestCount: len(seeds), TotalCostUSD: total,
+	}); err != nil {
+		t.Fatalf("UpsertSession: %v", err)
+	}
+	return inserted
+}
+
+// getSessionRaw issues GET /api/sessions/{id} and returns the recorder, so a
+// case that cares about the raw body (the NaN check) can read it.
+func getSessionRaw(t *testing.T, handler *api, sid string) *httptest.ResponseRecorder {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/sessions/"+sid, nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/sessions/%s: status = %d, want 200: %s", sid, rr.Code, rr.Body.String())
+	}
+	return rr
+}
+
+// TestGetSessionPeakRollup is br-GI-24-05's case list: the drill-down's
+// answer to "was this session expensive because of the work, or the clock".
+func TestGetSessionPeakRollup(t *testing.T) {
+	t.Run("mixed peak and off-peak", func(t *testing.T) {
+		st := newTestStore(t)
+		seedSession(t, st, "s_1_mixed", 0.84,
+			callSeed{at: peakAt, cost: f64(0.56)},
+			callSeed{at: offAt, cost: f64(0.28)},
+		)
+		handler, _, _, _ := newTestAPI(t, st)
+
+		got := decodeJSON[sessionDetailJSON](t, getSessionRaw(t, handler, "s_1_mixed").Body)
+		if got.Peak.Calls != 1 {
+			t.Errorf("peak.calls = %d, want 1 (the window call only)", got.Peak.Calls)
+		}
+		if got.Peak.CostUSD != 0.56 {
+			t.Errorf("peak.cost_usd = %v, want 0.56 — exactly the window call's cost", got.Peak.CostUSD)
+		}
+	})
+
+	t.Run("all peak", func(t *testing.T) {
+		st := newTestStore(t)
+		seedSession(t, st, "s_1_allpeak", 1.12,
+			callSeed{at: peakAt, cost: f64(0.56)},
+			callSeed{at: peakAt.Add(time.Minute), cost: f64(0.56)},
+		)
+		handler, _, _, _ := newTestAPI(t, st)
+
+		got := decodeJSON[sessionDetailJSON](t, getSessionRaw(t, handler, "s_1_allpeak").Body)
+		if got.Peak.Calls != 2 {
+			t.Errorf("peak.calls = %d, want 2 (every call in the session)", got.Peak.Calls)
+		}
+	})
+
+	// The case that would pass if the rollup restated IsPeak instead of
+	// calling PeakPriced: an unpriced call at a peak instant was not "priced
+	// under peak hours".
+	t.Run("unpriced at peak counts zero", func(t *testing.T) {
+		st := newTestStore(t)
+		seedSession(t, st, "s_1_unpriced", 0,
+			callSeed{at: peakAt, cost: nil},
+			callSeed{at: peakAt.Add(time.Minute), cost: nil},
+		)
+		handler, _, _, _ := newTestAPI(t, st)
+
+		got := decodeJSON[sessionDetailJSON](t, getSessionRaw(t, handler, "s_1_unpriced").Body)
+		if got.Peak.Calls != 0 || got.Peak.CostUSD != 0 {
+			t.Errorf("peak = %+v, want zero: an unpriced call is not priced under peak hours", got.Peak)
+		}
+	})
+
+	t.Run("empty session", func(t *testing.T) {
+		st := newTestStore(t)
+		seedSession(t, st, "s_1_empty", 0)
+		handler, _, _, _ := newTestAPI(t, st)
+
+		got := decodeJSON[sessionDetailJSON](t, getSessionRaw(t, handler, "s_1_empty").Body)
+		if got.Peak.Calls != 0 || got.Peak.CostUSD != 0 {
+			t.Errorf("peak = %+v, want zero for a session with no calls", got.Peak)
+		}
+	})
+
+	// The all-unpriced shape (TotalCostUSD = 0 with calls): the share the UI
+	// renders is CostUSD / TotalCostUSD, which is 0/0 here. The response
+	// carries the two raw numbers and never a share, so nothing can go out as
+	// NaN — asserted on the bytes, because a NaN in the body would be a
+	// marshal error rather than a readable field.
+	t.Run("all-unpriced session has no NaN in the body", func(t *testing.T) {
+		st := newTestStore(t)
+		seedSession(t, st, "s_1_zero", 0,
+			callSeed{at: peakAt, cost: nil},
+			callSeed{at: offAt, cost: nil},
+		)
+		handler, _, _, _ := newTestAPI(t, st)
+
+		body := getSessionRaw(t, handler, "s_1_zero").Body.String()
+		if strings.Contains(body, "NaN") {
+			t.Errorf("response body contains NaN: %s", body)
+		}
+		got := decodeJSON[sessionDetailJSON](t, strings.NewReader(body))
+		if got.Peak.Calls != 0 {
+			t.Errorf("peak.calls = %d, want 0", got.Peak.Calls)
+		}
+	})
+
+	// The documented cross-calendar split (D6/D8): the row carries a stored
+	// peak_pricing warning because it was ingested when the calendar did not
+	// know the date, but the calendar installed now reads it as off-peak. The
+	// header and the badge disagree, and that is the intended answer.
+	t.Run("cross-calendar split is intentional", func(t *testing.T) {
+		st := newTestStore(t)
+		holiday := time.Date(2026, 10, 1, 2, 0, 0, 0, time.UTC)
+		calls := seedSession(t, st, "s_1_split", 0.28, callSeed{at: holiday, cost: f64(0.28)})
+		if err := st.InsertWarnings(context.Background(), calls[0].ID, []store.Warning{
+			{Kind: "peak_pricing", Severity: "warn", Detail: "stored when the calendar did not know", CreatedAt: time.Now()},
+		}); err != nil {
+			t.Fatalf("InsertWarnings: %v", err)
+		}
+
+		cal, err := pricing.NewCalendar("2026-10-01", "")
+		if err != nil {
+			t.Fatalf("NewCalendar: %v", err)
+		}
+		handler, _, _, _ := newTestAPI(t, st)
+		handler.SetCalendar(cal)
+
+		got := decodeJSON[sessionDetailJSON](t, getSessionRaw(t, handler, "s_1_split").Body)
+		if got.Peak.Calls != 0 {
+			t.Errorf("peak.calls = %d, want 0: today's calendar prices that day off-peak", got.Peak.Calls)
+		}
+		if len(got.Warnings) != 1 || got.Warnings[0].Kind != "peak_pricing" {
+			t.Errorf("warnings = %+v, want the stored peak_pricing warning still present", got.Warnings)
+		}
+	})
 }
 
 // TestListSessionsServesTheAggregates covers GET /api/sessions: the rows the

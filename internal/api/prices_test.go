@@ -59,6 +59,65 @@ func TestGetPricesChartShape(t *testing.T) {
 	}
 }
 
+// TestPricesEchoTheInstalledCalendar is br-GI-24-05's case (7): both routes
+// carry the effective date sets verbatim — the user's own config text, not a
+// re-serialisation of the parsed days — and both say "" with no calendar.
+func TestPricesEchoTheInstalledCalendar(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prices.toml")
+	if err := pricing.Save(path, pricing.Table{"deepseek-flash": {Input: f64(0.28)}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	const off, work = "2026-10-01..2026-10-07", "2026-10-10"
+
+	// The two wire shapes are asserted field-for-field on the decoded
+	// struct, not on a substring of the body: a body containing the dates
+	// somewhere would not prove the fields carry them.
+	t.Run("no calendar installed", func(t *testing.T) {
+		handler, _, _, _ := newTestAPI(t, newTestStore(t))
+		handler.SetPricing(path)
+
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/prices", nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+		}
+		got := decodeJSON[pricesResponse](t, rr.Body)
+		if got.OffPeakDates != "" || got.WorkDates != "" {
+			t.Errorf("off_peak_dates/work_dates = %q/%q, want \"\"/\"\" with no calendar installed",
+				got.OffPeakDates, got.WorkDates)
+		}
+	})
+
+	t.Run("installed calendar, both routes", func(t *testing.T) {
+		cal, err := pricing.NewCalendar(off, work)
+		if err != nil {
+			t.Fatalf("NewCalendar: %v", err)
+		}
+		handler, _, _, _ := newTestAPI(t, newTestStore(t))
+		handler.SetPricing(path)
+		handler.SetCalendar(cal)
+
+		getRR := httptest.NewRecorder()
+		handler.ServeHTTP(getRR, httptest.NewRequest(http.MethodGet, "/api/prices", nil))
+		postRR := postPrices(handler, `{"model":"deepseek-flash","rates":{"input":1}}`)
+
+		for _, tc := range []struct {
+			name string
+			rr   *httptest.ResponseRecorder
+		}{{"GET", getRR}, {"POST", postRR}} {
+			if tc.rr.Code != http.StatusOK {
+				t.Fatalf("%s: status = %d, want 200: %s", tc.name, tc.rr.Code, tc.rr.Body.String())
+			}
+			got := decodeJSON[pricesResponse](t, tc.rr.Body)
+			if got.OffPeakDates != off || got.WorkDates != work {
+				t.Errorf("%s: off_peak_dates/work_dates = %q/%q, want %q/%q verbatim (a range stays a range)",
+					tc.name, got.OffPeakDates, got.WorkDates, off, work)
+			}
+		}
+	})
+}
+
 func TestGetPricesNullVsZero(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "prices.toml")
 	if err := pricing.Save(path, pricing.Table{

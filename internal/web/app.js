@@ -760,6 +760,22 @@ function groupSessionWarnings(warnings) {
   return [...groups.values()].sort((a, b) => b.count - a.count);
 }
 
+// peakSummary renders a session's peak rollup: how many of its calls were
+// priced under peak hours, and what share of the session's cost they were.
+// It answers the one question the sessions table cannot — was this session
+// expensive because of the work, or because of the clock.
+//
+// The share is omitted, never rendered as NaN%, when there is no priced total
+// to divide by: an all-unpriced session has calls and TotalCostUSD = 0, so
+// the division is 0/0 and the count alone is the honest answer.
+function peakSummary(peak, total) {
+  const calls = (peak && peak.calls) || 0;
+  if (!calls) return "none";
+  const cost = (peak && peak.cost_usd) || 0;
+  const share = total > 0 ? ` · ${Math.round((cost / total) * 100)}% of cost` : "";
+  return `${calls} call${calls === 1 ? "" : "s"} · ${fmtCost(cost)}${share}`;
+}
+
 async function openSession(id) {
   try {
     const s = await fetchJSON(`/api/sessions/${encodeURIComponent(id)}`);
@@ -779,6 +795,7 @@ async function openSession(id) {
       ["Turns", s.RequestCount],
       ["Tokens", `in ${fmtTokens(s.TotalInputTokens)} / out ${fmtTokens(s.TotalOutputTokens)}`],
       ["Cost", fmtCostTotal(s.TotalCostUSD, s.UnpricedCount || 0)],
+      ["Peak-priced", peakSummary(s.peak, s.TotalCostUSD)],
       ["Models", escapeHtml(s.ModelSet || "-")],
       ["Prefix hash", escapeHtml(s.PrefixHash || "(none)")],
     ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
@@ -903,9 +920,22 @@ function rateCellHTML(model, key) {
   return `<td class="price-cell" data-field="${key}">${escapeHtml(display)}</td>`;
 }
 
+// calendarSummary echoes the calendar the server is pricing against as the
+// user's own config text, verbatim — a range stays a range, because
+// re-serialising the parsed days would show them something they did not
+// write. Both empty means no calendar is installed, which is the
+// window-and-weekend rule with no holidays.
+function calendarSummary(data) {
+  const off = data.off_peak_dates || "";
+  const work = data.work_dates || "";
+  if (!off && !work) return "No holiday calendar configured: peak hours follow the weekday window alone.";
+  return `Off-peak dates: ${off || "(none)"} · Work dates: ${work || "(none)"}`;
+}
+
 function renderSettingsPrices(data) {
   document.getElementById("settings-price-path").textContent = data.path;
   document.getElementById("settings-peak-multiplier").textContent = data.peak_multiplier;
+  document.getElementById("settings-calendar").textContent = calendarSummary(data);
   const body = document.getElementById("settings-price-body");
   body.innerHTML = (data.models || []).map((m) => `<tr data-model="${escapeHtml(m.model)}">
     <td>${escapeHtml(m.model)}</td>

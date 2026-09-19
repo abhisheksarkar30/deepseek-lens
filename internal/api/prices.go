@@ -30,6 +30,12 @@ type pricesResponse struct {
 	Path           string       `json:"path"`
 	PeakMultiplier float64      `json:"peak_multiplier"`
 	Models         []priceModel `json:"models"`
+	// OffPeakDates and WorkDates are the installed calendar's date sets,
+	// echoed verbatim — a range stays a range, because the UI shows the
+	// user's own config text back rather than a re-serialisation of the
+	// parsed days. Both are "" when no calendar is installed.
+	OffPeakDates string `json:"off_peak_dates"`
+	WorkDates    string `json:"work_dates"`
 }
 
 // getPrices is GET /api/prices: the effective price table, resolved fresh
@@ -48,7 +54,7 @@ func (a *api) getPrices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, renderPrices(a.pricePath, tbl))
+	writeJSON(w, http.StatusOK, renderPrices(a.pricePath, tbl, a.calendar))
 }
 
 // ratesFields is the JSON shape of a POST /api/prices body's "rates"
@@ -116,7 +122,7 @@ func (a *api) setPrices(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, renderPrices(a.pricePath, tbl))
+	writeJSON(w, http.StatusOK, renderPrices(a.pricePath, tbl, a.calendar))
 }
 
 // priceStatus maps a pricing.Save error to the status POST /api/prices
@@ -131,9 +137,14 @@ func priceStatus(err error) int {
 }
 
 // renderPrices builds the shared GET/POST response shape from a loaded
-// table: sorted models, so the array does not reshuffle between renders as
-// the underlying map iterates.
-func renderPrices(path string, tbl pricing.Table) pricesResponse {
+// table and the installed calendar: sorted models, so the array does not
+// reshuffle between renders as the underlying map iterates.
+//
+// The calendar comes in as an argument rather than being read off the
+// receiver so both callers render it through one shape — POST re-renders
+// through the same function GET does, so neither can start omitting the
+// dates.
+func renderPrices(path string, tbl pricing.Table, cal pricing.Calendar) pricesResponse {
 	names := make([]string, 0, len(tbl))
 	for name := range tbl {
 		names = append(names, name)
@@ -149,5 +160,9 @@ func renderPrices(path string, tbl pricing.Table) pricesResponse {
 			Source: r.Source(),
 		})
 	}
-	return pricesResponse{Path: path, PeakMultiplier: pricing.PeakMultiplier, Models: models}
+	offPeak, work := cal.DateSets()
+	return pricesResponse{
+		Path: path, PeakMultiplier: pricing.PeakMultiplier, Models: models,
+		OffPeakDates: offPeak, WorkDates: work,
+	}
 }
