@@ -148,10 +148,10 @@
   <section id="view-settings" class="view" hidden>
     <h3>Pricing</h3>
     <p class="hint">Rates are US dollars per 1,000,000 tokens, read from and written to
-      <code id="settings-price-path"></code> — a peak multiplier of
-      <strong id="settings-peak-multiplier"></strong>&times; applies where the upstream signals
-      a peak window. An empty cell means no rate is configured for that field; editing a cell
-      and leaving it blank unsets it.</p>
+      <code id="settings-price-path"></code> — lens applies a peak multiplier of
+      <strong id="settings-peak-multiplier"></strong>&times; itself, from the call's own timestamp and
+      the calendar below. No upstream signal is involved. An empty cell means no rate is configured
+      for that field; editing a cell and leaving it blank unsets it.</p>
     <p class="hint" id="settings-calendar"></p>
     <div id="settings-price-error" class="hint" hidden></div>
     <div id="settings-price-msg" class="hint" hidden></div>

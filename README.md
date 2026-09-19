@@ -141,11 +141,30 @@ rather than folding it in as zero.
 `lens prices --edit` opens the file in `$EDITOR` if you would rather edit it directly.
 
 **Peak pricing.** DeepSeek bills 2x during its peak-pricing window — 01:00–04:00 and 06:00–10:00
-UTC, Monday through Friday. That window and the 2x multiplier are DeepSeek's, not lens's: the
-rates you configure above are the *off-peak* rates, and lens applies the multiplier itself for any
-call whose timestamp falls inside the window. A call priced at peak shows a `cost_usd` that is 2x
-what the same call would cost off-peak, and carries a [`peak_pricing`](#what-was-silently-dropped)
-warning naming the window so the doubled number has an explanation attached.
+UTC — but only on a **working day**. Everything else is off-peak: weekends, and China's statutory
+holidays, which DeepSeek bills at the off-peak rate for the whole 24 hours. The window, the
+working-day rule, and the 2x multiplier are DeepSeek's, not lens's: the rates you configure above
+are the *off-peak* rates, and lens applies the multiplier itself for any call whose timestamp falls
+inside the window on a day its calendar calls a working day. A call priced at peak shows a
+`cost_usd` that is 2x what the same call would cost off-peak, and carries a
+[`peak_pricing`](#what-was-silently-dropped) warning naming the window so the doubled number has an
+explanation attached.
+
+The calendar ships with China's 2026 statutory holidays and 调休 make-up work days, taken from the
+State Council notice 国办发明电〔2025〕7号 (2025-11-04). Both sets are configurable —
+`off_peak_dates` and `work_dates` in `config.toml`, or `--off-peak-dates` / `--work-dates`,
+`LENS_OFF_PEAK_DATES` / `LENS_WORK_DATES`. Because the shipped default is a dated fact, `lens
+doctor` reports whether the configured sets name the current year and warns when they do not.
+
+One caveat, named rather than buried: **DeepSeek's own treatment of 调休 make-up days is
+unverified.** No DeepSeek source confirms that a make-up Saturday is billed as a working day; lens
+assumes it is, and `work_dates` is where you say otherwise.
+
+**The calendar is forward-only.** Correcting it re-prices nothing already recorded: a call captured
+on a 2026 holiday before this calendar existed keeps its doubled `cost_usd` and its `peak_pricing`
+warning, because that is what the rule of the day did. The per-session peak rollup in the dashboard
+is the one figure computed fresh from the current calendar, so it can disagree with an older row's
+badge — and the dashboard says which is which.
 
 This needs no plugin. The multiplier and the warning are computed by lens itself from the request's
 own timestamp, so they apply whether or not the
