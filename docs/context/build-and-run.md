@@ -40,6 +40,8 @@ client itself sends.
 | `LENS_REPLAY_COST_THRESHOLD_USD` | Spend `lens replay` sends without `--yes` confirmation | optional |
 | `LENS_MODEL_MAP` | Client-model → DeepSeek-model table | optional |
 | `LENS_MODEL_MAX_TOKENS` | Per-model `max_tokens` ceiling table | optional |
+| `LENS_OFF_PEAK_DATES` | Peak calendar: dates billed off-peak all day (holidays), e.g. `2026-10-01..2026-10-07` | optional |
+| `LENS_WORK_DATES` | Peak calendar: 调休 make-up work days (weekends the peak window still applies to), e.g. `2026-10-10` | optional |
 | `HOME` (read, not `LENS_*`) | Resolves `~/.deepseek-lens/{lens.db,config.toml,prices.toml}` | optional, falls back to `os.UserHomeDir()` |
 | `CLAUDE_CONFIG_DIR` (read, not `LENS_*`) | Locates a *different* home directory — Claude Code's, not lens's | optional |
 | `ANTHROPIC_BASE_URL` (client-side, not read by lens) | What the *client* (Claude Code/Cline) must set to point at the proxy | required by the client, not by `lens` |
@@ -65,6 +67,6 @@ editable via `lens prices --set` / `--edit`.
 2. `go build ./...` to verify the module builds (pulls `modernc.org/sqlite`, pure Go, no cgo/system
    SQLite required).
 3. `go run ./cmd/lens serve` starts both listeners; it prints the `ANTHROPIC_BASE_URL` export line
-   and the dashboard URL to copy-paste ([internal/cli/serve.go:169-176](../../internal/cli/serve.go)).
+   and the dashboard URL to copy-paste ([internal/cli/serve.go:139](../../internal/cli/serve.go)).
 4. `go run ./cmd/lens doctor` at any time to check effective config and (if `serve` is running) live
    sink/consumer stats via `GET /api/health`.

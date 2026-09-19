@@ -7,7 +7,7 @@
 
 | Command | Flags | What it does | Evidence |
 |---|---|---|---|
-| `doctor` | forwards config flags (`--proxy-addr`, `--db-path`, `--replay`, ...) | Prints effective config + PASS/WARN/FAIL checks (config validity, DB dir writable, upstream host resolves, redaction self-test, live sink/consumer stats from a running `serve`, whether the optional plugin hooks recognize this route as `provider_hooks`); exits non-zero on any FAIL | [internal/cli/doctor.go](../../internal/cli/doctor.go) |
+| `doctor` | forwards config flags (`--proxy-addr`, `--db-path`, `--replay`, `--off-peak-dates`, `--work-dates`, ...) | Prints effective config (including `off_peak_dates` / `work_dates`) + PASS/WARN/FAIL checks (config validity, DB dir writable, upstream host resolves, redaction self-test, live sink/consumer stats from a running `serve`, whether the optional plugin hooks recognize this route as `provider_hooks`, and whether the configured peak-pricing date sets name the current year as `peak_calendar` — that one is PASS/WARN only, never FAIL, because the shipped date set is a dated fact the user may not have updated yet); exits non-zero on any FAIL | [internal/cli/doctor.go](../../internal/cli/doctor.go) |
 | `serve` | config flags + `--replay`, `--no-capture` | Runs the proxy listener + dashboard listener + consumer in one process until `SIGINT` | [internal/cli/serve.go](../../internal/cli/serve.go) |
 | `ls` | `--limit` (25), `--session`, `--model`, `--since`, `--warn`, `--errors`, `--json` | Lists recent captured requests as a table or JSON | [internal/cli/ls.go](../../internal/cli/ls.go) |
 | `show` | `--full` | Prints one request's full detail (headers, body, warnings) | [internal/cli/show.go](../../internal/cli/show.go) |

@@ -57,7 +57,29 @@ ADR).
 
 ## Last generated / refreshed
 
-2026-09-17, REFRESH mode, scoped to the GI-21 stats-by-period story (`GI-21-stats-by-period` branch)
+2026-09-19, REFRESH mode, scoped to the GI-24 holiday-aware peak pricing story
+(`GI-24-holiday-aware-peak-pricing` branch) — a new `pricing.Calendar` (a date grammar over an
+off-peak set and a 调休 make-up work-date set) replaced the package-level `pricing.IsPeak`, which was
+**deleted**; `pricing.Compute` and `analyze.NewRules` each gained a `Calendar`, so peak pricing is
+decided by a call's UTC timestamp *and* the configured calendar rather than by a hardcoded Mon-Fri
+window. Two config keys — `OffPeakDates` / `WorkDates`, as `LENS_OFF_PEAK_DATES` / `LENS_WORK_DATES`,
+`--off-peak-dates` / `--work-dates`, or the same names in `config.toml` — ship with China's 2026
+statutory-holiday default. `GET /api/sessions/{id}` gained a read-time `peak` rollup;
+`GET`/`POST /api/prices` gained `off_peak_dates`/`work_dates`; `internal/cli/serve.go` gained
+`wireCalendar`, the one place the calendar reaches all three seams; `lens doctor` gained a
+`peak_calendar` coverage check (PASS/WARN only, never FAIL) and two printed config rows. **No schema
+change**: the rollup is computed at read time precisely because `sessions` cannot gain a column.
+Files touched: `build-and-run.md`, `workflows.md`, `testing-and-quality.md`, `cli-and-tooling.md`,
+`data-model.md`, `api-surface.md` — plus three the story's bead did not list, because the refresh
+found them stale on contact: `architecture.md` (the `internal/pricing` module row did not mention the
+calendar the module now owns), and `conventions.md` / `security-and-permissions.md` (both carried
+`internal/api/api.go` citations this story's edits shifted — two of them were already wrong before
+it). Every `api.go` citation in `api-surface.md` was re-derived by brace-matching the handler rather
+than by adding an offset, as GI-21's refresh established; this one also corrected three drifted
+`api.go` citations and one `serve.go` citation in `workflows.md`, plus one `consumer.go` citation in
+`data-model.md`. No citation in `docs/context/` is now out of range.
+
+Previously: 2026-09-17, REFRESH mode, scoped to the GI-21 stats-by-period story (`GI-21-stats-by-period` branch)
 — `store.StatsByDay` generalized to `StatsByPeriod(ctx, since, until, granularity)` over four
 granularities, with `DayStat`/`Day` renamed to `PeriodStat`/`Period`; `GET /api/stats` gained the
 `granularity` and `until` query params and renamed its `by_day` response field to `by_period`, and

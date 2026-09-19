@@ -35,7 +35,7 @@ the TTFB test
 ### 2. Cold-path capture → row (the consumer)
 
 Entry point: `Consumer.Run`'s single goroutine, started by `lens serve`
-([internal/cli/serve.go:111-115](../../internal/cli/serve.go)).
+([internal/cli/serve.go:144-148](../../internal/cli/serve.go)).
 
 ```mermaid
 sequenceDiagram
@@ -51,7 +51,7 @@ sequenceDiagram
     loop per call in batch (prepareCall)
         Co->>Pa: ExtractMeta / ExtractUsage
         Co->>Se: Resolve(meta, now) — session id (pre-insert)
-        Co->>Pr: Compute(model, usage, table, startedAt) — cost, peak-aware (pre-insert)
+        Co->>Pr: Compute(model, usage, table, startedAt, calendar) — cost, peak-aware (pre-insert)
     end
     Co->>St: InsertRequests(batch) — one transaction
     alt batch transaction fails
@@ -63,6 +63,14 @@ sequenceDiagram
         Co->>Se: RecordCall(sessionID, req, warningCount) — post-insert fold
     end
 ```
+
+The calendar that pre-insert cost step reads is installed on the consumer as a field
+(`Consumer.SetCalendar`), not passed per call, so it is a property of the running pipeline rather
+than of any one call. `lens serve` builds it once from `OffPeakDates`/`WorkDates` and installs it
+on all three seams at once — the consumer, the API, and `analyze.NewRules`
+([internal/cli/serve.go:202-219](../../internal/cli/serve.go), `wireCalendar`). The session
+resolution and costing steps still run *before* `InsertRequests` and the analyzers still attach
+*after*, so the pipeline order is unchanged; the calendar only changes what the cost step computes.
 
 **Failure modes / idempotency**: every stage recovers its own panics — a bad body, a failing store
 write, or a panicking analyzer is logged once, counted in `Stats.Failed`, and the loop moves on
@@ -122,10 +130,11 @@ sequenceDiagram
 
 **Failure modes / idempotency**: the Origin/Host guard runs before any store or upstream access, so
 a rejected request costs nothing (see
-[internal/api/api.go:491-542](../../internal/api/api.go) and
+[internal/api/api.go:455-470](../../internal/api/api.go) and
 [security-and-permissions.md](security-and-permissions.md)). The row-appearance poll is a bounded
 wait (`replayWait` = 2s, `replayPollInterval` = 25ms) rather than a completion hook on the consumer —
 explicitly marked `ponytail:` as a deliberate simplification
-([internal/api/api.go:458-469](../../internal/api/api.go)). A replayed request's stored headers carry
+([internal/api/api.go:421-429](../../internal/api/api.go), the `ponytail:` note itself at
+[`:649`](../../internal/api/api.go)). A replayed request's stored headers carry
 the redaction placeholder, not a real credential — lens never persists or injects an API key
-(design invariant restated at [internal/api/api.go:380-384](../../internal/api/api.go)).
+(design invariant restated at [internal/api/api.go:564-567](../../internal/api/api.go)).

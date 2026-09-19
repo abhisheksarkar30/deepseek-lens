@@ -32,7 +32,7 @@ requesting OS-level permissions. The closest analog is the three write routes' a
 
 | Capability | Why needed | Where gated | Evidence |
 |---|---|---|---|
-| Replay (re-send a captured request, billable) | Lets a user or the dashboard UI resend a call against the real upstream | Off by default (`--replay`); Origin/Host allowlist checked before any I/O; `lens replay` gates spend above `ReplayCostThresholdUSD` behind `--yes` | [internal/api/api.go:254-362](../../internal/api/api.go), [internal/cli/replay.go:155-172](../../internal/cli/replay.go) |
+| Replay (re-send a captured request, billable) | Lets a user or the dashboard UI resend a call against the real upstream | Off by default (`--replay`); Origin/Host allowlist checked before any I/O; `lens replay` gates spend above `ReplayCostThresholdUSD` behind `--yes` | [internal/api/api.go:432-545](../../internal/api/api.go), [internal/cli/replay.go:155-172](../../internal/cli/replay.go) |
 | Set/unset a model's price rates | Lets the Settings tab or `lens prices --set` change what future calls cost | Always on; Origin/Host allowlist; invalid rate/model name rejected before write | [internal/api/prices.go](../../internal/api/prices.go) |
 | Purge rows (delete, by age or the unpriced predicate) | Lets the Settings tab or `lens purge` reclaim disk; the one destructive capability in the system | Always on; Origin/Host allowlist; `days > 0` required for the age-based mode; `lens purge` additionally requires `--yes` for a non-dry-run delete | [internal/api/purge.go](../../internal/api/purge.go), [internal/cli/purge.go](../../internal/cli/purge.go) |
 
@@ -42,13 +42,13 @@ No roles — any local process that can reach the loopback ports has full read a
 can always set prices and purge data (subject to the Origin/Host guard), and, if `--replay` is on,
 can trigger a replay. This is a documented, deliberate trust boundary: "a local process that could
 forge past this [guard] could already read the SQLite file"
-([internal/api/api.go:674](../../internal/api/api.go)) — and, since GI-17, could already delete
+([internal/api/api.go:710](../../internal/api/api.go)) — and, since GI-17, could already delete
 rows from it via `lens purge` without going through the guard at all, which is why the guard's role
 is to stop a *browser*, not a local process with its own access to the file.
 
 ### The Origin/Host allowlist shared by all three write routes
 
-`replayOriginReject` ([internal/api/api.go:639-697](../../internal/api/api.go)) runs before any store
+`replayOriginReject` ([internal/api/api.go:675-733](../../internal/api/api.go)) runs before any store
 or upstream access and rejects on two conditions, for whichever of the three write routes calls it
 (replay, prices, purge — each passes its own `action` string, used only in the rejection message):
 
