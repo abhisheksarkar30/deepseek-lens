@@ -4,8 +4,11 @@
 beadification). v9 is a post-convergence **documentation-only** amendment made during beadification:
 it changes no design decision, no file list, and no bead, and is recorded in the Change History.
 **Version**: 9
-**Issue**: `GI#24` — to be created by bead 01; verified free against `develop` (`gh api .../issues/24` → 404,
-issues top out at #21, PRs at #23).
+**Issue**: [#24](https://github.com/abhisheksarkar30/deepseek-lens/issues/24) — created 2026-09-19,
+after this plan converged and before bead 01 was implemented. No bead creates it; the nine beads
+never mention the issue at all, so nothing downstream references the step this replaces. The number
+was verified free against `develop` (`gh api .../issues/24` → 404, issues topped out at #21, PRs at
+#23).
 **Branch**: `GI-24-holiday-aware-peak-pricing`, cut from `develop`.
 **Repo**: `deepseek-lens` only. Unlike GI-4 this story touches no second repository — but it *does*
 leave the plugin's two hook copies of the peak window (see §8.1) one rule behind.
