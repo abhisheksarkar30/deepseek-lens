@@ -29,6 +29,7 @@ import (
 	"github.com/abhisheksarkar30/deepseek-lens/internal/api"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/proxy"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/replay"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
@@ -104,7 +105,7 @@ func newStack(t *testing.T, replayEnabled bool) *stack {
 	cfg.Capture = true
 
 	sk := sink.New(64)
-	cons := consumer.New(sk, st, nil, analyze.NewRules(cfg.ModelMap, cfg.ModelMaxTokens))
+	cons := consumer.New(sk, st, nil, analyze.NewRules(cfg.ModelMap, cfg.ModelMaxTokens, pricing.Calendar{}))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

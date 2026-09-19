@@ -28,6 +28,16 @@ the query-only shapes `Filter`, `Summary`, `ModelStat`, `PeriodStat`, `CostSourc
 crossing the API/SSE broker — so its served keys are the capitalized Go field names and
 `internal/web/app.js` reads `g.Kind`/`g.Severity`/`g.Count`/`g.LastSeen`, not lowercase.
 
+One served shape is computed rather than stored, and lives in `internal/api` rather than here:
+`GET /api/sessions/{id}`'s `sessionDetail` carries a `peak` object (`{calls, cost_usd}`) rolled up
+**at read time** over the session's calls. `sessions` gains no column for it and cannot gain one —
+`schema.sql` is `CREATE TABLE IF NOT EXISTS` only, so an existing database never acquires a new
+column, and `doctor` reports no migration mechanism. The rollup asks the same
+`pricing.Calendar.PeakPriced` predicate the `peak_pricing` warning uses, so a session header and one
+of its rows can only disagree across *calendars*, never within one — see
+[api-surface.md](api-surface.md) for the shape and [workflows.md](workflows.md) for why that
+disagreement is intended.
+
 Times are stored as Unix **nanoseconds** (`INTEGER`), chosen so a Go `time.Time` round-trips exactly
 through `UnixNano()`/`time.Unix(0, ns)`
 ([internal/store/schema.sql:7-8](../../internal/store/schema.sql)).
@@ -81,7 +91,7 @@ enforced in Go:
   [internal/analyze/rules.go](../../internal/analyze/rules.go).
 - `requests.cost_source` — one of `pricing.CostSource`'s four values: `configured`, `unpriced`,
   `unknown-model`, `approximate`, set by the cost step in
-  [internal/consumer/consumer.go:374-388](../../internal/consumer/consumer.go) — see
+  [internal/consumer/consumer.go:438-447](../../internal/consumer/consumer.go) — see
   [internal/pricing/pricing.go](../../internal/pricing/pricing.go).
 
 `requests.prefix_hash` and `sessions.prefix_hash` carry a **load-bearing three-way meaning**

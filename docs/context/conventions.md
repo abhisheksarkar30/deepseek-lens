@@ -15,7 +15,7 @@
   ([internal/session/session.go:12-28](../../internal/session/session.go)), the flat (non-TOML)
   config/price file parser
   ([internal/config/config.go:140-142](../../internal/config/config.go)), and the replay row-poll
-  ([internal/api/api.go:465-469](../../internal/api/api.go)).
+  ([internal/api/api.go:649](../../internal/api/api.go)).
 
 ## Dashboard (`internal/web`) conventions
 

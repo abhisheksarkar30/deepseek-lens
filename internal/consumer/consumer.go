@@ -100,6 +100,7 @@ type Consumer struct {
 	aggregator SessionAggregator
 	analyzers  []Analyzer
 	prices     PriceTable
+	calendar   pricing.Calendar
 
 	// bodyDecodeLimit caps the decoded form of each captured body. Zero means
 	// the decode step is not installed, so bodies are parsed and stored exactly
@@ -136,6 +137,14 @@ func (c *Consumer) SetPriceTable(pt PriceTable) { c.prices = pt }
 // is what every pre-bead test does. One *session.Resolver satisfies both
 // this and SessionResolver, so `lens serve` installs the same object twice.
 func (c *Consumer) SetSessionAggregator(sa SessionAggregator) { c.aggregator = sa }
+
+// SetCalendar installs the peak calendar the pre-insert cost step prices
+// against — the window and weekend rules plus the configured holiday set
+// (br-GI-24-02). Leaving it unset is legal and prices with the window-and-
+// weekend rule alone, which is exactly the pre-GI-24 behaviour: the zero
+// Calendar is that rule, not an inert one, so an un-wired consumer is not a
+// silently cheaper one.
+func (c *Consumer) SetCalendar(cal pricing.Calendar) { c.calendar = cal }
 
 // SetBodyDecoding installs the pre-parse step that undoes a captured body's
 // transport Content-Encoding (internal/decode), capping the decoded form of each
@@ -427,7 +436,7 @@ func (c *Consumer) prepareCall(call *sink.CapturedCall, seen map[string]string) 
 	// model keyed is the upstream-resolved one, which is what the table is
 	// keyed by; an unresolved model is priced as "unknown-model".
 	if c.prices != nil {
-		cost := pricing.Compute(req.ModelResolved, usage, c.prices.Table(), req.StartedAt)
+		cost := pricing.Compute(req.ModelResolved, usage, c.prices.Table(), req.StartedAt, c.calendar)
 		if cost.Amount != nil {
 			dollars := float64(*cost.Amount) / microPerDollar
 			req.CostUSD = &dollars

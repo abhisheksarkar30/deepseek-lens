@@ -40,6 +40,16 @@ func Serve(args []string) error {
 		return err
 	}
 
+	// The peak calendar (br-GI-24), built once from the two config keys
+	// cfg.Validate just proved parse. Constructed here, next to the check
+	// that guarantees it, rather than at its first use: the error below is
+	// unreachable for an already-validated config, and keeping the two lines
+	// together is what makes that visible.
+	cal, err := pricing.NewCalendar(cfg.OffPeakDates, cfg.WorkDates)
+	if err != nil {
+		return fmt.Errorf("serve: build calendar: %w", err)
+	}
+
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("serve: open store: %w", err)
@@ -82,7 +92,13 @@ func Serve(args []string) error {
 	// have rewritten bead-07's tests; passing the config-resolved engine in
 	// keeps the flags->rules->rows path explicit, and Analyze stays a pure
 	// function of the config tables it is handed.
-	cons := consumer.New(sk, pubStore, sess, analyze.NewRules(cfg.ModelMap, cfg.ModelMaxTokens))
+	//
+	// cal is the third of the engine's config-resolved tables and rides in as
+	// an argument rather than a setter, so no caller can forget it: a
+	// forgotten calendar would price every 2026 holiday at 2x with every test
+	// still green. That is also why wireCalendar exists for the other two
+	// install points — see its doc.
+	cons := consumer.New(sk, pubStore, sess, analyze.NewRules(cfg.ModelMap, cfg.ModelMaxTokens, cal))
 	cons.SetSessionAggregator(sess)
 	// The cost step (br-GI-1-11) is installed here rather than baked into
 	// consumer.New for the same reason the rules engine above is: it is a
@@ -114,6 +130,7 @@ func Serve(args []string) error {
 	dashAPI := api.New(st, sk, cons, broker, web.Files, proxySrv.Handler, cfg.ReplayEnabled)
 	dashAPI.SetPricing(pricing.DefaultPath())
 	dashAPI.SetRetention(cfg.RetentionDays, st)
+	wireCalendar(cal, cons, dashAPI)
 	dashSrv := &http.Server{
 		Addr:    cfg.DashboardAddr,
 		Handler: dashAPI,
@@ -181,6 +198,24 @@ func Serve(args []string) error {
 	<-consumerDone
 
 	return nil
+}
+
+// wireCalendar installs cal on both cold-path seams that take it as an
+// optional setter. Split out from Serve for the same reason checkRedaction
+// is: Serve cannot be driven from a test (two real listeners, a blocking
+// signal context), so the wiring has to be exercised on its own.
+//
+// dash is an interface rather than *api.API because api.New returns the
+// unexported *api, which package cli cannot name — the parameter only has to
+// accept the one method this function calls.
+//
+// The third install point, analyze.NewRules, is deliberately not here: it is
+// a constructor argument, so it is compile-enforced and cannot be forgotten.
+// These two are the silent ones — the zero calendar is exactly today's rule,
+// so a missed setter costs nothing in any test that does not look for it.
+func wireCalendar(cal pricing.Calendar, cons *consumer.Consumer, dash interface{ SetCalendar(pricing.Calendar) }) {
+	cons.SetCalendar(cal)
+	dash.SetCalendar(cal)
 }
 
 // checkRedaction runs br-GI-1-06's startup leak self-test and reports the

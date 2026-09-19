@@ -18,6 +18,7 @@ import (
 	"github.com/abhisheksarkar30/deepseek-lens/internal/api"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/proxy"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/store"
@@ -90,7 +91,7 @@ func newReplayRig(t *testing.T) *replayRig {
 	cfg.Capture = true
 
 	sk := sink.New(64)
-	cons := consumer.New(sk, st, nil, analyze.NewRules(cfg.ModelMap, cfg.ModelMaxTokens))
+	cons := consumer.New(sk, st, nil, analyze.NewRules(cfg.ModelMap, cfg.ModelMaxTokens, pricing.Calendar{}))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

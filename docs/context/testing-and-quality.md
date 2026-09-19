@@ -63,12 +63,21 @@ response.
   `CLAUDE_CONFIG_DIR` > `USERPROFILE` > `HOME` resolver precedence, isolated per test via
   `t.Setenv` rather than the real machine's config directory
   ([internal/cli/cli_test.go](../../internal/cli/cli_test.go)).
-- Cost has a time dimension: `pricing.IsPeak`'s weekday/weekend and UTC-boundary correctness,
-  and that `Compute` multiplies each category's rate by two before summing/rounding rather than
-  rounding the off-peak total and doubling it (`TestComputePeakRoundsSumNotTotal`) — see
-  [internal/pricing/pricing_test.go](../../internal/pricing/pricing_test.go). The
-  `peak_pricing` warning that surfaces this on a request row is covered separately in
-  [internal/analyze/analyze_test.go](../../internal/analyze/analyze_test.go).
+- Cost has a time dimension. `Calendar.IsPeak`
+  ([internal/pricing/calendar.go](../../internal/pricing/calendar.go)) decides peak vs off-peak
+  from a call's UTC timestamp and the two configured date sets; its precedence rules, its
+  UTC-keying boundary, its malformed-input rejections, and the day it calls covered are in
+  [internal/pricing/calendar_test.go](../../internal/pricing/calendar_test.go) —
+  `TestZeroCalendarMatchesTheOldRule` is the load-bearing one, sweeping a week against a frozen
+  copy of the pre-GI-24 window-and-weekend rule, which is what lets every `Calendar{}`-passing
+  case elsewhere still mean what it says. `Compute`'s own behaviour is in
+  [internal/pricing/pricing_test.go](../../internal/pricing/pricing_test.go): it multiplies each
+  category's rate by two before summing/rounding rather than rounding the off-peak total and
+  doubling it (`TestComputePeakRoundsSumNotTotal`), and a configured holiday prices at exactly 1x
+  (`TestComputeHolidayIsOffPeak`). The `peak_pricing` warning that surfaces this on a request row
+  is covered in [internal/analyze/analyze_test.go](../../internal/analyze/analyze_test.go), and
+  the per-session rollup that counts those calls in
+  [internal/api/api_test.go](../../internal/api/api_test.go).
 - Store's single-writer discipline under concurrency —
   `TestConcurrentInsertsSerialize` ([internal/store/store_test.go](../../internal/store/store_test.go)),
   which runs unconditionally (no `//go:build race` tag). The race-on/race-off test pair

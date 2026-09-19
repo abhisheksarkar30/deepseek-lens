@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
+	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/proxy"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/replay"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
@@ -97,6 +98,12 @@ type api struct {
 	// cannot double as the unwired sentinel).
 	retentionDays int
 	purge         RetentionPurger
+
+	// calendar is the peak calendar the session rollup reads and that
+	// GET/POST /api/prices echoes. The zero value is a valid calendar — it is
+	// the window-and-weekend rule with no holidays — so leaving it unset is a
+	// supported state, not a missing capability.
+	calendar pricing.Calendar
 }
 
 // SetPricing wires GET/POST /api/prices to the price file at path. Called
@@ -113,6 +120,12 @@ func (a *api) SetRetention(days int, purge RetentionPurger) {
 	a.retentionDays = days
 	a.purge = purge
 }
+
+// SetCalendar installs the calendar the session rollup reads and the
+// effective date sets GET/POST /api/prices shows. Leaving it unset is a
+// supported state: the rollup then applies the window-and-weekend rule with
+// no holidays (the zero calendar IS that rule), and /api/prices echoes ""/"".
+func (a *api) SetCalendar(cal pricing.Calendar) { a.calendar = cal }
 
 // ServeHTTP delegates to the stored mux, so *api satisfies http.Handler and
 // Handler: api.New(...) in serve.go keeps compiling with no change at that
@@ -923,6 +936,26 @@ type sessionDetail struct {
 	// is the dashboard's job — but the union has to be assembled here,
 	// because only the server knows which requests belong to the session.
 	Warnings []*store.Warning `json:"warnings"`
+	// Peak is how much of this session's spend went to DeepSeek's peak rate,
+	// computed over Calls. It is the one thing the sessions table cannot
+	// answer on its own — whether a session was expensive because of the work
+	// or because of the clock — and it is computed at read time because the
+	// schema has no column for it and no migration mechanism to add one.
+	Peak sessionPeak `json:"peak"`
+}
+
+// sessionPeak is how much of a session's spend landed on DeepSeek's peak rate.
+//
+// Calls counts the calls PeakPriced accepted, not the calls merely inside the
+// peak window: an unpriced call placed at peak is not "priced under peak
+// hours" and must not be counted as though it were.
+//
+// CostUSD is the numerator only. The share lives in the UI, which renders it
+// from these two numbers plus the session's total, so a session with no
+// priced calls can omit the share rather than divide by zero.
+type sessionPeak struct {
+	Calls   int     `json:"calls"`
+	CostUSD float64 `json:"cost_usd"`
 }
 
 func (a *api) getSession(w http.ResponseWriter, r *http.Request) {
@@ -967,7 +1000,26 @@ func (a *api) getSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, sessionDetail{Session: sess, Calls: reversed, Warnings: warnings})
+	// The peak rollup runs on the calendar in force NOW, not the one that was
+	// in force when each row was ingested (D6/D8). Cost and warnings are
+	// frozen at ingest; this is recomputed. So a row captured before the
+	// calendar existed keeps its doubled cost_usd and its stored peak_pricing
+	// warning while this count reads it as off-peak, and the header and that
+	// row's badge disagree. That is the intended answer, not a bug: the
+	// rollup answers "what would this session cost on the calendar you are
+	// running", and the badge answers "what happened".
+	//
+	// It asks PeakPriced, the same predicate the warning uses, so the two can
+	// only ever disagree across calendars — never within one.
+	var peak sessionPeak
+	for _, c := range calls {
+		if a.calendar.PeakPriced(c.StartedAt, c.CostUSD) {
+			peak.Calls++
+			peak.CostUSD += *c.CostUSD
+		}
+	}
+
+	writeJSON(w, http.StatusOK, sessionDetail{Session: sess, Calls: reversed, Warnings: warnings, Peak: peak})
 }
 
 // stream is the SSE endpoint: it subscribes to the broker and forwards every

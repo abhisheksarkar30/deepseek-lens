@@ -234,8 +234,11 @@ func Save(path string, t Table) error {
 	b.WriteString("# rates listed below is known but unpriced. Re-read on change.\n")
 	b.WriteString("#\n")
 	b.WriteString("# These are OFF-PEAK rates. DeepSeek bills 2x during its peak-pricing\n")
-	b.WriteString("# window (01:00-04:00 and 06:00-10:00 UTC, Mon-Fri) — lens detects and\n")
-	b.WriteString("# applies that multiplier itself; it is not configurable here.\n")
+	b.WriteString("# window (01:00-04:00 and 06:00-10:00 UTC, on a working day) — lens\n")
+	b.WriteString("# detects and applies that multiplier itself; it is not configurable\n")
+	b.WriteString("# here. Whether a given day is a working day is: weekends and China's\n")
+	b.WriteString("# statutory holidays are off-peak all day, and a 调休 make-up day is\n")
+	b.WriteString("# a working day. See off_peak_dates / work_dates in config.toml.\n")
 	for _, model := range sortedModels(t) {
 		r := t[model]
 		wrote := false

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1106,6 +1107,117 @@ func TestDoctorReportsProviderHooksRow(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "provider_hooks") {
 		t.Errorf("doctor output missing provider_hooks row:\n%s", buf.String())
+	}
+}
+
+// peakCheck finds runChecks' peak_calendar row, reporting whether it was
+// produced at all — the malformed-date case deliberately appends none.
+func peakCheck(t *testing.T, cfg *config.Config) (doctorCheck, bool) {
+	t.Helper()
+	for _, c := range runChecks(cfg) {
+		if c.Name == "peak_calendar" {
+			return c, true
+		}
+	}
+	return doctorCheck{}, false
+}
+
+// doctorCfg is a config runChecks can be handed directly: the defaults with a
+// throwaway database, so the checks that need a real store have one.
+func doctorCfg(t *testing.T) *config.Config {
+	t.Helper()
+	cfg := config.Default()
+	cfg.DBPath = filepath.Join(t.TempDir(), "lens.db")
+	return cfg
+}
+
+func TestDoctorPeakCalendarPassesOnACoveredYear(t *testing.T) {
+	cfg := doctorCfg(t)
+	year := time.Now().Year()
+	cfg.OffPeakDates = fmt.Sprintf("%d-10-01..%d-10-07", year, year)
+	cfg.WorkDates = ""
+
+	c, ok := peakCheck(t, cfg)
+	if !ok {
+		t.Fatal("no peak_calendar row in runChecks' output")
+	}
+	if c.Status != statusPass {
+		t.Errorf("status = %s, want PASS for a set naming %d: %s", c.Status, year, c.Detail)
+	}
+}
+
+// TestDoctorPeakCalendarWarnsOnAnUncoveredYear is the case the check exists
+// for: the shipped set is a dated fact and 2027 is not in it.
+func TestDoctorPeakCalendarWarnsOnAnUncoveredYear(t *testing.T) {
+	cfg := doctorCfg(t)
+	cfg.OffPeakDates = "1999-10-01..1999-10-07"
+	cfg.WorkDates = ""
+
+	c, ok := peakCheck(t, cfg)
+	if !ok {
+		t.Fatal("no peak_calendar row in runChecks' output")
+	}
+	if c.Status != statusWarn {
+		t.Errorf("status = %s, want WARN when no set names %d: %s", c.Status, time.Now().Year(), c.Detail)
+	}
+	if !strings.Contains(c.Detail, strconv.Itoa(time.Now().Year())) {
+		t.Errorf("detail = %q, want it to name the uncovered year", c.Detail)
+	}
+}
+
+// TestDoctorPeakCalendarNeverFails is the D9 invariant: lens's correctness
+// must not depend on a date list the user has not updated yet, and runDoctor
+// turns a FAIL into a non-zero exit. An uncovered year therefore has to leave
+// the exit code alone while still being visible in the output.
+func TestDoctorPeakCalendarNeverFails(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	err := runDoctor([]string{"--db-path", dbPath, "--off-peak-dates", "1999-10-01..1999-10-07", "--work-dates", ""}, &buf)
+	if err != nil {
+		t.Fatalf("runDoctor = %v, want nil for an uncovered year — a WARN must not affect the exit\n%s", err, buf.String())
+	}
+	out := buf.String()
+	if !strings.Contains(out, "peak_calendar") || !strings.Contains(out, "WARN") {
+		t.Errorf("output = missing the peak_calendar WARN row:\n%s", out)
+	}
+}
+
+// TestDoctorPeakCalendarSkipsMalformedDates: runChecks short-circuits on
+// nothing, so a malformed date reaches the coverage check having already
+// FAILed config_valid. The check must add no second failure — it is absent
+// from the output entirely.
+func TestDoctorPeakCalendarSkipsMalformedDates(t *testing.T) {
+	cfg := doctorCfg(t)
+	cfg.OffPeakDates = "2026-13-45"
+
+	var fails []string
+	for _, c := range runChecks(cfg) {
+		if c.Name == "peak_calendar" {
+			t.Errorf("peak_calendar row present for malformed dates: %+v", c)
+		}
+		if c.Status == statusFail {
+			fails = append(fails, c.Name)
+		}
+	}
+	if len(fails) != 1 || fails[0] != "config_valid" {
+		t.Errorf("FAIL rows = %v, want exactly [config_valid] — the coverage check is incapable of FAIL", fails)
+	}
+}
+
+// TestDoctorPrintsTheCalendar mirrors TestDoctorReportsRetentionDays: the
+// values are asserted at a non-default setting, so a hardcoded row fails.
+func TestDoctorPrintsTheCalendar(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "lens.db")
+	var buf bytes.Buffer
+	if err := runDoctor([]string{"--db-path", dbPath,
+		"--off-peak-dates", "2031-01-01..2031-01-03", "--work-dates", "2031-01-04"}, &buf); err != nil {
+		t.Fatalf("runDoctor: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	for _, want := range []string{"off_peak_dates", "2031-01-01..2031-01-03", "work_dates", "2031-01-04"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doctor output missing %q:\n%s", want, out)
+		}
 	}
 }
 
