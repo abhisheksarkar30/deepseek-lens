@@ -76,8 +76,15 @@
           <option value="month">Month</option>
         </select>
       </label>
-      <label>From <input type="date" id="stats-from"></label>
-      <label>To <input type="date" id="stats-to"></label>
+      <label>Days in
+        <select id="stats-tz">
+          <option value="local" selected>Local</option>
+          <option value="0">UTC</option>
+          <option value="480">UTC+8</option>
+        </select>
+      </label>
+      <label>From <input type="datetime-local" id="stats-from" step="3600"></label>
+      <label>To <input type="datetime-local" id="stats-to" step="3600"></label>
     </div>
     <!-- The metric buttons carry .metric, not .tab, and deliberately no
          data-view: showView() sweeps every .tab to re-apply active from

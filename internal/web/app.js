@@ -449,19 +449,66 @@ const STATS_METRICS = {
 // size. This is a UI default only — the API never rejects a large window.
 const FROM_LOOKBACK_MS = { hour: 24 * 3600e3, day: 30 * 86400e3, week: 90 * 86400e3, month: 0 };
 
-// utcDayBound turns an <input type="date"> value (YYYY-MM-DD) into the RFC3339
-// UTC-midnight bound the API's since/until expect. The explicit T00:00:00Z
-// suffix pins UTC midnight regardless of the browser's local zone. The To
-// bound is the start of the NEXT day, because until is exclusive-upper:
-// [start, next-start) covers the whole picked day with no double-counted
-// boundary row — so "To: March 5" reads as "through the end of March 5 UTC",
-// not "up to March 5 00:00".
-function utcDayBound(dateStr, endExclusive) {
-  if (!dateStr) return "";
-  const d = new Date(dateStr + "T00:00:00Z");
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function formatUTC(ms) {
+  const d = new Date(ms);
   if (isNaN(d.getTime())) return "";
-  if (endExclusive) d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().replace(/\.\d{3}Z$/, "Z");
+  return d.getUTCFullYear() + "-" + pad2(d.getUTCMonth() + 1) + "-" + pad2(d.getUTCDate()) +
+    "T" + pad2(d.getUTCHours()) + ":" + pad2(d.getUTCMinutes()) + ":" + pad2(d.getUTCSeconds()) + ".000Z";
+}
+
+// hourBound turns a datetime-local value into an RFC3339 instant. Minutes are
+// floored to the hour. endExclusive makes until the start of the next hour,
+// so the window is [from-hour start, to-hour end). offset is a minute count
+// east of UTC, or "local" (the numeric constructor, which is DST-correct).
+function hourBound(value, endExclusive, offset) {
+  if (!value) return "";
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})/.exec(value);
+  if (!m) return "";
+  let y = +m[1], mo = +m[2], d = +m[3], h = +m[4];
+  if (endExclusive) h += 1;
+  let ms;
+  if (offset === "local") {
+    ms = new Date(y, mo - 1, d, h).getTime();
+  } else {
+    ms = Date.UTC(y, mo - 1, d, h) - (Number(offset) || 0) * 60 * 1000;
+  }
+  return formatUTC(ms);
+}
+
+function statsZone() {
+  const el = document.getElementById("stats-tz");
+  const v = el ? el.value : "local";
+  if (v === "local") return "local";
+  const n = Number(v);
+  return Number.isFinite(n) ? n : "local";
+}
+
+function statsTzOffsetMin() {
+  const z = statsZone();
+  if (z === "local") return -new Date().getTimezoneOffset();
+  return z;
+}
+
+function zoneLabel() {
+  const z = statsZone();
+  if (z === "local") return "Local";
+  if (z === 0) return "UTC";
+  if (z === 480) return "UTC+8";
+  return "UTC";
+}
+
+function wallStamp(ms, offset) {
+  const local = offset === "local";
+  const d = local ? new Date(ms) : new Date(ms + (Number(offset) || 0) * 60 * 1000);
+  const y = local ? d.getFullYear() : d.getUTCFullYear();
+  const mo = local ? d.getMonth() : d.getUTCMonth();
+  const day = local ? d.getDate() : d.getUTCDate();
+  const h = local ? d.getHours() : d.getUTCHours();
+  return y + "-" + pad2(mo + 1) + "-" + pad2(day) + "T" + pad2(h) + ":00";
 }
 
 function statsValue(id) {
@@ -475,9 +522,11 @@ async function loadStats() {
     // all-time window this tab has always shown — the two-bound form is a
     // superset of the old one-bound behavior, not a change to it.
     const granularity = statsValue("stats-granularity") || "day";
-    const from = utcDayBound(statsValue("stats-from"), false);
-    const to = utcDayBound(statsValue("stats-to"), true);
+    const zone = statsZone();
+    const from = hourBound(statsValue("stats-from"), false, zone);
+    const to = hourBound(statsValue("stats-to"), true, zone);
     const params = new URLSearchParams({ granularity });
+    params.set("tz_offset", String(statsTzOffsetMin()));
     if (from) params.set("since", from);
     if (to) params.set("until", to);
 
@@ -503,7 +552,7 @@ async function loadStats() {
 // re-renders without refetching.
 function renderStatsHeading(granularity) {
   const metric = STATS_METRICS[state.statsMetric] || STATS_METRICS.count;
-  const title = `${metric.label} per ${granularity}`;
+  const title = `${metric.label} per ${granularity} (${zoneLabel()})`;
   const h = document.getElementById("stats-chart-title");
   if (h) h.textContent = title;
   const svg = document.getElementById("stats-chart");
@@ -635,12 +684,12 @@ document.getElementById("stats-granularity").addEventListener("change", () => {
   const fromEl = document.getElementById("stats-from");
   const lookback = FROM_LOOKBACK_MS[statsValue("stats-granularity")] || 0;
   if (!fromEl.value && lookback > 0) {
-    fromEl.value = new Date(Date.now() - lookback).toISOString().slice(0, 10);
+    fromEl.value = wallStamp(Date.now() - lookback, statsZone());
   }
   loadStats();
 });
 
-for (const id of ["stats-from", "stats-to"]) {
+for (const id of ["stats-from", "stats-to", "stats-tz"]) {
   document.getElementById(id).addEventListener("change", loadStats);
 }
 
