@@ -61,6 +61,13 @@ const requestColumns = `id, started_at, ttfb_ns, duration_ns, method, path, remo
 	session_header, session_id, cost_usd, cost_source,
 	replay_of, replay_edits, prefix_hash`
 
+const requestColumnsNoBody = `id, started_at, ttfb_ns, duration_ns, method, path, remote_addr, status,
+	req_headers, resp_headers, NULL, NULL,
+	input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+	stop_reason, model_requested, model_resolved, error_text,
+	session_header, session_id, cost_usd, cost_source,
+	replay_of, replay_edits, prefix_hash`
+
 // insertColumns is requestColumns minus id (AUTOINCREMENT). insertRequestSQL
 // is built from it so the column list and the "?" placeholder count can
 // never drift apart.
@@ -85,6 +92,9 @@ var insertRequestSQL = fmt.Sprintf(
 type Store struct {
 	writer *sql.DB
 	reader *sql.DB
+	dbPath string
+	// dayOpens counts archive day-file opens. Tests read it.
+	dayOpens int
 }
 
 // Open creates dbPath's parent directory (0700 if absent), opens the writer
@@ -134,7 +144,7 @@ func Open(dbPath string) (*Store, error) {
 	_ = os.Chmod(dbPath+"-wal", 0o600)
 	_ = os.Chmod(dbPath+"-shm", 0o600)
 
-	return &Store{writer: writer, reader: reader}, nil
+	return &Store{writer: writer, reader: reader, dbPath: dbPath}, nil
 }
 
 // Close closes both connections.
@@ -305,6 +315,9 @@ func (s *Store) GetRequest(ctx context.Context, id int64) (*Request, error) {
 		}
 		return nil, fmt.Errorf("store: get request: %w", err)
 	}
+	if err := s.hydrateBodies(ctx, []*Request{r}); err != nil {
+		return nil, err
+	}
 	return r, nil
 }
 
@@ -403,7 +416,11 @@ func (s *Store) ListRequests(ctx context.Context, f Filter) ([]*Request, error) 
 	// id DESC is the tiebreaker, not decoration: the consumer batch-inserts,
 	// so rows sharing a started_at are normal, and without a total order a
 	// page boundary can serve one row twice or skip it.
-	query := "SELECT " + requestColumns + " FROM requests" + where +
+	cols := requestColumns
+	if !f.WithBodies {
+		cols = requestColumnsNoBody
+	}
+	query := "SELECT " + cols + " FROM requests" + where +
 		" ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, clampOffset(f.Offset))
 
@@ -421,7 +438,15 @@ func (s *Store) ListRequests(ctx context.Context, f Filter) ([]*Request, error) 
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if f.WithBodies {
+		if err := s.hydrateBodies(ctx, out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // CountRequests returns how many requests match f's predicates, ignoring

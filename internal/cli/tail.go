@@ -42,7 +42,7 @@ func runTail(ctx context.Context, args []string, w io.Writer, st *store.Store) e
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	filter := store.Filter{Limit: tailWindow, SessionID: *session, OnlyWarned: *warn}
+	filter := store.Filter{Limit: tailWindow, SessionID: *session, OnlyWarned: *warn, WithBodies: false}
 
 	tty := isTTY(w)
 	seen := make(map[int64]bool)

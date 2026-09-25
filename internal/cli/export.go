@@ -33,7 +33,7 @@ func runExport(args []string, w io.Writer, st *store.Store) error {
 		return err
 	}
 
-	filter := store.Filter{Limit: *limit, SessionID: *session, Model: *model}
+	filter := store.Filter{Limit: *limit, SessionID: *session, Model: *model, WithBodies: true}
 	if *since != "" {
 		t, err := parseSince(*since)
 		if err != nil {

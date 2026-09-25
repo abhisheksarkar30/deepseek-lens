@@ -93,3 +93,12 @@ CREATE INDEX IF NOT EXISTS idx_warnings_request_id ON warnings(request_id);
 -- the DefaultLimit cap ListWarnings applies), and this turns the scan into an
 -- index scan that also satisfies MAX(created_at) without touching the table.
 CREATE INDEX IF NOT EXISTS idx_warnings_kind_severity_created_at ON warnings(kind, severity, created_at);
+
+CREATE TABLE IF NOT EXISTS body_archive (
+    request_id  INTEGER NOT NULL,
+    day         TEXT NOT NULL,
+    archived_at INTEGER NOT NULL,
+    body_mask   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_body_archive_request_id ON body_archive(request_id);
+CREATE INDEX IF NOT EXISTS idx_body_archive_day ON body_archive(day);
