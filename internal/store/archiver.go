@@ -24,9 +24,15 @@ type archiveRow struct {
 
 // ArchiveOlderThan moves bodies started before the boundary into per-UTC-day
 // zstd files. The day-file insert commits before the hot marker and NULL.
-// stopAfter "day" returns after the day-file commit; "hot" returns after the
-// hot commit. Both leave the body recoverable.
-func (s *Store) ArchiveOlderThan(ctx context.Context, before time.Time, stopAfter string) error {
+func (s *Store) ArchiveOlderThan(ctx context.Context, before time.Time) error {
+	return s.archiveOlderThan(ctx, before, "")
+}
+
+// archiveOlderThan is ArchiveOlderThan with a test-only fault-injection seam:
+// stopAfter "day" returns after the day-file commit, "hot" after the hot
+// commit. Both leave the body recoverable from one side. Unexported so the
+// seam is not on the production API surface.
+func (s *Store) archiveOlderThan(ctx context.Context, before time.Time, stopAfter string) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -116,7 +122,7 @@ func (s *Store) writeDay(day string, rows []archiveRow) error {
 		return err
 	}
 	defer db.Close()
-	s.dayOpens++
+	s.dayOpens.Add(1)
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS bodies (
 		request_id INTEGER PRIMARY KEY,
 		req_body BLOB,
@@ -199,7 +205,7 @@ func (s *Store) sumDayBytes(ctx context.Context, day string, ids []int64) (int64
 		return 0, err
 	}
 	defer db.Close()
-	s.dayOpens++
+	s.dayOpens.Add(1)
 	placeholders := make([]string, len(ids))
 	args := make([]any, len(ids))
 	for i, id := range ids {
@@ -224,7 +230,7 @@ func (s *Store) execDay(ctx context.Context, day, prefix string, ids []int64) er
 		return err
 	}
 	defer db.Close()
-	s.dayOpens++
+	s.dayOpens.Add(1)
 	placeholders := make([]string, len(ids))
 	args := make([]any, len(ids))
 	for i, id := range ids {
@@ -278,7 +284,7 @@ func (s *Store) GCArchive(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		s.dayOpens++
+		s.dayOpens.Add(1)
 		ids, err := s.markerIDs(ctx, day)
 		if err != nil {
 			db.Close()
@@ -371,7 +377,7 @@ func (s *Store) hydrateBodies(ctx context.Context, reqs []*Request) error {
 		if err != nil {
 			return err
 		}
-		s.dayOpens++
+		s.dayOpens.Add(1)
 		placeholders := make([]string, len(idList))
 		args := make([]any, len(idList))
 		for i, id := range idList {

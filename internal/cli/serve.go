@@ -53,31 +53,13 @@ func Serve(args []string) error {
 		return fmt.Errorf("serve: build calendar: %w", err)
 	}
 
-	statePath := serveStatePath(cfg.DBPath)
 	early := newEarlyState()
 	early.LogPath = filepath.Join(filepath.Dir(cfg.DBPath), "serve.log")
-	existing, created, err := writeServeStateExclusive(statePath, early)
+	sf, err := openServeStateFile(serveStatePath(cfg.DBPath), early)
 	if err != nil {
 		return fmt.Errorf("serve: state file: %w", err)
 	}
-	owned := created
-	if !created && existing != nil && !isProcessAlive(existing.PID) {
-		early.StartedAt = existing.StartedAt
-		if err := writeServeState(statePath, early); err != nil {
-			return fmt.Errorf("serve: state file: %w", err)
-		}
-		owned = true
-	}
-	bindLost := false
-	removeState := func() {
-		if !owned {
-			return
-		}
-		if err := removeServeStateIfOwner(statePath, os.Getpid(), bindLost); err != nil {
-			log.Printf("serve: remove state file: %v", err)
-		}
-	}
-	defer removeState()
+	defer sf.remove()
 
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
@@ -174,22 +156,20 @@ func Serve(args []string) error {
 
 	proxyLn, err := net.Listen("tcp", cfg.ProxyAddr)
 	if err != nil {
-		bindLost = true
+		sf.bindFailed()
 		return fmt.Errorf("serve: listen proxy: %w", err)
 	}
 	dashLn, err := net.Listen("tcp", cfg.DashboardAddr)
 	if err != nil {
-		bindLost = true
+		sf.bindFailed()
 		proxyLn.Close()
 		return fmt.Errorf("serve: listen dashboard: %w", err)
 	}
-	if owned {
-		early.ProxyAddr = proxyLn.Addr().String()
-		early.DashboardAddr = dashLn.Addr().String()
-		if err := writeServeState(statePath, early); err != nil {
-			log.Printf("serve: rewrite state file: %v", err)
-		}
-	}
+	// The bind winner rewrites the file with its own pid and the bound
+	// addresses, whether or not it created it (F10.1). Reached only after
+	// both Listen calls succeed, so a process that lost a bind never gets
+	// here and leaves the winner's file untouched.
+	sf.bindWon(proxyLn.Addr().String(), dashLn.Addr().String())
 
 	consumerDone := make(chan struct{})
 	go func() {
@@ -241,17 +221,28 @@ func Serve(args []string) error {
 		close(joined)
 	}()
 	if waitJoined(joined, shutdownGrace) {
-		if err := st.Close(); err != nil {
-			log.Printf("serve: close store: %v", err)
-		}
-		removeState()
-		owned = false // defer must not remove again after the explicit removal
+		closeStoreThenRemoveState(st, sf)
 	} else {
 		log.Printf("serve: maintenance goroutine still running; leaving state file in place")
-		owned = false
 	}
+	sf.leaveFile() // the deferred remove must not run after this point
 
 	return nil
+}
+
+// closeStoreThenRemoveState runs the ordered teardown (bead 08:29/:56/:72): the
+// store is closed first, and only after Close returns does the shared gated
+// state-file removal run, so the file's disappearance is a sound proof that the
+// store behind it is closed. Split out from Serve so that ordering is testable
+// with a Close-observing wrapper — Serve itself cannot be driven from a test
+// (two real listeners, a blocking signal context), which is why the rest of the
+// teardown lives in statefile.go's serveStateFile. io.Closer is satisfied by
+// *store.Store (its Close is the production caller's argument).
+func closeStoreThenRemoveState(st io.Closer, sf *serveStateFile) {
+	if err := st.Close(); err != nil {
+		log.Printf("serve: close store: %v", err)
+	}
+	sf.remove()
 }
 
 func newEarlyState() serveState {
@@ -298,7 +289,7 @@ func runMaintenancePass(ctx context.Context, st *store.Store, days func() int, h
 	purgeOnStartup(ctx, st, days(), log.Printf)
 	if hot := hotDays(); hot > 0 {
 		boundary := time.Now().Add(-time.Duration(hot) * 24 * time.Hour)
-		if err := st.ArchiveOlderThan(ctx, boundary, ""); err != nil {
+		if err := st.ArchiveOlderThan(ctx, boundary); err != nil {
 			log.Printf("serve: archive: %v", err)
 		}
 		if err := st.GCArchive(ctx); err != nil {

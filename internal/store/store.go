@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -93,8 +94,11 @@ type Store struct {
 	writer *sql.DB
 	reader *sql.DB
 	dbPath string
-	// dayOpens counts archive day-file opens. Tests read it.
-	dayOpens int
+	// dayOpens counts archive day-file opens. Tests read it. Atomic because
+	// the read path (hydrateBodies, from API handler goroutines) and the
+	// maintenance path (writeDay/sumDayBytes/execDay/GCArchive) increment it
+	// concurrently in a live serve.
+	dayOpens atomic.Int64
 }
 
 // Open creates dbPath's parent directory (0700 if absent), opens the writer

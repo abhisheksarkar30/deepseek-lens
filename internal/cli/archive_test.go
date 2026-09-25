@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,33 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// TestExportHydratesArchivedBodies is bead 11's hydration AC through the real
+// reader (`lens export`'s runExport), not only the ListRequests proxy: a body
+// moved into a day file must come back out of the export.
+func TestExportHydratesArchivedBodies(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	seedRequest(t, st, func(r *store.Request) {
+		r.StartedAt = time.Now().Add(-48 * time.Hour)
+		r.ReqBody = []byte(`{"archived":"req"}`)
+		r.RespBody = []byte(`{"archived":"resp"}`)
+	})
+	if err := st.ArchiveOlderThan(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := runExport(nil, &buf, st); err != nil {
+		t.Fatalf("runExport: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &got); err != nil {
+		t.Fatalf("export output %q: %v", buf.String(), err)
+	}
+	if got["ReqBody"] == nil || got["RespBody"] == nil {
+		t.Fatalf("export did not hydrate archived bodies: %v", got)
+	}
+}
 
 func archiveCfg(dbPath string) *config.Config {
 	cfg := config.Default()
@@ -37,7 +65,7 @@ func TestArchiveStatusCounts(t *testing.T) {
 		r.StartedAt = time.Now().Add(-10 * 24 * time.Hour)
 		r.ReqBody = []byte("cold")
 	})
-	if err := st.ArchiveOlderThan(context.Background(), time.Now().Add(-7*24*time.Hour), ""); err != nil {
+	if err := st.ArchiveOlderThan(context.Background(), time.Now().Add(-7*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	st.Close()
@@ -130,7 +158,7 @@ func TestArchiveRestoreRoundTrip(t *testing.T) {
 		r.ReqBody = []byte("round")
 		r.RespBody = []byte("trip")
 	})
-	if err := st.ArchiveOlderThan(context.Background(), time.Now(), ""); err != nil {
+	if err := st.ArchiveOlderThan(context.Background(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	since := started.Add(-time.Minute).Format(time.RFC3339)
@@ -177,7 +205,7 @@ func TestRestoreFaultKeepsMarker(t *testing.T) {
 		r.ReqBody = []byte("still-there")
 	})
 	ctx := context.Background()
-	if err := st.ArchiveOlderThan(ctx, time.Now(), ""); err != nil {
+	if err := st.ArchiveOlderThan(ctx, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.RestoreBetween(ctx, started.Add(-time.Hour), started.Add(time.Hour), "hot"); err != nil {

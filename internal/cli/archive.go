@@ -85,7 +85,7 @@ func archiveRun(args []string, w io.Writer, cfg *config.Config) error {
 	if !*yes {
 		return fmt.Errorf("archive: refusing to move bodies without --yes (use --dry-run to preview first)")
 	}
-	if err := st.ArchiveOlderThan(context.Background(), boundary, ""); err != nil {
+	if err := st.ArchiveOlderThan(context.Background(), boundary); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "archived %d row(s)\n", n)

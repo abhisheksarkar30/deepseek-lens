@@ -30,10 +30,10 @@ func TestArchiveRoundTripAndCrashPoints(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.ArchiveOlderThan(ctx, time.Now().Add(time.Hour), ""); err != nil {
+	if err := s.ArchiveOlderThan(ctx, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	s.dayOpens = 0
+	s.dayOpens.Store(0)
 	listed, err := s.ListRequests(ctx, Filter{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
@@ -43,8 +43,8 @@ func TestArchiveRoundTripAndCrashPoints(t *testing.T) {
 			t.Fatalf("list returned bodies: %+v", row.ReqBody)
 		}
 	}
-	if s.dayOpens != 0 {
-		t.Fatalf("list opened %d day files, want 0", s.dayOpens)
+	if s.dayOpens.Load() != 0 {
+		t.Fatalf("list opened %d day files, want 0", s.dayOpens.Load())
 	}
 	got, err := s.GetRequest(ctx, id1)
 	if err != nil {
@@ -53,13 +53,13 @@ func TestArchiveRoundTripAndCrashPoints(t *testing.T) {
 	if !bytes.Equal(got.ReqBody, []byte("req-one")) || !bytes.Equal(got.RespBody, []byte("resp-one")) {
 		t.Fatalf("hydrated = %q %q", got.ReqBody, got.RespBody)
 	}
-	s.dayOpens = 0
+	s.dayOpens.Store(0)
 	hydrated, err := s.ListRequests(ctx, Filter{Limit: 10, WithBodies: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.dayOpens != 2 {
-		t.Fatalf("export-style hydrate opened %d day files, want 2", s.dayOpens)
+	if s.dayOpens.Load() != 2 {
+		t.Fatalf("export-style hydrate opened %d day files, want 2", s.dayOpens.Load())
 	}
 	if len(hydrated) != 2 {
 		t.Fatalf("len = %d", len(hydrated))
@@ -78,7 +78,7 @@ func TestArchiveCrashPoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ArchiveOlderThan(ctx, before, "day"); err != nil {
+	if err := s.archiveOlderThan(ctx, before, "day"); err != nil {
 		t.Fatal(err)
 	}
 	hot, err := s.GetRequest(ctx, id)
@@ -97,7 +97,7 @@ func TestArchiveCrashPoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s2.ArchiveOlderThan(ctx, before, "hot"); err != nil {
+	if err := s2.archiveOlderThan(ctx, before, "hot"); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s2.GetRequest(ctx, id)
@@ -120,7 +120,7 @@ func TestPurgeDeletesArchivedBodies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ArchiveOlderThan(ctx, time.Now(), ""); err != nil {
+	if err := s.ArchiveOlderThan(ctx, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	n, err := s.PurgeableBytes(ctx, time.Now())
@@ -156,7 +156,7 @@ func TestGCArchiveKeepsReferencedRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ArchiveOlderThan(ctx, time.Now().Add(time.Hour), ""); err != nil {
+	if err := s.ArchiveOlderThan(ctx, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	day := r.StartedAt.UTC().Format("2006-01-02")
