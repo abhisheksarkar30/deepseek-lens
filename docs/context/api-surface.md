@@ -27,7 +27,7 @@ JSON API is documented here. Registered in the `mux.Handle*` block at
 | POST | `/api/purge` | **Origin/Host allowlist** (`replayOriginReject`, action `"purge"`) | Deletes rows by `mode`: `older_than` (requires `days > 0`) or `unpriced` — the destructive route | `purgeResponse{Mode, Deleted, SessionsReconciled}` | [internal/api/purge.go:104-152](../../internal/api/purge.go) |
 | POST | `/api/shutdown` | **Origin/Host allowlist + loopback caller** | Stops the running serve | empty JSON | [internal/api/api.go:777-799](../../internal/api/api.go) |
 | POST | `/api/reload` | **Origin/Host allowlist + loopback caller** | Re-reads config. `RetentionDays` and `HotDays` apply live; other diffs are `restart_required` | `reloadResponse{applied, restart_required, unchanged}` | [internal/api/api.go:800-833](../../internal/api/api.go) |
-| GET/* | `/` (catch-all) | none | Serves the embedded dashboard static assets (`internal/web`) | HTML/CSS/JS | [internal/api/api.go:171](../../internal/api/api.go) |
+| GET/* | `/` (catch-all) | none | Serves the embedded dashboard static assets (`internal/web`) | HTML/CSS/JS | [internal/api/api.go:208](../../internal/api/api.go) |
 
 Every GET route but the catch-all is wrapped by `methodGet`, which rejects non-GET methods with a
 JSON 405 ([internal/api/api.go:218-226](../../internal/api/api.go)). All routes **except the five

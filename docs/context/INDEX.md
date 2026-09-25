@@ -65,7 +65,16 @@ than `HotDays` move to per-UTC-day archive files with a `body_archive` marker; o
 goroutine purges, archives, then collects orphans; `serve.state.json` is written before the store
 opens; `lens shutdown`, `restart`, `reload`, and `archive` are the new commands; `POST /api/shutdown`
 and `POST /api/reload` bring the guarded write routes to five. `RetentionDays` and `HotDays` apply
-live. The shipped body cap stays 256 KiB.
+live. The shipped body cap stays 256 KiB. `serve.state.json`'s ownership follows the **successful
+bind** rather than the create, and its removal is ordered after `store.Close`. Module selection
+re-ran unchanged (the story touched `internal/{cli,store,api,config,web,proxy}`, all already
+covered). Re-derived the `internal/api/api.go` citations by brace-matching the symbol rather than by
+adding an offset: beads 05/06/08/10 shifted that file, and eight citations had drifted with it —
+`api-surface.md` (the catch-all row), `workflows.md` (the `replayWait` block and the `ponytail:`
+row-poll note), `conventions.md` (the row-poll note and `api.Store`), and
+`security-and-permissions.md` (the replay evidence, the guard-rationale quote, and
+`replayOriginReject`). `security-and-permissions.md`'s action-string parenthetical also still
+enumerated three of the five write routes.
 
 Previously: 2026-09-19, REFRESH mode, scoped to the GI-24 holiday-aware peak pricing story
 (`GI-24-holiday-aware-peak-pricing` branch) — a new `pricing.Calendar` (a date grammar over an

@@ -15,7 +15,7 @@
   ([internal/session/session.go:12-28](../../internal/session/session.go)), the flat (non-TOML)
   config/price file parser
   ([internal/config/config.go:140-142](../../internal/config/config.go)), and the replay row-poll
-  ([internal/api/api.go:649](../../internal/api/api.go)).
+  ([internal/api/api.go:706](../../internal/api/api.go)).
 
 ## Dashboard (`internal/web`) conventions
 
@@ -67,7 +67,7 @@ rather than by a framework's idiom:
   [internal/consumer/consumer.go:64-70](../../internal/consumer/consumer.go)), `consumer.PriceTable`,
   `consumer.Analyzer`, `consumer.SessionResolver`/`SessionAggregator`
   ([internal/consumer/analyzer.go](../../internal/consumer/analyzer.go)), `api.Store`
-  ([internal/api/api.go:29-39](../../internal/api/api.go)).
+  ([internal/api/api.go:33-52](../../internal/api/api.go)).
 - **Optional capability interfaces**: a store gains batched writes by implementing `batchInserter`
   (`InsertRequests`) — a type assertion (`c.store.(batchInserter)`) is checked at call time rather
   than being part of the required `Store` interface, so a minimal test fake still compiles

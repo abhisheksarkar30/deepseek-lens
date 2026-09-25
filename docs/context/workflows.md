@@ -26,7 +26,7 @@ sequenceDiagram
 
 The response tee keeps the first `BodyCapBytes` and a separate 16 KiB tail so a truncated stream can still yield `usage`. A `Content-Encoding` response does not use that tail.
 
-`lens serve` creates `serve.state.json` with `O_EXCL` before it opens the store, rewrites the bound addresses after both listeners exist, and removes the file only after the single maintenance goroutine has returned. That goroutine, started after the listeners, runs purge, then (when `HotDays` > 0) archive, then archive GC. A reload of `RetentionDays` or `HotDays` is what the next pass reads.
+`lens serve` creates `serve.state.json` with `O_EXCL` before it opens the store, and removes it only after `store.Close` has returned, once the single maintenance goroutine has joined — so the file's absence is a sound proof that the store behind it is closed. Ownership of the file follows the **successful bind**, not the create: whatever process wins both `net.Listen` calls rewrites it with its own pid and the bound addresses, and only that process removes it. A process that lost a bind leaves the winner's file untouched; so does one whose maintenance join timed out, which deliberately leaves the file in place rather than claiming a store that may still have a writer. That goroutine, started after the listeners, runs purge, then (when `HotDays` > 0) archive, then archive GC. A reload of `RetentionDays` or `HotDays` is what the next pass reads.
 
 **Failure modes / idempotency**: `Submit` never blocks — under load it drops the call rather than
 delaying the client ([internal/sink/sink.go:67-88](../../internal/sink/sink.go)). Upstream errors are
@@ -138,7 +138,7 @@ a rejected request costs nothing (see
 [security-and-permissions.md](security-and-permissions.md)). The row-appearance poll is a bounded
 wait (`replayWait` = 2s, `replayPollInterval` = 25ms) rather than a completion hook on the consumer —
 explicitly marked `ponytail:` as a deliberate simplification
-([internal/api/api.go:421-429](../../internal/api/api.go), the `ponytail:` note itself at
-[`:649`](../../internal/api/api.go)). A replayed request's stored headers carry
+([internal/api/api.go:478-486](../../internal/api/api.go), the `ponytail:` note itself at
+[`:706`](../../internal/api/api.go)). A replayed request's stored headers carry
 the redaction placeholder, not a real credential — lens never persists or injects an API key
 (design invariant restated at [internal/api/api.go:564-567](../../internal/api/api.go)).
