@@ -513,6 +513,12 @@ func TestValidateRejectsDateInBothSets(t *testing.T) {
 	}
 }
 
+func TestDefaultBodyCapUnchanged(t *testing.T) {
+	if Default().BodyCapBytes != 262144 {
+		t.Fatalf("BodyCapBytes = %d, want 262144", Default().BodyCapBytes)
+	}
+}
+
 func TestHotDaysPrecedence(t *testing.T) {
 	t.Run("unset defaults to zero", func(t *testing.T) {
 		freshHome(t)

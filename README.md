@@ -272,8 +272,11 @@ when `retention_days` is `0`.
 - **`--allow-remote` is a footgun.** It exists for a container or a VM you control. It does not add
   authentication, and the dashboard has none.
 - **Full bodies are stored.** `--body-policy` defaults to `full` with a 256KB cap per body
-  (`--body-cap-bytes`), so every prompt, every file the agent read, and every reply land in
-  `~/.deepseek-lens/lens.db`. That content — not a credential — is the asset here.
+  (`--body-cap-bytes`). The cap is configurable; 8 MiB is the operator setting. Usage at the
+  end of a stream still survives a body that hits the cap, via a 16 KiB tail kept past the
+  head. The sink holds 4096 calls, so the worst-case memory is `4096 × 2 × cap` (about 64 GiB
+  at 8 MiB, about 2 GiB at 256 KB). Every prompt, every file the agent read, and every reply
+  land in `~/.deepseek-lens/lens.db`. That content — not a credential — is the asset here.
 - **Credentials are not stored.** `x-api-key`, `Authorization`, and `Cookie` are replaced with
   `[redacted]` before a request row is written, and lens never injects a key of its own.
 - **The dashboard has no auth.** Acceptable for a read-only observer bound to loopback; **dashboard

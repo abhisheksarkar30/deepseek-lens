@@ -129,6 +129,11 @@ func runChecks(cfg *config.Config) []doctorCheck {
 	} else {
 		checks = append(checks, doctorCheck{"archive_writable", statusPass, archiveDir})
 	}
+	if cfg.BodyCapBytes > 262144 && cfg.HotDays == 0 {
+		ceiling := int64(4096) * 2 * int64(cfg.BodyCapBytes)
+		checks = append(checks, doctorCheck{"body_cap", statusWarn, fmt.Sprintf("body cap %d with HotDays 0; worst-case memory is 4096 × 2 × cap = %d bytes", cfg.BodyCapBytes, ceiling)})
+	}
+
 	if cfg.HotDays > 0 {
 		checks = append(checks, doctorCheck{"hot_days_backup", statusWarn, "back up lens.db, lens.db-wal, and lens.db-shm before the first serve with HotDays > 0"})
 	}

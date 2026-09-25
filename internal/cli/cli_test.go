@@ -1491,6 +1491,31 @@ func TestDoctorReportsRetentionDays(t *testing.T) {
 	}
 }
 
+func TestDoctorBodyCapWarn(t *testing.T) {
+	check := func(cap, hot int) doctorCheck {
+		t.Helper()
+		cfg := doctorCfg(t)
+		cfg.BodyCapBytes = cap
+		cfg.HotDays = hot
+		for _, c := range runChecks(cfg) {
+			if c.Name == "body_cap" {
+				return c
+			}
+		}
+		return doctorCheck{}
+	}
+	warn := check(8388608, 0)
+	if warn.Status != statusWarn || !strings.Contains(warn.Detail, "4096") {
+		t.Fatalf("cap warn = %+v", warn)
+	}
+	if got := check(8388608, 7); got.Name != "" {
+		t.Fatalf("hot days set should not warn: %+v", got)
+	}
+	if got := check(262144, 0); got.Name != "" {
+		t.Fatalf("default cap should not warn: %+v", got)
+	}
+}
+
 func TestDoctorHotDaysChecks(t *testing.T) {
 	t.Run("backup note", func(t *testing.T) {
 		cfg := doctorCfg(t)
