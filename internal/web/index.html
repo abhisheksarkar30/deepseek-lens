@@ -28,7 +28,13 @@
     <div class="feed-controls">
       <button id="pause-btn" type="button">Pause</button>
       <span id="feed-status" class="feed-status">live</span>
+      <label>From <input type="datetime-local" id="feed-from" step="3600"></label>
+      <label>To <input type="datetime-local" id="feed-to" step="3600"></label>
+      <button id="feed-clear" type="button">Clear</button>
+      <span id="feed-range-msg" class="hint"></span>
     </div>
+    <p id="feed-range-banner" class="hint" hidden>range view — live paused</p>
+    <div id="feed-pager" class="pager" hidden></div>
     <div class="table-wrap">
       <table>
         <thead>

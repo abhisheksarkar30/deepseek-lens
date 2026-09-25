@@ -164,6 +164,8 @@ const state = {
   warningDetailPage: { limit: 50, offset: 0 },
   warningDetailFetchSeq: 0,
   feedRowLimit: 200,
+  feedPage: { limit: 50, offset: 0 },
+  feedRangeOn: false,
   // sessionsPage is the sessions table's window. The limit starts at one of
   // PAGE_SIZES so the select's initial value and the first request's ?limit=
   // are the same number by construction — they cannot diverge.
@@ -311,10 +313,57 @@ document.getElementById("pause-btn").addEventListener("click", () => {
   status.classList.toggle("paused", state.paused);
 });
 
+function feedBounds() {
+  const zone = statsZone();
+  const fromRaw = statsValue("feed-from");
+  const toRaw = statsValue("feed-to");
+  if (fromRaw && toRaw && toRaw.slice(0, 13) < fromRaw.slice(0, 13)) {
+    return { invalid: true, since: "", until: "", active: false };
+  }
+  const since = hourBound(fromRaw, false, zone);
+  const until = hourBound(toRaw, true, zone);
+  return { invalid: false, since, until, active: !!(since || until) };
+}
+
 async function loadInitialFeed() {
+  state.feedPage.offset = 0;
+  await loadFeed();
+}
+
+async function loadFeed() {
   try {
-    const reqs = await fetchJSON("/api/requests?limit=50");
+    const bounds = feedBounds();
+    const msg = document.getElementById("feed-range-msg");
+    const banner = document.getElementById("feed-range-banner");
+    const pager = document.getElementById("feed-pager");
+    if (msg) msg.textContent = bounds.invalid ? "To is before From" : "";
+    state.feedRangeOn = bounds.active;
+    if (banner) banner.hidden = !bounds.active;
     const body = document.getElementById("feed-body");
+    let reqs;
+    if (bounds.active) {
+      const params = new URLSearchParams({
+        limit: String(state.feedPage.limit),
+        offset: String(state.feedPage.offset),
+      });
+      if (bounds.since) params.set("since", bounds.since);
+      if (bounds.until) params.set("until", bounds.until);
+      const page = await fetchPage("/api/requests?" + params.toString());
+      reqs = page.items;
+      if (pager) {
+        pager.hidden = false;
+        renderPager(pager, page, (next) => {
+          state.feedPage = next;
+          loadFeed();
+        });
+      }
+    } else {
+      reqs = await fetchJSON("/api/requests?limit=50");
+      if (pager) {
+        pager.hidden = true;
+        pager.innerHTML = "";
+      }
+    }
     body.innerHTML = reqs.map(feedRowHTML).join("");
     state.totals = { calls: 0, tokens: 0, cost: 0, unpriced: 0 };
     for (const r of reqs) {
@@ -324,9 +373,22 @@ async function loadInitialFeed() {
     }
     renderTotals();
   } catch (e) {
-    console.error("loadInitialFeed", e);
+    console.error("loadFeed", e);
   }
 }
+
+for (const id of ["feed-from", "feed-to"]) {
+  document.getElementById(id).addEventListener("change", () => {
+    state.feedPage.offset = 0;
+    loadFeed();
+  });
+}
+document.getElementById("feed-clear").addEventListener("click", () => {
+  document.getElementById("feed-from").value = "";
+  document.getElementById("feed-to").value = "";
+  state.feedPage.offset = 0;
+  loadFeed();
+});
 
 // ---- warnings inbox -------------------------------------------------------
 
@@ -1419,7 +1481,7 @@ async function handleStreamEvent(ev) {
     try {
       const req = await fetchJSON(`/api/requests/${evt.id}`);
       bumpTotals(req);
-      if (!state.paused) prependFeedRow(req);
+      if (!state.paused && !state.feedRangeOn) prependFeedRow(req);
     } catch (e) { console.error("stream request fetch", e); }
   } else if (evt.type === "warnings") {
     markFeedRowWarned(evt.id);
