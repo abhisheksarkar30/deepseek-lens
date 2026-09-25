@@ -24,6 +24,9 @@ type Request struct {
 	RespHeaders string
 	ReqBody     []byte
 	RespBody    []byte
+	// ArchiveDay is set when this read hydrated bodies from a day file.
+	// It is not a column.
+	ArchiveDay *string
 
 	InputTokens         int
 	OutputTokens        int

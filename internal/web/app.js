@@ -1322,6 +1322,14 @@ async function openDetail(id) {
         `</div>`
       : "";
 
+    const archiveNote = document.getElementById("detail-archive");
+    if (r.ArchiveDay) {
+      archiveNote.hidden = false;
+      archiveNote.textContent = "bodies loaded from the archive (" + r.ArchiveDay + ")";
+    } else {
+      archiveNote.hidden = true;
+      archiveNote.textContent = "";
+    }
     document.getElementById("detail-body").innerHTML = `
       <h2>Request #${r.ID}</h2>
       <dl class="detail-grid">

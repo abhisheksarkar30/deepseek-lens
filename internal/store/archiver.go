@@ -414,6 +414,8 @@ func (s *Store) hydrateBodies(ctx context.Context, reqs []*Request) error {
 				}
 				r.RespBody = plain
 			}
+			dayCopy := day
+			r.ArchiveDay = &dayCopy
 		}
 		err = brows.Err()
 		brows.Close()
@@ -423,4 +425,219 @@ func (s *Store) hydrateBodies(ctx context.Context, reqs []*Request) error {
 		}
 	}
 	return nil
+}
+
+// ArchiveReport is the read-only picture `lens archive status` prints.
+type ArchiveReport struct {
+	HotBoundary       time.Time
+	Archived          int
+	Unarchived        int
+	Files             int
+	Bytes             int64
+	MissingMarkers    int
+	RestoreDuplicates int
+}
+
+func (s *Store) ArchiveStatus(ctx context.Context, hotDays int) (ArchiveReport, error) {
+	var rep ArchiveReport
+	if hotDays > 0 {
+		rep.HotBoundary = time.Now().Add(-time.Duration(hotDays) * 24 * time.Hour).UTC()
+	}
+	if err := s.reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM body_archive`).Scan(&rep.Archived); err != nil {
+		return rep, err
+	}
+	if err := s.reader.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM requests
+		WHERE (req_body IS NOT NULL OR resp_body IS NOT NULL)
+		  AND id NOT IN (SELECT request_id FROM body_archive)`).Scan(&rep.Unarchived); err != nil {
+		return rep, err
+	}
+	if err := s.reader.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM requests
+		WHERE id IN (SELECT request_id FROM body_archive)
+		  AND (req_body IS NOT NULL OR resp_body IS NOT NULL)`).Scan(&rep.RestoreDuplicates); err != nil {
+		return rep, err
+	}
+	dir := filepath.Join(filepath.Dir(s.dbPath), "archive")
+	entries, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		return rep, err
+	}
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		rep.Files++
+		info, err := ent.Info()
+		if err != nil {
+			return rep, err
+		}
+		rep.Bytes += info.Size()
+	}
+	missing, err := s.countMissingMarkers(ctx)
+	if err != nil {
+		return rep, err
+	}
+	rep.MissingMarkers = missing
+	return rep, nil
+}
+
+func (s *Store) countMissingMarkers(ctx context.Context) (int, error) {
+	rows, err := s.reader.QueryContext(ctx, `SELECT request_id, day FROM body_archive`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	byDay := map[string][]int64{}
+	for rows.Next() {
+		var id int64
+		var day string
+		if err := rows.Scan(&id, &day); err != nil {
+			return 0, err
+		}
+		byDay[day] = append(byDay[day], id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	missing := 0
+	for day, ids := range byDay {
+		path := filepath.Join(filepath.Dir(s.dbPath), "archive", "bodies-"+day+".db")
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			return 0, err
+		}
+		present := map[int64]bool{}
+		qrows, err := db.QueryContext(ctx, `SELECT request_id FROM bodies`)
+		if err != nil {
+			db.Close()
+			missing += len(ids)
+			continue
+		}
+		for qrows.Next() {
+			var id int64
+			if err := qrows.Scan(&id); err != nil {
+				qrows.Close()
+				db.Close()
+				return 0, err
+			}
+			present[id] = true
+		}
+		qrows.Close()
+		db.Close()
+		for _, id := range ids {
+			if !present[id] {
+				missing++
+			}
+		}
+	}
+	return missing, nil
+}
+
+// CountArchivable is the dry-run count for archive run.
+func (s *Store) CountArchivable(ctx context.Context, before time.Time) (int, error) {
+	var n int
+	err := s.reader.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM requests
+		WHERE started_at < ?
+		  AND (req_body IS NOT NULL OR resp_body IS NOT NULL)
+		  AND id NOT IN (SELECT request_id FROM body_archive)`, before.UnixNano()).Scan(&n)
+	return n, err
+}
+
+// RestoreBetween copies archived bodies back into the hot rows. stopAfter
+// "hot" returns after the hot commit and leaves the marker and day-file row.
+func (s *Store) RestoreBetween(ctx context.Context, since, until time.Time, stopAfter string) (int, error) {
+	rows, err := s.reader.QueryContext(ctx, `
+		SELECT b.request_id, b.day FROM body_archive b
+		JOIN requests r ON r.id = b.request_id
+		WHERE r.started_at >= ? AND r.started_at < ?`, since.UnixNano(), until.UnixNano())
+	if err != nil {
+		return 0, err
+	}
+	type pair struct {
+		id  int64
+		day string
+	}
+	var todo []pair
+	for rows.Next() {
+		var p pair
+		if err := rows.Scan(&p.id, &p.day); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		todo = append(todo, p)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	if stopAfter == "count" {
+		return len(todo), nil
+	}
+	n := 0
+	for _, p := range todo {
+		if err := ctx.Err(); err != nil {
+			return n, err
+		}
+		req, resp, err := s.loadDayBodies(ctx, p.day, p.id)
+		if err != nil {
+			return n, err
+		}
+		tx, err := s.writer.BeginTx(ctx, nil)
+		if err != nil {
+			return n, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE requests SET req_body = ?, resp_body = ? WHERE id = ?`, req, resp, p.id); err != nil {
+			tx.Rollback()
+			return n, err
+		}
+		if err := tx.Commit(); err != nil {
+			return n, err
+		}
+		n++
+		if stopAfter == "hot" {
+			return n, nil
+		}
+		if err := s.execDay(ctx, p.day, `DELETE FROM bodies WHERE request_id IN (`, []int64{p.id}); err != nil {
+			return n, err
+		}
+		if _, err := s.writer.ExecContext(ctx, `DELETE FROM body_archive WHERE request_id = ?`, p.id); err != nil {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+func (s *Store) loadDayBodies(ctx context.Context, day string, id int64) ([]byte, []byte, error) {
+	path := filepath.Join(filepath.Dir(s.dbPath), "archive", "bodies-"+day+".db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer db.Close()
+	var req, resp []byte
+	err = db.QueryRowContext(ctx, `SELECT req_body, resp_body FROM bodies WHERE request_id = ?`, id).Scan(&req, &resp)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: restore: day row %d: %w", id, err)
+	}
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer dec.Close()
+	if len(req) > 0 {
+		req, err = dec.DecodeAll(req, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if len(resp) > 0 {
+		resp, err = dec.DecodeAll(resp, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return req, resp, nil
 }

@@ -3,7 +3,7 @@
 # CLI & Tooling
 
 `lens <command> [flags]`, dispatched from a fixed map in
-[cmd/lens/main.go:14-27](../../cmd/lens/main.go). All twelve names are implemented (no stubs remain).
+[cmd/lens/main.go:14-32](../../cmd/lens/main.go). All thirteen names are implemented (no stubs remain).
 
 | Command | Flags | What it does | Evidence |
 |---|---|---|---|
@@ -19,6 +19,7 @@
 | `prices` | `--set model.field=rate` (repeatable), `--unset`, `--edit` | Views/edits the `~/.deepseek-lens/prices.toml` rate table | [internal/cli/prices.go](../../internal/cli/prices.go) |
 | `replay` | `<id>` (positional), `--set path=value` (repeatable), `--dump`, `--no-capture`, `--diff id`, `--yes`, `--server` | Re-sends a captured request's body (optionally edited) via the dashboard's replay API and prints the outcome diff | [internal/cli/replay.go](../../internal/cli/replay.go) |
 | `purge` | `--older-than <days>`, `--unpriced`, `--dry-run`, `--yes`, `--vacuum` | One-shot purge for when `lens serve` isn't running: opens the store directly (the one CLI subcommand that does), guarded against an unconfigured/whole-table delete before it ever opens the store | [internal/cli/purge.go](../../internal/cli/purge.go) |
+| `archive` | `status`; `run [--dry-run] [--yes]`; `restore --since --until [--dry-run] [--yes]` | Prints archive health, moves bodies older than HotDays, or copies them back. A real run or restore requires `--yes`, the same gate as `purge` | [internal/cli/archive.go](../../internal/cli/archive.go) |
 
 `replay` needs `--yes` to proceed when the original call's cost is above
 `ReplayCostThresholdUSD` (default $0.25) or unknown — enforced by `costGate`
