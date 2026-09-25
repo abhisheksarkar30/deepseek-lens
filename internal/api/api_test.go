@@ -881,6 +881,44 @@ func TestEmbeddedAssets(t *testing.T) {
 	}
 }
 
+func TestPostShutdown(t *testing.T) {
+	st := newTestStore(t)
+	handler, _, _, _ := newTestAPI(t, st)
+	stopped := false
+	handler.SetStop(func() { stopped = true })
+
+	remote := httptest.NewRequest(http.MethodPost, "/api/shutdown", nil)
+	remote.RemoteAddr = "192.0.2.1:9"
+	remote.Host = "127.0.0.1"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, remote)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("remote caller status = %d, want 403", rr.Code)
+	}
+
+	cross := httptest.NewRequest(http.MethodPost, "/api/shutdown", nil)
+	cross.RemoteAddr = "127.0.0.1:9"
+	cross.Host = "127.0.0.1"
+	cross.Header.Set("Origin", "http://evil.example")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, cross)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin status = %d, want 403", rr.Code)
+	}
+
+	ok := httptest.NewRequest(http.MethodPost, "/api/shutdown", nil)
+	ok.RemoteAddr = "127.0.0.1:9"
+	ok.Host = "127.0.0.1"
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, ok)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("loopback status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	if !stopped {
+		t.Fatal("stop was not called")
+	}
+}
+
 func TestMethodGuard(t *testing.T) {
 	st := newTestStore(t)
 	handler, _, _, _ := newTestAPI(t, st)

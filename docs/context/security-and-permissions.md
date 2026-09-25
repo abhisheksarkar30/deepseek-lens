@@ -35,6 +35,7 @@ requesting OS-level permissions. The closest analog is the three write routes' a
 | Replay (re-send a captured request, billable) | Lets a user or the dashboard UI resend a call against the real upstream | Off by default (`--replay`); Origin/Host allowlist checked before any I/O; `lens replay` gates spend above `ReplayCostThresholdUSD` behind `--yes` | [internal/api/api.go:432-545](../../internal/api/api.go), [internal/cli/replay.go:155-172](../../internal/cli/replay.go) |
 | Set/unset a model's price rates | Lets the Settings tab or `lens prices --set` change what future calls cost | Always on; Origin/Host allowlist; invalid rate/model name rejected before write | [internal/api/prices.go](../../internal/api/prices.go) |
 | Purge rows (delete, by age or the unpriced predicate) | Lets the Settings tab or `lens purge` reclaim disk; the one destructive capability in the system | Always on; Origin/Host allowlist; `days > 0` required for the age-based mode; `lens purge` additionally requires `--yes` for a non-dry-run delete | [internal/api/purge.go](../../internal/api/purge.go), [internal/cli/purge.go](../../internal/cli/purge.go) |
+| Shutdown the running serve | Stops the proxy from the CLI without a console Ctrl-C | Origin/Host allowlist plus a loopback-caller check (`POST /api/shutdown`) | [internal/api/api.go](../../internal/api/api.go), [internal/cli/shutdown.go](../../internal/cli/shutdown.go) |
 
 ## Role / access model
 

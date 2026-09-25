@@ -75,7 +75,7 @@ warning); the covering index `idx_warnings_kind_severity_created_at` keeps that 
 
 `replayOriginReject` ([internal/api/api.go:675-733](../../internal/api/api.go)) is one Origin/Host
 allowlist, parameterized by an `action` string for its error message, applied before any bytes are
-sent or any row is touched. All three write routes call it — nothing here is replay-specific
+sent or any row is touched. The write routes call it — nothing here is replay-specific
 anymore:
 
 1. `POST /api/requests/{id}/replay` — the project's **only billable** route, and the only one gated
@@ -87,6 +87,8 @@ anymore:
 3. `POST /api/purge` — always on; the **destructive** one. `mode: "older_than"` additionally requires
    `days > 0` (400 otherwise), and `mode: "unpriced"` ignores `days` entirely — see
    [internal/api/purge.go](../../internal/api/purge.go).
+4. `POST /api/shutdown` — drives the running serve's stop. Same Origin/Host allowlist, plus a
+   loopback-caller check because the route is disruptive. `lens shutdown` is the client.
 
 Full guard rationale in [security-and-permissions.md](security-and-permissions.md).
 

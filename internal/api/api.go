@@ -104,6 +104,9 @@ type api struct {
 	// the window-and-weekend rule with no holidays — so leaving it unset is a
 	// supported state, not a missing capability.
 	calendar pricing.Calendar
+
+	// stop cancels serve's signal context. Nil means POST /api/shutdown is unwired.
+	stop func()
 }
 
 // SetPricing wires GET/POST /api/prices to the price file at path. Called
@@ -126,6 +129,9 @@ func (a *api) SetRetention(days int, purge RetentionPurger) {
 // supported state: the rollup then applies the window-and-weekend rule with
 // no holidays (the zero calendar IS that rule), and /api/prices echoes ""/"".
 func (a *api) SetCalendar(cal pricing.Calendar) { a.calendar = cal }
+
+// SetStop wires POST /api/shutdown to cancel serve's process context.
+func (a *api) SetStop(fn func()) { a.stop = fn }
 
 // ServeHTTP delegates to the stored mux, so *api satisfies http.Handler and
 // Handler: api.New(...) in serve.go keeps compiling with no change at that
@@ -168,6 +174,7 @@ func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, asset
 	mux.HandleFunc("POST /api/prices", a.setPrices)
 	mux.HandleFunc("/api/retention", methodGet(a.getRetention))
 	mux.HandleFunc("POST /api/purge", a.postPurge)
+	mux.HandleFunc("POST /api/shutdown", a.postShutdown)
 	mux.Handle("/", http.FileServer(http.FS(assets)))
 	a.mux = mux
 	return a
@@ -728,6 +735,32 @@ func (a *api) awaitReplayRow(ctx context.Context, origID, afterID int64) (*store
 // non-browser client, which for this endpoint means `lens replay` — the
 // deliberate credentialless design in the bead's "Why no secret" (a local
 // process that could forge past this could already read the SQLite file).
+func callerLoopback(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	host = strings.Trim(host, "[]")
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
+}
+
+func (a *api) postShutdown(w http.ResponseWriter, r *http.Request) {
+	if reason := replayOriginReject(r, "shutdown"); reason != "" {
+		writeError(w, http.StatusForbidden, reason)
+		return
+	}
+	if !callerLoopback(r) {
+		writeError(w, http.StatusForbidden, "shutdown requires a loopback caller")
+		return
+	}
+	if a.stop == nil {
+		writeError(w, http.StatusServiceUnavailable, "shutdown is not wired")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
+	a.stop()
+}
+
 func replayOriginReject(r *http.Request, action string) string {
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
