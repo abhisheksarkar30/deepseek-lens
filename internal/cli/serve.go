@@ -215,7 +215,7 @@ func Serve(args []string) error {
 	maint.Add(1)
 	go func() {
 		defer maint.Done()
-		runMaintenance(ctx, st, live.RetentionDays)
+		runMaintenance(ctx, st, live.RetentionDays, func() int { return cfg.HotDays })
 	}()
 
 	select {
@@ -240,14 +240,13 @@ func Serve(args []string) error {
 		maint.Wait()
 		close(joined)
 	}()
-	select {
-	case <-joined:
+	if waitJoined(joined, shutdownGrace) {
 		if err := st.Close(); err != nil {
 			log.Printf("serve: close store: %v", err)
 		}
 		removeState()
 		owned = false // defer must not remove again after the explicit removal
-	case <-time.After(shutdownGrace):
+	} else {
 		log.Printf("serve: maintenance goroutine still running; leaving state file in place")
 		owned = false
 	}
@@ -267,8 +266,19 @@ func newEarlyState() serveState {
 	}
 }
 
-func runMaintenance(ctx context.Context, st *store.Store, days func() int) {
-	purgeOnStartup(ctx, st, days(), log.Printf)
+// waitJoined reports whether the maintenance goroutine finished before grace.
+// A false result means a batch is still running, so the state file stays.
+func waitJoined(ch <-chan struct{}, grace time.Duration) bool {
+	select {
+	case <-ch:
+		return true
+	case <-time.After(grace):
+		return false
+	}
+}
+
+func runMaintenance(ctx context.Context, st *store.Store, days func() int, hotDays func() int) {
+	runMaintenancePass(ctx, st, days, hotDays)
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for {
@@ -279,7 +289,20 @@ func runMaintenance(ctx context.Context, st *store.Store, days func() int) {
 			if ctx.Err() != nil {
 				return
 			}
-			purgeOnStartup(ctx, st, days(), log.Printf)
+			runMaintenancePass(ctx, st, days, hotDays)
+		}
+	}
+}
+
+func runMaintenancePass(ctx context.Context, st *store.Store, days func() int, hotDays func() int) {
+	purgeOnStartup(ctx, st, days(), log.Printf)
+	if hot := hotDays(); hot > 0 {
+		boundary := time.Now().Add(-time.Duration(hot) * 24 * time.Hour)
+		if err := st.ArchiveOlderThan(ctx, boundary, ""); err != nil {
+			log.Printf("serve: archive: %v", err)
+		}
+		if err := st.GCArchive(ctx); err != nil {
+			log.Printf("serve: gc archive: %v", err)
 		}
 	}
 }

@@ -513,6 +513,72 @@ func TestValidateRejectsDateInBothSets(t *testing.T) {
 	}
 }
 
+func TestHotDaysPrecedence(t *testing.T) {
+	t.Run("unset defaults to zero", func(t *testing.T) {
+		freshHome(t)
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.HotDays != 0 {
+			t.Fatalf("HotDays = %d, want 0", cfg.HotDays)
+		}
+	})
+	t.Run("file", func(t *testing.T) {
+		home := freshHome(t)
+		writeConfigFile(t, home, "HotDays = 7\n")
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.HotDays != 7 {
+			t.Fatalf("HotDays = %d, want 7", cfg.HotDays)
+		}
+	})
+	t.Run("env overrides file", func(t *testing.T) {
+		home := freshHome(t)
+		writeConfigFile(t, home, "HotDays = 7\n")
+		t.Setenv("LENS_HOT_DAYS", "5")
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.HotDays != 5 {
+			t.Fatalf("HotDays = %d, want 5", cfg.HotDays)
+		}
+	})
+	t.Run("flag overrides env", func(t *testing.T) {
+		freshHome(t)
+		t.Setenv("LENS_HOT_DAYS", "5")
+		cfg, err := Load([]string{"-hot-days", "3"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.HotDays != 3 {
+			t.Fatalf("HotDays = %d, want 3", cfg.HotDays)
+		}
+	})
+}
+
+func TestHotDaysValidation(t *testing.T) {
+	ok := Default()
+	ok.RetentionDays = 3
+	if err := ok.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	bad := Default()
+	bad.HotDays = 9
+	bad.RetentionDays = 7
+	if err := bad.Validate(); err == nil {
+		t.Fatal("expected HotDays > RetentionDays to fail")
+	}
+	neg := Default()
+	neg.HotDays = -1
+	if err := neg.Validate(); err == nil {
+		t.Fatal("expected negative HotDays to fail")
+	}
+}
+
 func TestValidateAcceptsCustomCalendar(t *testing.T) {
 	for _, tc := range []struct{ name, off, work string }{
 		{"a single date each", "2026-10-01", "2026-10-10"},

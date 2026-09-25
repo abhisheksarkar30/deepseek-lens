@@ -865,6 +865,7 @@ func diffReload(boot, next *config.Config) reloadResponse {
 		{"OffPeakDates", false, boot.OffPeakDates != next.OffPeakDates},
 		{"WorkDates", false, boot.WorkDates != next.WorkDates},
 		{"RetentionDays", true, boot.RetentionDays != next.RetentionDays},
+		{"HotDays", false, boot.HotDays != next.HotDays},
 	}
 	for _, f := range fields {
 		if !f.diff {

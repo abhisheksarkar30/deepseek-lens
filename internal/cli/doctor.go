@@ -28,8 +28,13 @@ func Doctor(args []string) error {
 
 type checkStatus string
 
+// archiveSuggestBytes is the store size past which doctor suggests archival
+// when HotDays is still 0.
+var archiveSuggestBytes int64 = 1 << 30
+
 const (
 	statusPass checkStatus = "PASS"
+	statusInfo checkStatus = "INFO"
 	statusWarn checkStatus = "WARN"
 	statusFail checkStatus = "FAIL"
 )
@@ -65,6 +70,7 @@ func runDoctor(args []string, w io.Writer) error {
 		{"replay_enabled", fmt.Sprintf("%t", cfg.ReplayEnabled)},
 		{"replay_cost_threshold_usd", fmt.Sprintf("%.4f", cfg.ReplayCostThresholdUSD)},
 		{"retention_days", fmt.Sprintf("%d", cfg.RetentionDays)},
+		{"hot_days", fmt.Sprintf("%d", cfg.HotDays)},
 		// The calendar changes how money is computed, so it belongs in the one
 		// command whose job is "what is this install actually configured to
 		// do" — the shipped default is a dated fact, and this is where a user
@@ -115,6 +121,21 @@ func runChecks(cfg *config.Config) []doctorCheck {
 		checks = append(checks, doctorCheck{"upstream_resolves", statusPass, cfg.UpstreamURL})
 	} else {
 		checks = append(checks, doctorCheck{"upstream_resolves", statusWarn, "DNS lookup failed for " + cfg.UpstreamURL})
+	}
+
+	archiveDir := filepath.Join(filepath.Dir(cfg.DBPath), "archive")
+	if err := os.MkdirAll(archiveDir, 0o700); err != nil {
+		checks = append(checks, doctorCheck{"archive_writable", statusWarn, archiveDir + " is not writable"})
+	} else {
+		checks = append(checks, doctorCheck{"archive_writable", statusPass, archiveDir})
+	}
+	if cfg.HotDays > 0 {
+		checks = append(checks, doctorCheck{"hot_days_backup", statusWarn, "back up lens.db, lens.db-wal, and lens.db-shm before the first serve with HotDays > 0"})
+	}
+	if cfg.HotDays == 0 {
+		if fi, err := os.Stat(cfg.DBPath); err == nil && fi.Size() > archiveSuggestBytes {
+			checks = append(checks, doctorCheck{"archive_suggested", statusInfo, "store exceeds 1 GiB and HotDays is 0; enable archival"})
+		}
 	}
 
 	if cfg.AllowRemote {

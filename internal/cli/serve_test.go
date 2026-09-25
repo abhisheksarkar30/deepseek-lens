@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -237,3 +238,66 @@ func TestWireCalendarNamesBothSeams(t *testing.T) {
 type recordingDash struct{ got pricing.Calendar }
 
 func (d *recordingDash) SetCalendar(cal pricing.Calendar) { d.got = cal }
+
+func TestMaintenancePassPurgesThenArchives(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "lens.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx := context.Background()
+	seedRequest(t, st, func(r *store.Request) {
+		r.StartedAt = time.Now().Add(-40 * 24 * time.Hour)
+		r.ReqBody = []byte("purge-me")
+	})
+	seedRequest(t, st, func(r *store.Request) {
+		r.StartedAt = time.Now().Add(-10 * 24 * time.Hour)
+		r.ReqBody = []byte("archive-me")
+	})
+	runMaintenancePass(ctx, st, func() int { return 30 }, func() int { return 7 })
+	left, err := st.ListRequests(ctx, store.Filter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 {
+		t.Fatalf("rows = %d, want the warm row only", len(left))
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "archive"))
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("archive dir: %v entries=%d", err, len(entries))
+	}
+	got, err := st.GetRequest(ctx, left[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.ReqBody) != "archive-me" {
+		t.Fatalf("hydrated body = %q", got.ReqBody)
+	}
+}
+
+func TestStateFileStaysUntilMaintenanceReturns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "serve.state.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	joined := make(chan struct{})
+	go func() {
+		<-release
+		close(joined)
+	}()
+	if waitJoined(joined, 30*time.Millisecond) {
+		t.Fatal("joined before the batch returned")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("state file removed while the batch was in flight")
+	}
+	close(release)
+	if !waitJoined(joined, time.Second) {
+		t.Fatal("did not join after the batch returned")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+}

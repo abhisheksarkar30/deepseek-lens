@@ -1005,6 +1005,16 @@ func (s *Store) purgeWhere(ctx context.Context, where string, args ...any) (Purg
 	}
 	sessionRows.Close()
 
+	targets, err := archiveTargets(ctx, tx, where, args...)
+	if err != nil {
+		return PurgeResult{}, fmt.Errorf("store: purge: archive targets: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM body_archive WHERE request_id IN (SELECT id FROM requests WHERE "+where+")", args...,
+	); err != nil {
+		return PurgeResult{}, fmt.Errorf("store: purge: archive markers: %w", err)
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM warnings WHERE request_id IN (SELECT id FROM requests WHERE "+where+")", args...,
 	); err != nil {
@@ -1028,6 +1038,9 @@ func (s *Store) purgeWhere(ctx context.Context, where string, args ...any) (Purg
 
 	if err := tx.Commit(); err != nil {
 		return PurgeResult{}, fmt.Errorf("store: purge: commit: %w", err)
+	}
+	if err := s.deleteDayRows(ctx, targets); err != nil {
+		return PurgeResult{Deleted: n, SessionsReconciled: len(affected)}, fmt.Errorf("store: purge: day files: %w", err)
 	}
 	return PurgeResult{Deleted: n, SessionsReconciled: len(affected)}, nil
 }
@@ -1094,7 +1107,11 @@ func (s *Store) PurgeableBytes(ctx context.Context, cutoff time.Time) (int64, er
 	if err != nil {
 		return 0, fmt.Errorf("store: purgeable bytes: %w", err)
 	}
-	return n, nil
+	archived, err := s.archivedBytes(ctx, "started_at < ?", cutoff.UnixNano())
+	if err != nil {
+		return 0, err
+	}
+	return n + archived, nil
 }
 
 // CountUnpriced and UnpricedBytes preview PurgeUnpriced's exact predicate
@@ -1121,7 +1138,11 @@ func (s *Store) UnpricedBytes(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("store: unpriced bytes: %w", err)
 	}
-	return n, nil
+	archived, err := s.archivedBytes(ctx, purgeUnpricedWhere)
+	if err != nil {
+		return 0, err
+	}
+	return n + archived, nil
 }
 
 // Vacuum runs VACUUM on the writer connection — the only path to it from

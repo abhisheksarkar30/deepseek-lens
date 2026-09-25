@@ -98,6 +98,9 @@ type Config struct {
 	// posture — nothing is deleted on an unconfigured install. A negative
 	// value is rejected by Validate.
 	RetentionDays int
+	// HotDays is how many UTC days of bodies stay in the hot database.
+	// 0 disables archival. A negative value is rejected by Validate.
+	HotDays int
 }
 
 // Default returns the built-in defaults.
@@ -122,6 +125,7 @@ func Default() *Config {
 		OffPeakDates:           DefaultOffPeakDates,
 		WorkDates:              DefaultWorkDates,
 		RetentionDays:          0,
+		HotDays:                0,
 	}
 }
 
@@ -171,6 +175,7 @@ var fieldsByEnv = map[string]string{
 	"LENS_OFF_PEAK_DATES":            "OffPeakDates",
 	"LENS_WORK_DATES":                "WorkDates",
 	"LENS_RETENTION_DAYS":            "RetentionDays",
+	"LENS_HOT_DAYS":                  "HotDays",
 }
 
 func envKV() map[string]string {
@@ -254,6 +259,8 @@ func applyKV(cfg *Config, kv map[string]string) error {
 			cfg.WorkDates = val
 		case "RetentionDays":
 			cfg.RetentionDays, err = strconv.Atoi(val)
+		case "HotDays":
+			cfg.HotDays, err = strconv.Atoi(val)
 		default:
 			return fmt.Errorf("config: apply: unknown key %q", key)
 		}
@@ -286,6 +293,7 @@ func applyFlags(cfg *Config, args []string) error {
 	fs.StringVar(&cfg.OffPeakDates, "off-peak-dates", cfg.OffPeakDates, "peak calendar: off-peak (holiday) dates, e.g. \"2026-10-01..2026-10-07\"")
 	fs.StringVar(&cfg.WorkDates, "work-dates", cfg.WorkDates, "peak calendar: 调休 make-up work dates, e.g. \"2026-10-10\"")
 	fs.IntVar(&cfg.RetentionDays, "retention-days", cfg.RetentionDays, "purge requests older than this many days; 0 means keep forever")
+	fs.IntVar(&cfg.HotDays, "hot-days", cfg.HotDays, "keep this many days of bodies in the hot database; 0 disables archival")
 	return fs.Parse(args)
 }
 
@@ -362,6 +370,12 @@ func (c *Config) Validate() error {
 	}
 	if c.RetentionDays < 0 {
 		return fmt.Errorf("config: validate: RetentionDays: must not be negative, got %d", c.RetentionDays)
+	}
+	if c.HotDays < 0 {
+		return fmt.Errorf("config: validate: HotDays: must not be negative, got %d", c.HotDays)
+	}
+	if c.HotDays > 0 && c.RetentionDays > 0 && c.HotDays > c.RetentionDays {
+		return fmt.Errorf("config: validate: HotDays %d is greater than RetentionDays %d", c.HotDays, c.RetentionDays)
 	}
 	// Both sets in one call, which is what makes the "a date is in both" case
 	// reachable — validating each string alone would parse both happily and

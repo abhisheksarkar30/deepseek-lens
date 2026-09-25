@@ -143,6 +143,187 @@ func (s *Store) writeDay(day string, rows []archiveRow) error {
 	return tx.Commit()
 }
 
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func archiveTargets(ctx context.Context, q queryer, where string, args ...any) (map[string][]int64, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT request_id, day FROM body_archive
+		WHERE request_id IN (SELECT id FROM requests WHERE `+where+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]int64{}
+	for rows.Next() {
+		var id int64
+		var day string
+		if err := rows.Scan(&id, &day); err != nil {
+			return nil, err
+		}
+		out[day] = append(out[day], id)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) deleteDayRows(ctx context.Context, byDay map[string][]int64) error {
+	for day, ids := range byDay {
+		if err := s.execDay(ctx, day, `DELETE FROM bodies WHERE request_id IN (`, ids); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) archivedBytes(ctx context.Context, where string, args ...any) (int64, error) {
+	byDay, err := archiveTargets(ctx, s.reader, where, args...)
+	if err != nil {
+		return 0, fmt.Errorf("store: archived bytes: %w", err)
+	}
+	var total int64
+	for day, ids := range byDay {
+		n, err := s.sumDayBytes(ctx, day, ids)
+		if err != nil {
+			return 0, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+func (s *Store) sumDayBytes(ctx context.Context, day string, ids []int64) (int64, error) {
+	path := filepath.Join(filepath.Dir(s.dbPath), "archive", "bodies-"+day+".db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	s.dayOpens++
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	q := `SELECT COALESCE(SUM(LENGTH(req_body)+LENGTH(resp_body)), 0) FROM bodies WHERE request_id IN (` + strings.Join(placeholders, ",") + `)`
+	var n int64
+	if err := db.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (s *Store) execDay(ctx context.Context, day, prefix string, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	path := filepath.Join(filepath.Dir(s.dbPath), "archive", "bodies-"+day+".db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	s.dayOpens++
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	_, err = db.ExecContext(ctx, prefix+strings.Join(placeholders, ",")+`)`, args...)
+	return err
+}
+
+// GCArchive deletes day-file rows that no marker still references.
+func (s *Store) GCArchive(ctx context.Context) error {
+	rows, err := s.reader.QueryContext(ctx, `SELECT DISTINCT day FROM body_archive`)
+	if err != nil {
+		return err
+	}
+	var days []string
+	for rows.Next() {
+		var day string
+		if err := rows.Scan(&day); err != nil {
+			rows.Close()
+			return err
+		}
+		days = append(days, day)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(filepath.Dir(s.dbPath), "archive")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	known := map[string]bool{}
+	for _, day := range days {
+		known[day] = true
+	}
+	for _, ent := range entries {
+		name := ent.Name()
+		if !strings.HasPrefix(name, "bodies-") || !strings.HasSuffix(name, ".db") {
+			continue
+		}
+		day := strings.TrimSuffix(strings.TrimPrefix(name, "bodies-"), ".db")
+		path := filepath.Join(dir, name)
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			return err
+		}
+		s.dayOpens++
+		ids, err := s.markerIDs(ctx, day)
+		if err != nil {
+			db.Close()
+			return err
+		}
+		if len(ids) == 0 {
+			db.Close()
+			if !known[day] {
+				os.Remove(path)
+			}
+			continue
+		}
+		placeholders := make([]string, len(ids))
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		q := `DELETE FROM bodies WHERE request_id NOT IN (` + strings.Join(placeholders, ",") + `)`
+		if _, err := db.ExecContext(ctx, q, args...); err != nil {
+			db.Close()
+			return err
+		}
+		db.Close()
+	}
+	return nil
+}
+
+func (s *Store) markerIDs(ctx context.Context, day string) ([]int64, error) {
+	rows, err := s.reader.QueryContext(ctx, `SELECT request_id FROM body_archive WHERE day = ?`, day)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *Store) hydrateBodies(ctx context.Context, reqs []*Request) error {
 	if len(reqs) == 0 {
 		return nil

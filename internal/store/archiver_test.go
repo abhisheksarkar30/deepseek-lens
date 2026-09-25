@@ -3,6 +3,8 @@ package store
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -105,4 +107,93 @@ func TestArchiveCrashPoints(t *testing.T) {
 	if !bytes.Equal(got.ReqBody, []byte("from-archive")) || !bytes.Equal(got.RespBody, []byte("from-archive-resp")) {
 		t.Fatalf("hot-commit crash body = %q %q", got.ReqBody, got.RespBody)
 	}
+}
+
+func TestPurgeDeletesArchivedBodies(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	r := fullRequest()
+	r.StartedAt = time.Now().Add(-48 * time.Hour)
+	r.ReqBody = []byte("archived-req")
+	r.RespBody = []byte("archived-resp")
+	id, err := s.InsertRequest(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ArchiveOlderThan(ctx, time.Now(), ""); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.PurgeableBytes(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("PurgeableBytes ignored the archived body")
+	}
+	if _, err := s.PurgeOlderThan(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetRequest(ctx, id); err == nil {
+		t.Fatal("purged request still readable")
+	}
+	var left int
+	err = s.reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM body_archive WHERE request_id = ?`, id).Scan(&left)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Fatalf("marker rows left = %d", left)
+	}
+}
+
+func TestGCArchiveKeepsReferencedRows(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	r := fullRequest()
+	r.ReqBody = []byte("keep")
+	r.RespBody = []byte("keep-resp")
+	id, err := s.InsertRequest(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ArchiveOlderThan(ctx, time.Now().Add(time.Hour), ""); err != nil {
+		t.Fatal(err)
+	}
+	day := r.StartedAt.UTC().Format("2006-01-02")
+	dbPath := dayFile(s, day)
+	db, err := openDay(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO bodies(request_id, req_body, resp_body) VALUES (?,?,?)`, int64(999001), []byte("orphan"), []byte("orphan")); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+	if err := s.GCArchive(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db, err = openDay(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var orphan, kept int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bodies WHERE request_id = 999001`).Scan(&orphan); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bodies WHERE request_id = ?`, id).Scan(&kept); err != nil {
+		t.Fatal(err)
+	}
+	if orphan != 0 || kept != 1 {
+		t.Fatalf("orphan=%d kept=%d", orphan, kept)
+	}
+}
+
+func dayFile(s *Store, day string) string {
+	return filepath.Join(filepath.Dir(s.dbPath), "archive", "bodies-"+day+".db")
+}
+
+func openDay(path string) (*sql.DB, error) {
+	return sql.Open("sqlite", path)
 }

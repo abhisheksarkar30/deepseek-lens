@@ -18,7 +18,7 @@ var configFlagNames = map[string]bool{
 	"body-policy": true, "body-cap-bytes": true, "allow-remote": true, "capture": true,
 	"session-gap-minutes": true, "replay": true, "replay-cost-threshold-usd": true,
 	"model-map": true, "model-max-tokens": true, "off-peak-dates": true, "work-dates": true,
-	"retention-days": true,
+	"retention-days": true, "hot-days": true,
 }
 
 // Reload implements `lens reload`.
