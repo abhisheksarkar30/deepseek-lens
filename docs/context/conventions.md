@@ -125,6 +125,7 @@ convention and [testing-and-quality.md](testing-and-quality.md) for the CI gates
   secret scan; refuses every commit until that scan is installed).
 - Commit subject format: `GI#<n> <type>: <lowercase summary> (br-GI-<n>-<NN>)`, `<type>` ∈
   `feat`/`fix`/`docs`/`chore`/`plan`/`beads`/`review`.
-- Branches: `GI-<n>-<kebab-slug>` cut from `develop`. PRs into `main` must come from `develop` with a
+- Branches: `GI-<n>-<kebab-slug>` cut from `main`. A story branch PRs directly into `main`; the head
+  must match `GI-<n>-…` and its issue must be one the body closes, with a
   `GI#<n>`-prefixed title and a closing keyword in the body —
   [.github/workflows/branch-guard.yml](../../.github/workflows/branch-guard.yml).

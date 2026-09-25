@@ -119,7 +119,7 @@ Previously: 2026-09-16, scoped to the GI-9 dashboard-affordance fix in
 [PR #10](https://github.com/abhisheksarkar30/deepseek-lens/pull/10) — the accessible-name rule for
 warning badges and how a web change is verified without a harness (`conventions.md`,
 `testing-and-quality.md`). Documentation was written against the `GI-9-fix-warning-badge-affordance`
-branch, which was unmerged at refresh time: on `develop` the `⚠` spans were still inlined and
+branch, which was unmerged at refresh time: the `⚠` spans were still inlined and
 `warnBadge` did not exist.
 
 Previously: 2026-09-15, scoped to the GI-4 peak-pricing/hook-integration story (peak-aware

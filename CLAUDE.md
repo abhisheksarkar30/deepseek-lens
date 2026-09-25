@@ -47,23 +47,24 @@ These are copied from `family-monitor` and are enforced, not advisory.
 
 - **Ticket prefix `GI#<n>`** — `GI` is the GitHub issue number in this repo. The issue is the
   problem statement; the plan is the design. Everything keys off it.
-- **Branches** — `GI-<n>-<kebab-slug>`, cut from `develop`. The plan doc, the branch, and the PR
+- **Branches** — `GI-<n>-<kebab-slug>`, cut from `main`. The plan doc, the branch, and the PR
   title all carry the same `GI-<n>-<slug>`.
 - **Commit subject** — `GI#<n> <type>: <lowercase summary> (br-GI-<n>-<NN>)`, where `<type>` is one
   of `feat` / `fix` / `docs` / `chore` / `plan` / `beads` / `review`. The body explains *why* the
   change is correct, not what it does — the diff already says what. Wrap at ~76 columns.
 - **PR** — title is the same `GI#<n> <type>: <summary>` as the branch's headline commit. Body is
-  `## Summary`, `## Verification`, `## Beads`, then `Closes #<n>`. A feature branch PRs into
-  `develop`; a separate `develop` → `main` PR promotes it.
+  `## Summary`, `## Verification`, `## Beads`, then `Closes #<n>`. A story branch PRs directly into
+  `main`.
 - **Commits end with** `Co-Authored-By: Claude Code <noreply@anthropic.com>`; PR bodies end with
   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
 ### Enforcement
 
-`branch-guard.yml` requires every PR into `main` to come from `develop`, with a `GI#<n>` title
-naming a real issue, a closing keyword in the body, and every non-merge commit prefixed with an
-issue the body closes. `main-guard.yml` force-reverts any commit that reaches `main` outside that
-flow. Neither runs tests — tests are not a CI gate.
+`branch-guard.yml` requires every PR into `main` to come from a `GI-<n>-<slug>` branch whose issue
+number is one the PR body closes, with a `GI#<n>` title naming a real issue, a closing keyword in
+the body, and every non-merge commit prefixed with an issue the body closes. `main-guard.yml`
+force-reverts any commit that reaches `main` outside that flow. Neither runs tests — tests are not a
+CI gate.
 
 ### Layout
 
@@ -104,8 +105,9 @@ flow. Neither runs tests — tests are not a CI gate.
   row so they run *before* insert; warning analyzers attach by row id so they run *after*. Feature
   beads plug into these seams at fixed points rather than reordering them.
 - **Fail open.** The proxy never makes the user's coding session depend on the observer. The
-  dashboard listener carries three write routes — `POST /api/requests/{id}/replay`, `POST
-  /api/prices`, and `POST /api/purge` (destructive) — each behind `replayOriginReject`'s
+  dashboard listener carries write routes — `POST /api/requests/{id}/replay`, `POST
+  /api/prices`, and `POST /api/purge` (destructive); plan §B.2 and §B.4 add `POST /api/shutdown`
+  and `POST /api/reload` — each behind `replayOriginReject`'s
   `Origin`/`Host` allowlist, parameterized by action, with no shared secret. Replay is the only
   billable one and is off by default (`--replay`) on top of that guard — see the plan's security
   self-review for why the credentialless guard is sufficient and what the upgrade path is.

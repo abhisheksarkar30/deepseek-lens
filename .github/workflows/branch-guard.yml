@@ -13,12 +13,21 @@ jobs:
   guard-branch:
     runs-on: ubuntu-latest
     steps:
-      - name: Require PRs into main to come from develop
+      - name: Require PRs into main to come from a GI-<n>-<slug> story branch
+        id: branch
+        env:
+          # Passed via env rather than interpolated into the shell: a branch name can
+          # contain $(...) or backticks, which would execute inside a double-quoted
+          # "${{ github.head_ref }}". The title/body steps below already do this.
+          HEAD_REF: ${{ github.head_ref }}
         run: |
-          if [ "${{ github.head_ref }}" != "develop" ]; then
-            echo "::error::Pull requests into main must come from the 'develop' branch. Got '${{ github.head_ref }}'."
+          set -e
+          if ! echo "$HEAD_REF" | grep -qE '^GI-[0-9]+-[a-z0-9-]+$'; then
+            echo "::error::Pull requests into main must come from a 'GI-<n>-<slug>' branch, e.g. 'GI-1-deepseek-lens-v1'. Got '$HEAD_REF'."
             exit 1
           fi
+          echo "OK: branch '$HEAD_REF' is a story branch"
+          echo "branch_num=$(echo "$HEAD_REF" | grep -oE '^GI-[0-9]+' | grep -oE '[0-9]+')" >> "$GITHUB_OUTPUT"
 
       - name: Require PR title to be prefixed with a GitHub issue number
         id: issue
@@ -71,6 +80,18 @@ jobs:
           CLOSED_CSV=$(echo "$CLOSED_NUMS" | paste -sd, -)
           echo "closed_nums=$CLOSED_CSV" >> "$GITHUB_OUTPUT"
           echo "OK: PR body closes issue(s): $CLOSED_CSV"
+
+      - name: Require the branch's issue to be one this PR closes
+        env:
+          BRANCH_NUM: ${{ steps.branch.outputs.branch_num }}
+          CLOSED_NUMS: ${{ steps.closed.outputs.closed_nums }}
+        run: |
+          set -e
+          if ! echo ",$CLOSED_NUMS," | grep -q ",$BRANCH_NUM,"; then
+            echo "::error::Branch is named for GI-$BRANCH_NUM, but the PR body closes only: $CLOSED_NUMS. Name the branch for an issue it closes, or add a closing keyword for #$BRANCH_NUM."
+            exit 1
+          fi
+          echo "OK: branch issue #$BRANCH_NUM is among the issues this PR closes"
 
       - name: Require every commit message to start with a GI#<id> this PR closes
         env:
