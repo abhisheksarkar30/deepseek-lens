@@ -361,7 +361,15 @@ func (c *Consumer) prepareCall(call *sink.CapturedCall, seen map[string]string) 
 	}
 
 	meta := parse.ExtractMeta(reqBody, reqHeaders)
-	usage, _ := parse.ExtractUsage(respBody, respHeaders.Get("Content-Type"))
+	// Drop the tail when the pre-decode headers say the body was compressed.
+	// decode.Body strips Content-Encoding from the header clone it returns, so
+	// the guard has to read call.RespHeaders, not respHeaders.
+	var usage parse.Usage
+	if call.RespHeaders.Get("Content-Encoding") == "" && len(call.RespTail) > 0 {
+		usage, _ = parse.ExtractUsageWithTail(respBody, call.RespTail, respHeaders.Get("Content-Type"))
+	} else {
+		usage, _ = parse.ExtractUsage(respBody, respHeaders.Get("Content-Type"))
+	}
 	// ExtractUsage's error only ever reports a parsed SSE "error" event —
 	// the Usage returned alongside it is still whatever was accumulated so
 	// far, and per parse's own contract a shape mismatch degrades rather

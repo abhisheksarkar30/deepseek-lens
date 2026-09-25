@@ -32,6 +32,9 @@ type CapturedCall struct {
 	RespHeaders http.Header // already redacted by the caller
 	ReqBody     []byte      // body policy already applied by the caller
 	RespBody    []byte      // nil when streaming; filled by a separate accumulator
+	// RespTail is the last bytes past the body cap. Nil unless RespBody was
+	// truncated. Not stored in the DB.
+	RespTail []byte
 
 	// ReplayOf and ReplayEdits link a re-issued call to the capture it came
 	// from (br-GI-1-13): the original request's row id, and the serialized

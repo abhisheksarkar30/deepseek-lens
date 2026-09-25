@@ -49,7 +49,7 @@ func New(cfg *config.Config, sk *sink.Sink) (http.Handler, error) {
 		// failures through faithfully as 502 and record them.
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if st, ok := r.Context().Value(stateKey{}).(*captureState); ok {
-				st.submit(0, nil, nil, err)
+				st.submit(0, nil, nil, nil, err)
 			}
 			w.WriteHeader(http.StatusBadGateway)
 		},
@@ -76,7 +76,7 @@ func New(cfg *config.Config, sk *sink.Sink) (http.Handler, error) {
 			r: io.TeeReader(orig, respBuf),
 			c: orig,
 			onClose: func() {
-				st.submit(status, respHeaders, respBuf.Bytes(), nil)
+				st.submit(status, respHeaders, respBuf.Bytes(), respBuf.Tail(), nil)
 			},
 		}
 		return nil
@@ -194,7 +194,7 @@ type captureState struct {
 // the send still happens, but nothing reaches the sink, so the consumer writes
 // no row. Skipping the submit is the only honest way to express that — a
 // submitted call becomes a row regardless of any flag on it.
-func (st *captureState) submit(status int, respHeaders http.Header, respBody []byte, callErr error) {
+func (st *captureState) submit(status int, respHeaders http.Header, respBody, respTail []byte, callErr error) {
 	if st.noCapture {
 		return
 	}
@@ -210,36 +210,62 @@ func (st *captureState) submit(status int, respHeaders http.Header, respBody []b
 		RespHeaders: respHeaders,
 		ReqBody:     st.reqBody.Bytes(),
 		RespBody:    respBody,
+		RespTail:    respTail,
 		ReplayOf:    st.replayOf,
 		ReplayEdits: st.replayEdits,
 		Err:         callErr,
 	})
 }
 
+// usageTailBytes is the trailing window kept once the head cap is full.
+// Past the cap each Write appends then memmoves this window; that cost is
+// bounded and post-cap, so it does not move TTFB.
+const usageTailBytes = 16 * 1024
+
 // boundedBuffer accumulates up to capacity bytes; writes past that are
-// dropped rather than appended, so it caps only what lens stores. Write
-// always reports the full length written and never errors, so wrapping it
-// in an io.TeeReader never affects the stream being teed.
+// dropped rather than appended, so it caps only what lens stores. Once the
+// head is full, a response buffer also keeps the most recent usageTailBytes
+// of the overflow. Write always reports the full length written and never
+// errors, so wrapping it in an io.TeeReader never affects the stream being teed.
 type boundedBuffer struct {
-	buf bytes.Buffer
-	cap int
+	buf     bytes.Buffer
+	cap     int
+	tailCap int
+	tail    []byte
 }
 
 func newBoundedBuffer(capacity int) *boundedBuffer {
-	return &boundedBuffer{cap: capacity}
+	return &boundedBuffer{cap: capacity, tailCap: usageTailBytes}
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
 	if room := b.cap - b.buf.Len(); room > 0 {
 		if room > len(p) {
 			room = len(p)
 		}
 		b.buf.Write(p[:room])
+		p = p[room:]
 	}
-	return len(p), nil
+	if len(p) > 0 && b.tailCap > 0 {
+		b.tail = append(b.tail, p...)
+		if extra := len(b.tail) - b.tailCap; extra > 0 {
+			b.tail = append([]byte(nil), b.tail[extra:]...)
+		}
+	}
+	return n, nil
 }
 
 func (b *boundedBuffer) Bytes() []byte { return b.buf.Bytes() }
+
+// Tail returns the most recent overflow bytes, or nil when the head has not
+// overflowed.
+func (b *boundedBuffer) Tail() []byte {
+	if len(b.tail) == 0 {
+		return nil
+	}
+	return b.tail
+}
 
 // teeCloser wraps a tee'd reader with the original body's Close, running
 // onClose (when set) after that Close returns. For a response body this is

@@ -302,3 +302,28 @@ func TestCRLFLineEndingsThroughout(t *testing.T) {
 		t.Fatalf("got %+v, want %+v", got, wantSimpleUsage())
 	}
 }
+
+func TestExtractUsageWithTailRecoversTornDelta(t *testing.T) {
+	head := []byte("data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":7,\"output_tokens\":0}}}\n\n" +
+		"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hel")
+	tail := []byte("lo\"}}\n\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":99}}\n\n")
+
+	headOnly, err := ExtractUsage(head, "text/event-stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if headOnly.OutputTokens != 0 {
+		t.Fatalf("head-only output_tokens = %d, want 0", headOnly.OutputTokens)
+	}
+	got, err := ExtractUsageWithTail(head, tail, "text/event-stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OutputTokens == headOnly.OutputTokens {
+		t.Fatal("tail did not change output_tokens; the control is vacuous")
+	}
+	if got.OutputTokens != 99 || got.InputTokens != 7 || got.StopReason != "end_turn" {
+		t.Fatalf("got %+v", got)
+	}
+}

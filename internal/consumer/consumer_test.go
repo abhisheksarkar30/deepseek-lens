@@ -1236,3 +1236,51 @@ func TestBodyDecodingIsOptIn(t *testing.T) {
 			rows[0].InputTokens, rows[0].OutputTokens)
 	}
 }
+
+func TestUsageTailPricesOutputTokens(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, nil)
+
+	head := []byte("data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":7,\"output_tokens\":0}}}\n\n" +
+		"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hel")
+	tail := []byte("lo\"}}\n\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":99}}\n\n")
+
+	call := simpleCall()
+	call.RespHeaders = http.Header{"Content-Type": {"text/event-stream"}}
+	call.RespBody = head
+	call.RespTail = tail
+	runClosed(t, c, sk, []*sink.CapturedCall{call})
+
+	rows, err := st.ListRequests(context.Background(), store.Filter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].OutputTokens != 99 || rows[0].InputTokens != 7 {
+		t.Fatalf("tokens in %d out %d, want 7 / 99", rows[0].InputTokens, rows[0].OutputTokens)
+	}
+}
+
+func TestUsageTailIgnoredWhenCompressed(t *testing.T) {
+	st := newTestStore(t)
+	sk := sink.New(16)
+	c := New(sk, st, nil)
+
+	call := simpleCall()
+	call.RespHeaders = http.Header{
+		"Content-Type":     {"text/event-stream"},
+		"Content-Encoding": {"gzip"},
+	}
+	call.RespBody = []byte("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")
+	call.RespTail = []byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":99}}\n\n")
+	runClosed(t, c, sk, []*sink.CapturedCall{call})
+
+	rows, err := st.ListRequests(context.Background(), store.Filter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].OutputTokens != 0 {
+		t.Fatalf("output_tokens = %d, want 0 when Content-Encoding is set on the pre-decode headers", rows[0].OutputTokens)
+	}
+}
