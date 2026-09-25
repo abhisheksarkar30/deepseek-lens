@@ -36,6 +36,7 @@ requesting OS-level permissions. The closest analog is the three write routes' a
 | Set/unset a model's price rates | Lets the Settings tab or `lens prices --set` change what future calls cost | Always on; Origin/Host allowlist; invalid rate/model name rejected before write | [internal/api/prices.go](../../internal/api/prices.go) |
 | Purge rows (delete, by age or the unpriced predicate) | Lets the Settings tab or `lens purge` reclaim disk; the one destructive capability in the system | Always on; Origin/Host allowlist; `days > 0` required for the age-based mode; `lens purge` additionally requires `--yes` for a non-dry-run delete | [internal/api/purge.go](../../internal/api/purge.go), [internal/cli/purge.go](../../internal/cli/purge.go) |
 | Shutdown the running serve | Stops the proxy from the CLI without a console Ctrl-C | Origin/Host allowlist plus a loopback-caller check (`POST /api/shutdown`) | [internal/api/api.go](../../internal/api/api.go), [internal/cli/shutdown.go](../../internal/cli/shutdown.go) |
+| Reload config | Applies `RetentionDays` on a running serve; other changes need a restart | Origin/Host allowlist plus a loopback-caller check (`POST /api/reload`) | [internal/api/api.go](../../internal/api/api.go), [internal/cli/reload.go](../../internal/cli/reload.go) |
 
 ## Role / access model
 

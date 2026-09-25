@@ -27,6 +27,7 @@ var commands = map[string]func([]string) error{
 	"purge":    cli.Purge,
 	"shutdown": cli.Shutdown,
 	"restart":  cli.Restart,
+	"reload":   cli.Reload,
 }
 
 func main() {

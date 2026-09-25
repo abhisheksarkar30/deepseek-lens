@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
 
+	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
@@ -878,6 +880,105 @@ func TestEmbeddedAssets(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Errorf("GET %s: status = %d, want 200", path, rr.Code)
 		}
+	}
+}
+
+func TestPostReload(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".deepseek-lens")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := newTestStore(t)
+	handler, _, _, _ := newTestAPI(t, st)
+	handler.SetRetention(3, st)
+	boot := config.Default()
+	boot.RetentionDays = 3
+	handler.SetReload([]string{"--capture=false"}, boot)
+
+	post := func(remote, origin string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/reload", nil)
+		req.RemoteAddr = remote
+		req.Host = "127.0.0.1"
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr
+	}
+
+	write("RetentionDays = 9\n")
+	rr := post("192.0.2.1:9", "")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("remote status = %d, want 403", rr.Code)
+	}
+	rr = post("127.0.0.1:9", "http://evil.example")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("origin status = %d, want 403", rr.Code)
+	}
+	rr = post("127.0.0.1:9", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("reload status = %d: %s", rr.Code, rr.Body.String())
+	}
+	got := decodeJSON[reloadResponse](t, rr.Body)
+	if len(got.Applied) != 1 || got.Applied[0] != "RetentionDays" || got.Unchanged {
+		t.Fatalf("applied = %+v", got)
+	}
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/retention", nil))
+	ret := decodeJSON[retentionResponse](t, get.Body)
+	if ret.Days != 9 {
+		t.Fatalf("retention days = %d, want 9", ret.Days)
+	}
+
+	write("RetentionDays = -1\n")
+	rr = post("127.0.0.1:9", "")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status = %d, want 400", rr.Code)
+	}
+	get = httptest.NewRecorder()
+	handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/retention", nil))
+	ret = decodeJSON[retentionResponse](t, get.Body)
+	if ret.Days != 9 {
+		t.Fatalf("after invalid reload days = %d, want 9", ret.Days)
+	}
+
+	write("RetentionDays = 9\nProxyAddr = \"127.0.0.1:9\"\nBodyCapBytes = 8388608\nCapture = false\n")
+	rr = post("127.0.0.1:9", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("restart-required status = %d: %s", rr.Code, rr.Body.String())
+	}
+	got = decodeJSON[reloadResponse](t, rr.Body)
+	joined := strings.Join(got.RestartRequired, ",")
+	for _, name := range []string{"ProxyAddr", "BodyCapBytes", "Capture"} {
+		if !strings.Contains(joined, name) {
+			t.Errorf("restart_required %q missing %s", joined, name)
+		}
+	}
+	if len(got.Applied) != 0 {
+		t.Fatalf("applied = %v, want none", got.Applied)
+	}
+
+	handler.SetReload([]string{"--no-capture"}, boot)
+	write("RetentionDays = 9\n")
+	rr = post("127.0.0.1:9", "")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("--no-capture status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+	handler.SetReload([]string{"--capture=false"}, boot)
+	rr = post("127.0.0.1:9", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("translated --capture=false status = %d: %s", rr.Code, rr.Body.String())
 	}
 }
 

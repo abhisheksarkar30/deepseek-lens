@@ -155,8 +155,11 @@ func Serve(args []string) error {
 	// cfg.ReplayEnabled is the endpoint's opt-in control — the dashboard route
 	// exists but answers 403 until `lens serve --replay` is passed.
 	dashAPI := api.New(st, sk, cons, broker, web.Files, proxySrv.Handler, cfg.ReplayEnabled)
+	live := api.NewLiveConfig(cfg.RetentionDays)
+	dashAPI.SetLive(live)
 	dashAPI.SetPricing(pricing.DefaultPath())
 	dashAPI.SetRetention(cfg.RetentionDays, st)
+	dashAPI.SetReload(translateNoCapture(args), cfg)
 	wireCalendar(cal, cons, dashAPI)
 	dashSrv := &http.Server{
 		Addr:    cfg.DashboardAddr,
@@ -212,7 +215,7 @@ func Serve(args []string) error {
 	maint.Add(1)
 	go func() {
 		defer maint.Done()
-		runMaintenance(ctx, st, cfg.RetentionDays)
+		runMaintenance(ctx, st, live.RetentionDays)
 	}()
 
 	select {
@@ -264,8 +267,8 @@ func newEarlyState() serveState {
 	}
 }
 
-func runMaintenance(ctx context.Context, st *store.Store, days int) {
-	purgeOnStartup(ctx, st, days, log.Printf)
+func runMaintenance(ctx context.Context, st *store.Store, days func() int) {
+	purgeOnStartup(ctx, st, days(), log.Printf)
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for {
@@ -276,7 +279,7 @@ func runMaintenance(ctx context.Context, st *store.Store, days int) {
 			if ctx.Err() != nil {
 				return
 			}
-			purgeOnStartup(ctx, st, days, log.Printf)
+			purgeOnStartup(ctx, st, days(), log.Printf)
 		}
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/proxy"
@@ -98,6 +99,9 @@ type api struct {
 	// cannot double as the unwired sentinel).
 	retentionDays int
 	purge         RetentionPurger
+	live          *LiveConfig
+	bootArgs      []string
+	boot          *config.Config
 
 	// calendar is the peak calendar the session rollup reads and that
 	// GET/POST /api/prices echoes. The zero value is a valid calendar — it is
@@ -120,8 +124,33 @@ func (a *api) SetPricing(path string) { a.pricePath = path }
 // default read. Leaving it unset is a supported state: both routes answer
 // 503 rather than panicking on a nil purge.
 func (a *api) SetRetention(days int, purge RetentionPurger) {
-	a.retentionDays = days
+	if a.live == nil {
+		a.live = NewLiveConfig(days)
+	} else {
+		a.live.SetRetentionDays(days)
+	}
+	a.retentionDays = a.live.RetentionDays()
 	a.purge = purge
+}
+
+// SetLive installs the process-wide live config the maintenance ticker also reads.
+func (a *api) SetLive(c *LiveConfig) { a.live = c }
+
+// SetReload stores the translated boot args and the config they resolved, so
+// POST /api/reload can re-run config.Load on that same slice.
+func (a *api) SetReload(bootArgs []string, boot *config.Config) {
+	a.bootArgs = append([]string(nil), bootArgs...)
+	if boot != nil {
+		cp := *boot
+		a.boot = &cp
+	}
+}
+
+func (a *api) retentionDaysNow() int {
+	if a.live != nil {
+		a.retentionDays = a.live.RetentionDays()
+	}
+	return a.retentionDays
 }
 
 // SetCalendar installs the calendar the session rollup reads and the
@@ -175,6 +204,7 @@ func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, asset
 	mux.HandleFunc("/api/retention", methodGet(a.getRetention))
 	mux.HandleFunc("POST /api/purge", a.postPurge)
 	mux.HandleFunc("POST /api/shutdown", a.postShutdown)
+	mux.HandleFunc("POST /api/reload", a.postReload)
 	mux.Handle("/", http.FileServer(http.FS(assets)))
 	a.mux = mux
 	return a
@@ -759,6 +789,95 @@ func (a *api) postShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
 	a.stop()
+}
+
+type reloadResponse struct {
+	Applied         []string `json:"applied"`
+	RestartRequired []string `json:"restart_required"`
+	Unchanged       bool     `json:"unchanged"`
+}
+
+func (a *api) postReload(w http.ResponseWriter, r *http.Request) {
+	if reason := replayOriginReject(r, "reload"); reason != "" {
+		writeError(w, http.StatusForbidden, reason)
+		return
+	}
+	if !callerLoopback(r) {
+		writeError(w, http.StatusForbidden, "reload requires a loopback caller")
+		return
+	}
+	if a.boot == nil {
+		writeError(w, http.StatusServiceUnavailable, "reload is not wired")
+		return
+	}
+	next, err := config.Load(a.bootArgs)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := next.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	resp := diffReload(a.boot, next)
+	if contains(resp.Applied, "RetentionDays") {
+		if a.live == nil {
+			a.live = NewLiveConfig(next.RetentionDays)
+		} else {
+			a.live.SetRetentionDays(next.RetentionDays)
+		}
+		a.retentionDays = a.live.RetentionDays()
+		a.boot.RetentionDays = next.RetentionDays
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func diffReload(boot, next *config.Config) reloadResponse {
+	resp := reloadResponse{Applied: []string{}, RestartRequired: []string{}}
+	type field struct {
+		name string
+		live bool
+		diff bool
+	}
+	fields := []field{
+		{"ProxyAddr", false, boot.ProxyAddr != next.ProxyAddr},
+		{"DashboardAddr", false, boot.DashboardAddr != next.DashboardAddr},
+		{"UpstreamURL", false, boot.UpstreamURL != next.UpstreamURL},
+		{"DBPath", false, boot.DBPath != next.DBPath},
+		{"BodyPolicy", false, boot.BodyPolicy != next.BodyPolicy},
+		{"BodyCapBytes", false, boot.BodyCapBytes != next.BodyCapBytes},
+		{"AllowRemote", false, boot.AllowRemote != next.AllowRemote},
+		{"Capture", false, boot.Capture != next.Capture},
+		{"SessionGapMinutes", false, boot.SessionGapMinutes != next.SessionGapMinutes},
+		{"ReplayEnabled", false, boot.ReplayEnabled != next.ReplayEnabled},
+		{"ReplayCostThresholdUSD", false, boot.ReplayCostThresholdUSD != next.ReplayCostThresholdUSD},
+		{"ModelMap", false, boot.ModelMap != next.ModelMap},
+		{"ModelMaxTokens", false, boot.ModelMaxTokens != next.ModelMaxTokens},
+		{"OffPeakDates", false, boot.OffPeakDates != next.OffPeakDates},
+		{"WorkDates", false, boot.WorkDates != next.WorkDates},
+		{"RetentionDays", true, boot.RetentionDays != next.RetentionDays},
+	}
+	for _, f := range fields {
+		if !f.diff {
+			continue
+		}
+		if f.live {
+			resp.Applied = append(resp.Applied, f.name)
+		} else {
+			resp.RestartRequired = append(resp.RestartRequired, f.name)
+		}
+	}
+	resp.Unchanged = len(resp.Applied) == 0 && len(resp.RestartRequired) == 0
+	return resp
 }
 
 func replayOriginReject(r *http.Request, action string) string {

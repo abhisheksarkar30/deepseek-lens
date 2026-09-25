@@ -89,6 +89,8 @@ anymore:
    [internal/api/purge.go](../../internal/api/purge.go).
 4. `POST /api/shutdown` — drives the running serve's stop. Same Origin/Host allowlist, plus a
    loopback-caller check because the route is disruptive. `lens shutdown` is the client.
+5. `POST /api/reload` — re-reads config on the translated boot args. `RetentionDays` applies live;
+   every other difference is reported as `restart_required`. Same two guards as shutdown.
 
 Full guard rationale in [security-and-permissions.md](security-and-permissions.md).
 
