@@ -164,6 +164,8 @@ const state = {
   warningDetailPage: { limit: 50, offset: 0 },
   warningDetailFetchSeq: 0,
   feedRowLimit: 200,
+  feedPage: { limit: 50, offset: 0 },
+  feedRangeOn: false,
   // sessionsPage is the sessions table's window. The limit starts at one of
   // PAGE_SIZES so the select's initial value and the first request's ?limit=
   // are the same number by construction — they cannot diverge.
@@ -311,10 +313,57 @@ document.getElementById("pause-btn").addEventListener("click", () => {
   status.classList.toggle("paused", state.paused);
 });
 
+function feedBounds() {
+  const zone = statsZone();
+  const fromRaw = statsValue("feed-from");
+  const toRaw = statsValue("feed-to");
+  if (fromRaw && toRaw && toRaw.slice(0, 13) < fromRaw.slice(0, 13)) {
+    return { invalid: true, since: "", until: "", active: false };
+  }
+  const since = hourBound(fromRaw, false, zone);
+  const until = hourBound(toRaw, true, zone);
+  return { invalid: false, since, until, active: !!(since || until) };
+}
+
 async function loadInitialFeed() {
+  state.feedPage.offset = 0;
+  await loadFeed();
+}
+
+async function loadFeed() {
   try {
-    const reqs = await fetchJSON("/api/requests?limit=50");
+    const bounds = feedBounds();
+    const msg = document.getElementById("feed-range-msg");
+    const banner = document.getElementById("feed-range-banner");
+    const pager = document.getElementById("feed-pager");
+    if (msg) msg.textContent = bounds.invalid ? "To is before From" : "";
+    state.feedRangeOn = bounds.active;
+    if (banner) banner.hidden = !bounds.active;
     const body = document.getElementById("feed-body");
+    let reqs;
+    if (bounds.active) {
+      const params = new URLSearchParams({
+        limit: String(state.feedPage.limit),
+        offset: String(state.feedPage.offset),
+      });
+      if (bounds.since) params.set("since", bounds.since);
+      if (bounds.until) params.set("until", bounds.until);
+      const page = await fetchPage("/api/requests?" + params.toString());
+      reqs = page.items;
+      if (pager) {
+        pager.hidden = false;
+        renderPager(pager, page, (next) => {
+          state.feedPage = next;
+          loadFeed();
+        });
+      }
+    } else {
+      reqs = await fetchJSON("/api/requests?limit=50");
+      if (pager) {
+        pager.hidden = true;
+        pager.innerHTML = "";
+      }
+    }
     body.innerHTML = reqs.map(feedRowHTML).join("");
     state.totals = { calls: 0, tokens: 0, cost: 0, unpriced: 0 };
     for (const r of reqs) {
@@ -324,9 +373,22 @@ async function loadInitialFeed() {
     }
     renderTotals();
   } catch (e) {
-    console.error("loadInitialFeed", e);
+    console.error("loadFeed", e);
   }
 }
+
+for (const id of ["feed-from", "feed-to"]) {
+  document.getElementById(id).addEventListener("change", () => {
+    state.feedPage.offset = 0;
+    loadFeed();
+  });
+}
+document.getElementById("feed-clear").addEventListener("click", () => {
+  document.getElementById("feed-from").value = "";
+  document.getElementById("feed-to").value = "";
+  state.feedPage.offset = 0;
+  loadFeed();
+});
 
 // ---- warnings inbox -------------------------------------------------------
 
@@ -449,19 +511,66 @@ const STATS_METRICS = {
 // size. This is a UI default only — the API never rejects a large window.
 const FROM_LOOKBACK_MS = { hour: 24 * 3600e3, day: 30 * 86400e3, week: 90 * 86400e3, month: 0 };
 
-// utcDayBound turns an <input type="date"> value (YYYY-MM-DD) into the RFC3339
-// UTC-midnight bound the API's since/until expect. The explicit T00:00:00Z
-// suffix pins UTC midnight regardless of the browser's local zone. The To
-// bound is the start of the NEXT day, because until is exclusive-upper:
-// [start, next-start) covers the whole picked day with no double-counted
-// boundary row — so "To: March 5" reads as "through the end of March 5 UTC",
-// not "up to March 5 00:00".
-function utcDayBound(dateStr, endExclusive) {
-  if (!dateStr) return "";
-  const d = new Date(dateStr + "T00:00:00Z");
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function formatUTC(ms) {
+  const d = new Date(ms);
   if (isNaN(d.getTime())) return "";
-  if (endExclusive) d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().replace(/\.\d{3}Z$/, "Z");
+  return d.getUTCFullYear() + "-" + pad2(d.getUTCMonth() + 1) + "-" + pad2(d.getUTCDate()) +
+    "T" + pad2(d.getUTCHours()) + ":" + pad2(d.getUTCMinutes()) + ":" + pad2(d.getUTCSeconds()) + ".000Z";
+}
+
+// hourBound turns a datetime-local value into an RFC3339 instant. Minutes are
+// floored to the hour. endExclusive makes until the start of the next hour,
+// so the window is [from-hour start, to-hour end). offset is a minute count
+// east of UTC, or "local" (the numeric constructor, which is DST-correct).
+function hourBound(value, endExclusive, offset) {
+  if (!value) return "";
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})/.exec(value);
+  if (!m) return "";
+  let y = +m[1], mo = +m[2], d = +m[3], h = +m[4];
+  if (endExclusive) h += 1;
+  let ms;
+  if (offset === "local") {
+    ms = new Date(y, mo - 1, d, h).getTime();
+  } else {
+    ms = Date.UTC(y, mo - 1, d, h) - (Number(offset) || 0) * 60 * 1000;
+  }
+  return formatUTC(ms);
+}
+
+function statsZone() {
+  const el = document.getElementById("stats-tz");
+  const v = el ? el.value : "local";
+  if (v === "local") return "local";
+  const n = Number(v);
+  return Number.isFinite(n) ? n : "local";
+}
+
+function statsTzOffsetMin() {
+  const z = statsZone();
+  if (z === "local") return -new Date().getTimezoneOffset();
+  return z;
+}
+
+function zoneLabel() {
+  const z = statsZone();
+  if (z === "local") return "Local";
+  if (z === 0) return "UTC";
+  if (z === 480) return "UTC+8";
+  return "UTC";
+}
+
+function wallStamp(ms, offset) {
+  const local = offset === "local";
+  const d = local ? new Date(ms) : new Date(ms + (Number(offset) || 0) * 60 * 1000);
+  const y = local ? d.getFullYear() : d.getUTCFullYear();
+  const mo = local ? d.getMonth() : d.getUTCMonth();
+  const day = local ? d.getDate() : d.getUTCDate();
+  const h = local ? d.getHours() : d.getUTCHours();
+  return y + "-" + pad2(mo + 1) + "-" + pad2(day) + "T" + pad2(h) + ":00";
 }
 
 function statsValue(id) {
@@ -475,9 +584,11 @@ async function loadStats() {
     // all-time window this tab has always shown — the two-bound form is a
     // superset of the old one-bound behavior, not a change to it.
     const granularity = statsValue("stats-granularity") || "day";
-    const from = utcDayBound(statsValue("stats-from"), false);
-    const to = utcDayBound(statsValue("stats-to"), true);
+    const zone = statsZone();
+    const from = hourBound(statsValue("stats-from"), false, zone);
+    const to = hourBound(statsValue("stats-to"), true, zone);
     const params = new URLSearchParams({ granularity });
+    params.set("tz_offset", String(statsTzOffsetMin()));
     if (from) params.set("since", from);
     if (to) params.set("until", to);
 
@@ -503,7 +614,7 @@ async function loadStats() {
 // re-renders without refetching.
 function renderStatsHeading(granularity) {
   const metric = STATS_METRICS[state.statsMetric] || STATS_METRICS.count;
-  const title = `${metric.label} per ${granularity}`;
+  const title = `${metric.label} per ${granularity} (${zoneLabel()})`;
   const h = document.getElementById("stats-chart-title");
   if (h) h.textContent = title;
   const svg = document.getElementById("stats-chart");
@@ -635,12 +746,12 @@ document.getElementById("stats-granularity").addEventListener("change", () => {
   const fromEl = document.getElementById("stats-from");
   const lookback = FROM_LOOKBACK_MS[statsValue("stats-granularity")] || 0;
   if (!fromEl.value && lookback > 0) {
-    fromEl.value = new Date(Date.now() - lookback).toISOString().slice(0, 10);
+    fromEl.value = wallStamp(Date.now() - lookback, statsZone());
   }
   loadStats();
 });
 
-for (const id of ["stats-from", "stats-to"]) {
+for (const id of ["stats-from", "stats-to", "stats-tz"]) {
   document.getElementById(id).addEventListener("change", loadStats);
 }
 
@@ -1211,6 +1322,14 @@ async function openDetail(id) {
         `</div>`
       : "";
 
+    const archiveNote = document.getElementById("detail-archive");
+    if (r.ArchiveDay) {
+      archiveNote.hidden = false;
+      archiveNote.textContent = "bodies loaded from the archive (" + r.ArchiveDay + ")";
+    } else {
+      archiveNote.hidden = true;
+      archiveNote.textContent = "";
+    }
     document.getElementById("detail-body").innerHTML = `
       <h2>Request #${r.ID}</h2>
       <dl class="detail-grid">
@@ -1370,7 +1489,7 @@ async function handleStreamEvent(ev) {
     try {
       const req = await fetchJSON(`/api/requests/${evt.id}`);
       bumpTotals(req);
-      if (!state.paused) prependFeedRow(req);
+      if (!state.paused && !state.feedRangeOn) prependFeedRow(req);
     } catch (e) { console.error("stream request fetch", e); }
   } else if (evt.type === "warnings") {
     markFeedRowWarned(evt.id);

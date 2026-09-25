@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/proxy"
@@ -34,7 +35,7 @@ type Store interface {
 	ListRequests(ctx context.Context, f store.Filter) ([]*store.Request, error)
 	StatsSummary(ctx context.Context, since, until time.Time) (*store.Summary, error)
 	StatsByModel(ctx context.Context, since, until time.Time) ([]store.ModelStat, error)
-	StatsByPeriod(ctx context.Context, since, until time.Time, granularity string) ([]store.PeriodStat, error)
+	StatsByPeriod(ctx context.Context, since, until time.Time, granularity string, tzOffsetMin int) ([]store.PeriodStat, error)
 	StatsByCostSource(ctx context.Context, since, until time.Time) ([]store.CostSourceStat, error)
 	ListSessions(ctx context.Context, f store.Filter) ([]*store.Session, error)
 	GetSession(ctx context.Context, id string) (*store.Session, error)
@@ -98,12 +99,18 @@ type api struct {
 	// cannot double as the unwired sentinel).
 	retentionDays int
 	purge         RetentionPurger
+	live          *LiveConfig
+	bootArgs      []string
+	boot          *config.Config
 
 	// calendar is the peak calendar the session rollup reads and that
 	// GET/POST /api/prices echoes. The zero value is a valid calendar — it is
 	// the window-and-weekend rule with no holidays — so leaving it unset is a
 	// supported state, not a missing capability.
 	calendar pricing.Calendar
+
+	// stop cancels serve's signal context. Nil means POST /api/shutdown is unwired.
+	stop func()
 }
 
 // SetPricing wires GET/POST /api/prices to the price file at path. Called
@@ -117,8 +124,33 @@ func (a *api) SetPricing(path string) { a.pricePath = path }
 // default read. Leaving it unset is a supported state: both routes answer
 // 503 rather than panicking on a nil purge.
 func (a *api) SetRetention(days int, purge RetentionPurger) {
-	a.retentionDays = days
+	if a.live == nil {
+		a.live = NewLiveConfig(days, 0)
+	} else {
+		a.live.SetRetentionDays(days)
+	}
+	a.retentionDays = a.live.RetentionDays()
 	a.purge = purge
+}
+
+// SetLive installs the process-wide live config the maintenance ticker also reads.
+func (a *api) SetLive(c *LiveConfig) { a.live = c }
+
+// SetReload stores the translated boot args and the config they resolved, so
+// POST /api/reload can re-run config.Load on that same slice.
+func (a *api) SetReload(bootArgs []string, boot *config.Config) {
+	a.bootArgs = append([]string(nil), bootArgs...)
+	if boot != nil {
+		cp := *boot
+		a.boot = &cp
+	}
+}
+
+func (a *api) retentionDaysNow() int {
+	if a.live != nil {
+		a.retentionDays = a.live.RetentionDays()
+	}
+	return a.retentionDays
 }
 
 // SetCalendar installs the calendar the session rollup reads and the
@@ -126,6 +158,9 @@ func (a *api) SetRetention(days int, purge RetentionPurger) {
 // supported state: the rollup then applies the window-and-weekend rule with
 // no holidays (the zero calendar IS that rule), and /api/prices echoes ""/"".
 func (a *api) SetCalendar(cal pricing.Calendar) { a.calendar = cal }
+
+// SetStop wires POST /api/shutdown to cancel serve's process context.
+func (a *api) SetStop(fn func()) { a.stop = fn }
 
 // ServeHTTP delegates to the stored mux, so *api satisfies http.Handler and
 // Handler: api.New(...) in serve.go keeps compiling with no change at that
@@ -168,6 +203,8 @@ func New(st Store, sk *sink.Sink, cons *consumer.Consumer, broker *Broker, asset
 	mux.HandleFunc("POST /api/prices", a.setPrices)
 	mux.HandleFunc("/api/retention", methodGet(a.getRetention))
 	mux.HandleFunc("POST /api/purge", a.postPurge)
+	mux.HandleFunc("POST /api/shutdown", a.postShutdown)
+	mux.HandleFunc("POST /api/reload", a.postReload)
 	mux.Handle("/", http.FileServer(http.FS(assets)))
 	a.mux = mux
 	return a
@@ -286,6 +323,20 @@ func parseSinceParam(r *http.Request) (time.Time, error) {
 	return parseTimeBoundParam(r, "since")
 }
 
+// parseTzOffsetParam reads ?tz_offset as minutes east of UTC. Absent is 0.
+// Values outside −720..840 are rejected. The integer is bound, never spliced into SQL.
+func parseTzOffsetParam(r *http.Request) (int, error) {
+	s := r.URL.Query().Get("tz_offset")
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < -720 || n > 840 {
+		return 0, fmt.Errorf("invalid tz_offset %q: want minutes east of UTC in [-720,840]", s)
+	}
+	return n, nil
+}
+
 // parseGranularityParam reads ?granularity, defaulting to "day" when absent.
 // An unknown value is rejected here so the store's own whitelist stays defense
 // in depth rather than the only check — no such request ever reaches a query.
@@ -328,6 +379,11 @@ func (a *api) listRequests(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	until, err := parseTimeBoundParam(r, "until")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	warn, err := parseBoolParam(r, "warn")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -343,6 +399,7 @@ func (a *api) listRequests(w http.ResponseWriter, r *http.Request) {
 		Limit:      limit,
 		Offset:     offset,
 		Since:      since,
+		Until:      until,
 		SessionID:  q.Get("session"),
 		Model:      q.Get("model"),
 		OnlyWarned: warn,
@@ -708,6 +765,123 @@ func (a *api) awaitReplayRow(ctx context.Context, origID, afterID int64) (*store
 // non-browser client, which for this endpoint means `lens replay` — the
 // deliberate credentialless design in the bead's "Why no secret" (a local
 // process that could forge past this could already read the SQLite file).
+func callerLoopback(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	host = strings.Trim(host, "[]")
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
+}
+
+func (a *api) postShutdown(w http.ResponseWriter, r *http.Request) {
+	if reason := replayOriginReject(r, "shutdown"); reason != "" {
+		writeError(w, http.StatusForbidden, reason)
+		return
+	}
+	if !callerLoopback(r) {
+		writeError(w, http.StatusForbidden, "shutdown requires a loopback caller")
+		return
+	}
+	if a.stop == nil {
+		writeError(w, http.StatusServiceUnavailable, "shutdown is not wired")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
+	a.stop()
+}
+
+type reloadResponse struct {
+	Applied         []string `json:"applied"`
+	RestartRequired []string `json:"restart_required"`
+	Unchanged       bool     `json:"unchanged"`
+}
+
+func (a *api) postReload(w http.ResponseWriter, r *http.Request) {
+	if reason := replayOriginReject(r, "reload"); reason != "" {
+		writeError(w, http.StatusForbidden, reason)
+		return
+	}
+	if !callerLoopback(r) {
+		writeError(w, http.StatusForbidden, "reload requires a loopback caller")
+		return
+	}
+	if a.boot == nil {
+		writeError(w, http.StatusServiceUnavailable, "reload is not wired")
+		return
+	}
+	next, err := config.Load(a.bootArgs)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := next.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	resp := diffReload(a.boot, next)
+	if contains(resp.Applied, "RetentionDays") || contains(resp.Applied, "HotDays") {
+		if a.live == nil {
+			a.live = NewLiveConfig(next.RetentionDays, next.HotDays)
+		} else {
+			a.live.Apply(next.RetentionDays, next.HotDays)
+		}
+		a.retentionDays = a.live.RetentionDays()
+		a.boot.RetentionDays = next.RetentionDays
+		a.boot.HotDays = next.HotDays
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func diffReload(boot, next *config.Config) reloadResponse {
+	resp := reloadResponse{Applied: []string{}, RestartRequired: []string{}}
+	type field struct {
+		name string
+		live bool
+		diff bool
+	}
+	fields := []field{
+		{"ProxyAddr", false, boot.ProxyAddr != next.ProxyAddr},
+		{"DashboardAddr", false, boot.DashboardAddr != next.DashboardAddr},
+		{"UpstreamURL", false, boot.UpstreamURL != next.UpstreamURL},
+		{"DBPath", false, boot.DBPath != next.DBPath},
+		{"BodyPolicy", false, boot.BodyPolicy != next.BodyPolicy},
+		{"BodyCapBytes", false, boot.BodyCapBytes != next.BodyCapBytes},
+		{"AllowRemote", false, boot.AllowRemote != next.AllowRemote},
+		{"Capture", false, boot.Capture != next.Capture},
+		{"SessionGapMinutes", false, boot.SessionGapMinutes != next.SessionGapMinutes},
+		{"ReplayEnabled", false, boot.ReplayEnabled != next.ReplayEnabled},
+		{"ReplayCostThresholdUSD", false, boot.ReplayCostThresholdUSD != next.ReplayCostThresholdUSD},
+		{"ModelMap", false, boot.ModelMap != next.ModelMap},
+		{"ModelMaxTokens", false, boot.ModelMaxTokens != next.ModelMaxTokens},
+		{"OffPeakDates", false, boot.OffPeakDates != next.OffPeakDates},
+		{"WorkDates", false, boot.WorkDates != next.WorkDates},
+		{"RetentionDays", true, boot.RetentionDays != next.RetentionDays},
+		{"HotDays", true, boot.HotDays != next.HotDays},
+	}
+	for _, f := range fields {
+		if !f.diff {
+			continue
+		}
+		if f.live {
+			resp.Applied = append(resp.Applied, f.name)
+		} else {
+			resp.RestartRequired = append(resp.RestartRequired, f.name)
+		}
+	}
+	resp.Unchanged = len(resp.Applied) == 0 && len(resp.RestartRequired) == 0
+	return resp
+}
+
 func replayOriginReject(r *http.Request, action string) string {
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
@@ -791,6 +965,11 @@ func (a *api) stats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	tzOffset, err := parseTzOffsetParam(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	summary, err := a.store.StatsSummary(r.Context(), since, until)
 	if err != nil {
@@ -802,7 +981,7 @@ func (a *api) stats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	byPeriod, err := a.store.StatsByPeriod(r.Context(), since, until, granularity)
+	byPeriod, err := a.store.StatsByPeriod(r.Context(), since, until, granularity, tzOffset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

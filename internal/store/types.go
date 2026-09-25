@@ -24,6 +24,9 @@ type Request struct {
 	RespHeaders string
 	ReqBody     []byte
 	RespBody    []byte
+	// ArchiveDay is set when this read hydrated bodies from a day file.
+	// It is not a column.
+	ArchiveDay *string
 
 	InputTokens         int
 	OutputTokens        int
@@ -127,6 +130,8 @@ type Filter struct {
 	Limit      int // 0 means DefaultLimit, never unbounded
 	Offset     int // 0 means start at the top; a negative offset is clamped to 0
 	Since      time.Time
+	Until      time.Time // zero means unbounded; applied as started_at < ? (half-open)
+	WithBodies bool      // false returns NULL bodies and does not open archive day files
 	SessionID  string
 	Model      string
 	OnlyWarned bool

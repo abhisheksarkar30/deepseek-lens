@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/abhisheksarkar30/deepseek-lens/internal/analyze"
@@ -50,6 +53,14 @@ func Serve(args []string) error {
 		return fmt.Errorf("serve: build calendar: %w", err)
 	}
 
+	early := newEarlyState()
+	early.LogPath = filepath.Join(filepath.Dir(cfg.DBPath), "serve.log")
+	sf, err := openServeStateFile(serveStatePath(cfg.DBPath), early)
+	if err != nil {
+		return fmt.Errorf("serve: state file: %w", err)
+	}
+	defer sf.remove()
+
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("serve: open store: %w", err)
@@ -65,8 +76,6 @@ func Serve(args []string) error {
 	// (below), so a tool that is opened and closed around work sessions
 	// still sees the setting take effect. purgeOnStartup no-ops when
 	// cfg.RetentionDays <= 0 (the default: keep forever).
-	purgeOnStartup(context.Background(), st, cfg.RetentionDays, log.Printf)
-
 	sk := sink.New(sink.DefaultCapacity)
 	broker := api.NewBroker()
 	// PublishingStore wraps st so the consumer's writes also publish SSE
@@ -128,8 +137,11 @@ func Serve(args []string) error {
 	// cfg.ReplayEnabled is the endpoint's opt-in control — the dashboard route
 	// exists but answers 403 until `lens serve --replay` is passed.
 	dashAPI := api.New(st, sk, cons, broker, web.Files, proxySrv.Handler, cfg.ReplayEnabled)
+	live := api.NewLiveConfig(cfg.RetentionDays, cfg.HotDays)
+	dashAPI.SetLive(live)
 	dashAPI.SetPricing(pricing.DefaultPath())
 	dashAPI.SetRetention(cfg.RetentionDays, st)
+	dashAPI.SetReload(translateNoCapture(args), cfg)
 	wireCalendar(cal, cons, dashAPI)
 	dashSrv := &http.Server{
 		Addr:    cfg.DashboardAddr,
@@ -140,6 +152,24 @@ func Serve(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	dashAPI.SetStop(stop)
+
+	proxyLn, err := net.Listen("tcp", cfg.ProxyAddr)
+	if err != nil {
+		sf.bindFailed()
+		return fmt.Errorf("serve: listen proxy: %w", err)
+	}
+	dashLn, err := net.Listen("tcp", cfg.DashboardAddr)
+	if err != nil {
+		sf.bindFailed()
+		proxyLn.Close()
+		return fmt.Errorf("serve: listen dashboard: %w", err)
+	}
+	// The bind winner rewrites the file with its own pid and the bound
+	// addresses, whether or not it created it (F10.1). Reached only after
+	// both Listen calls succeed, so a process that lost a bind never gets
+	// here and leaves the winner's file untouched.
+	sf.bindWon(proxyLn.Addr().String(), dashLn.Addr().String())
 
 	consumerDone := make(chan struct{})
 	go func() {
@@ -149,31 +179,23 @@ func Serve(args []string) error {
 
 	errCh := make(chan error, 2)
 	go func() {
-		if err := proxySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := proxySrv.Serve(proxyLn); err != nil && err != http.ErrServerClosed {
 			errCh <- fmt.Errorf("proxy server: %w", err)
 		}
 	}()
 	go func() {
-		if err := dashSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := dashSrv.Serve(dashLn); err != nil && err != http.ErrServerClosed {
 			errCh <- fmt.Errorf("dashboard server: %w", err)
 		}
 	}()
 
-	// br-GI-17-06's 24-hour purge ticker, alongside the startup run above —
-	// a tool that is opened and closed around work sessions may never see a
-	// 24-hour boundary on its own, but this keeps a long-lived process from
-	// only ever purging once.
-	purgeTicker := time.NewTicker(24 * time.Hour)
-	defer purgeTicker.Stop()
+	// One 24h maintenance goroutine. A second reader of the same ticker
+	// would steal alternate ticks. It starts only after both listeners are up.
+	var maint sync.WaitGroup
+	maint.Add(1)
 	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-purgeTicker.C:
-				purgeOnStartup(ctx, st, cfg.RetentionDays, log.Printf)
-			}
-		}
+		defer maint.Done()
+		runMaintenance(ctx, st, live.RetentionDays, live.HotDays)
 	}()
 
 	select {
@@ -192,12 +214,88 @@ func Serve(args []string) error {
 		log.Printf("serve: dashboard shutdown: %v", err)
 	}
 
-	// ctx is already cancelled by the signal (or by the error path above),
-	// which is what makes cons.Run perform its own bounded drain-and-flush
-	// and return — see internal/consumer's shutdownBound.
 	<-consumerDone
+	joined := make(chan struct{})
+	go func() {
+		maint.Wait()
+		close(joined)
+	}()
+	if waitJoined(joined, shutdownGrace) {
+		closeStoreThenRemoveState(st, sf)
+	} else {
+		log.Printf("serve: maintenance goroutine still running; leaving state file in place")
+	}
+	sf.leaveFile() // the deferred remove must not run after this point
 
 	return nil
+}
+
+// closeStoreThenRemoveState runs the ordered teardown (bead 08:29/:56/:72): the
+// store is closed first, and only after Close returns does the shared gated
+// state-file removal run, so the file's disappearance is a sound proof that the
+// store behind it is closed. Split out from Serve so that ordering is testable
+// with a Close-observing wrapper — Serve itself cannot be driven from a test
+// (two real listeners, a blocking signal context), which is why the rest of the
+// teardown lives in statefile.go's serveStateFile. io.Closer is satisfied by
+// *store.Store (its Close is the production caller's argument).
+func closeStoreThenRemoveState(st io.Closer, sf *serveStateFile) {
+	if err := st.Close(); err != nil {
+		log.Printf("serve: close store: %v", err)
+	}
+	sf.remove()
+}
+
+func newEarlyState() serveState {
+	exe, _ := os.Executable()
+	cwd, _ := os.Getwd()
+	return serveState{
+		PID:       os.Getpid(),
+		Exe:       exe,
+		Args:      append([]string(nil), os.Args[1:]...),
+		Cwd:       cwd,
+		StartedAt: time.Now().UTC(),
+	}
+}
+
+// waitJoined reports whether the maintenance goroutine finished before grace.
+// A false result means a batch is still running, so the state file stays.
+func waitJoined(ch <-chan struct{}, grace time.Duration) bool {
+	select {
+	case <-ch:
+		return true
+	case <-time.After(grace):
+		return false
+	}
+}
+
+func runMaintenance(ctx context.Context, st *store.Store, days func() int, hotDays func() int) {
+	runMaintenancePass(ctx, st, days, hotDays)
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if ctx.Err() != nil {
+				return
+			}
+			runMaintenancePass(ctx, st, days, hotDays)
+		}
+	}
+}
+
+func runMaintenancePass(ctx context.Context, st *store.Store, days func() int, hotDays func() int) {
+	purgeOnStartup(ctx, st, days(), log.Printf)
+	if hot := hotDays(); hot > 0 {
+		boundary := time.Now().Add(-time.Duration(hot) * 24 * time.Hour)
+		if err := st.ArchiveOlderThan(ctx, boundary); err != nil {
+			log.Printf("serve: archive: %v", err)
+		}
+		if err := st.GCArchive(ctx); err != nil {
+			log.Printf("serve: gc archive: %v", err)
+		}
+	}
 }
 
 // wireCalendar installs cal on both cold-path seams that take it as an

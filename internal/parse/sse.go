@@ -44,6 +44,35 @@ type sseEvent struct {
 // response body. An unrecognised content type returns a zero Usage and a
 // nil error — an upstream shape change must degrade to "no tokens
 // recorded", never to broken capture.
+// ExtractUsageWithTail recovers usage from a capped SSE head plus the
+// overflow tail. For text/event-stream with a non-empty tail it feeds the
+// head, a blank line that closes the head's torn final event, then the tail
+// — the tail's torn first event fails to parse and is skipped.
+//
+// ponytail: JSON over the cap still loses usage; the upgrade path is
+// tail-based JSON extraction.
+func ExtractUsageWithTail(head, tail []byte, contentType string) (Usage, error) {
+	ct := contentType
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	if ct == "text/event-stream" && len(tail) > 0 {
+		p := NewParser()
+		if err := p.Feed(head); err != nil {
+			return p.usage, err
+		}
+		if err := p.Feed([]byte("\n\n")); err != nil {
+			return p.usage, err
+		}
+		if err := p.Feed(tail); err != nil {
+			return p.usage, err
+		}
+		return p.Finish()
+	}
+	return ExtractUsage(head, contentType)
+}
+
 func ExtractUsage(respBody []byte, contentType string) (Usage, error) {
 	ct := contentType
 	if i := strings.IndexByte(ct, ';'); i >= 0 {

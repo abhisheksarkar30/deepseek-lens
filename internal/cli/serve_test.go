@@ -3,9 +3,12 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,3 +240,161 @@ func TestWireCalendarNamesBothSeams(t *testing.T) {
 type recordingDash struct{ got pricing.Calendar }
 
 func (d *recordingDash) SetCalendar(cal pricing.Calendar) { d.got = cal }
+
+func TestMaintenancePassPurgesThenArchives(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "lens.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx := context.Background()
+	seedRequest(t, st, func(r *store.Request) {
+		r.StartedAt = time.Now().Add(-40 * 24 * time.Hour)
+		r.ReqBody = []byte("purge-me")
+	})
+	seedRequest(t, st, func(r *store.Request) {
+		r.StartedAt = time.Now().Add(-10 * 24 * time.Hour)
+		r.ReqBody = []byte("archive-me")
+	})
+	runMaintenancePass(ctx, st, func() int { return 30 }, func() int { return 7 })
+	left, err := st.ListRequests(ctx, store.Filter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 {
+		t.Fatalf("rows = %d, want the warm row only", len(left))
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "archive"))
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("archive dir: %v entries=%d", err, len(entries))
+	}
+	got, err := st.GetRequest(ctx, left[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.ReqBody) != "archive-me" {
+		t.Fatalf("hydrated body = %q", got.ReqBody)
+	}
+}
+
+func TestStateFileStaysUntilMaintenanceReturns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "serve.state.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	joined := make(chan struct{})
+	go func() {
+		<-release
+		close(joined)
+	}()
+	if waitJoined(joined, 30*time.Millisecond) {
+		t.Fatal("joined before the batch returned")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("state file removed while the batch was in flight")
+	}
+	close(release)
+	if !waitJoined(joined, time.Second) {
+		t.Fatal("did not join after the batch returned")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestServePreListenerReturnLeavesNoStateFile drives the actual Serve entry
+// point for bead 08:65 ("a pre-listener Serve return leaves no state file"),
+// not just serveStateFile.remove in isolation: a wiring regression that dropped
+// the early-create + deferred removal would escape the mechanism-level test but
+// not this one. The pre-listener return is reached by pointing --db-path at a
+// directory — store.Open's schema Exec fails (store.go:135) before any
+// net.Listen, so no port is touched and the early-create file must be gone.
+func TestServePreListenerReturnLeavesNoStateFile(t *testing.T) {
+	dir := t.TempDir()
+	// A directory, not a file: store.Open's MkdirAll(dir) succeeds, then the
+	// schema Exec on the path fails, so Serve returns at the store-open phase.
+	dbDir := filepath.Join(dir, "not-a-db")
+	if err := os.Mkdir(dbDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Serve([]string{"--db-path", dbDir})
+	if err == nil || !strings.Contains(err.Error(), "open store") {
+		t.Fatalf("Serve with a directory --db-path = %v, want a store-open failure", err)
+	}
+	if _, statErr := os.Stat(serveStatePath(dbDir)); !os.IsNotExist(statErr) {
+		t.Fatalf("pre-listener Serve return left the state file behind: %v", statErr)
+	}
+}
+
+// TestServeLostBindLeavesStateFile drives the real Serve entry point past the
+// pre-listener phases to the proxy net.Listen (serve.go:157), so the
+// bindFailed() veto wired at serve.go:159 is exercised — not just
+// serveStateFile.bindFailed in isolation (statefile_test.go:78). A listener
+// held for the test already occupies cfg.ProxyAddr, so the proxy bind fails
+// after the early-create state file exists and Serve returns at that site. The
+// deferred removal must then be vetoed and leave the file, because this process
+// lost a bind to a live winner (F10.1). A regression that dropped the
+// bindFailed() call would let the pid-guard match and delete the file.
+func TestServeLostBindLeavesStateFile(t *testing.T) {
+	occ, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy proxy addr: %v", err)
+	}
+	defer occ.Close()
+
+	// A free dashboard addr, so config.Validate still sees a valid loopback
+	// value; Serve never reaches the dashboard bind (the proxy bind fails first).
+	dash, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pick dashboard addr: %v", err)
+	}
+	dashAddr := dash.Addr().String()
+	dash.Close()
+
+	db := filepath.Join(t.TempDir(), "lens.db")
+	err = Serve([]string{
+		"--db-path", db,
+		"--proxy-addr", occ.Addr().String(),
+		"--dashboard-addr", dashAddr,
+	})
+	if err == nil || !strings.Contains(err.Error(), "listen proxy") {
+		t.Fatalf("Serve with an occupied proxy addr = %v, want a listen-proxy failure", err)
+	}
+	if _, statErr := os.Stat(serveStatePath(db)); statErr != nil {
+		t.Fatalf("lost-bind Serve removed the state file: %v", statErr)
+	}
+}
+
+// closeRecorder records that Close was called and lets the caller observe the
+// world at that instant; it satisfies io.Closer so closeStoreThenRemoveState
+// takes it in place of *store.Store.
+type closeRecorder struct{ onClose func() error }
+
+func (c closeRecorder) Close() error { return c.onClose() }
+
+// TestStateFileRemovalHappensAfterStoreClose pins bead 08:72: the gated removal
+// is the last act of shutdown, strictly after st.Close() returns, so the file's
+// disappearance proves the store is closed. The Close-observing wrapper sees
+// the file still present; only the later shared removal deletes it.
+func TestStateFileRemovalHappensAfterStoreClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "serve.state.json")
+	sf, err := openServeStateFile(path, newEarlyState())
+	if err != nil {
+		t.Fatal(err)
+	}
+	presentDuringClose := false
+	closeStoreThenRemoveState(closeRecorder{func() error {
+		_, statErr := os.Stat(path)
+		presentDuringClose = statErr == nil
+		return nil
+	}}, sf)
+	if !presentDuringClose {
+		t.Fatal("state file was already gone during st.Close(): removal ran before Close returned")
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("state file still present after close+remove: %v", statErr)
+	}
+}

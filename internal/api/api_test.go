@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
 
+	"github.com/abhisheksarkar30/deepseek-lens/internal/config"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/consumer"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/pricing"
 	"github.com/abhisheksarkar30/deepseek-lens/internal/sink"
@@ -112,6 +114,41 @@ func TestListRequests(t *testing.T) {
 	got := decodeJSON[[]*store.Request](t, rr.Body)
 	if len(got) != 5 {
 		t.Fatalf("got %d requests, want 5", len(got))
+	}
+}
+
+func TestListRequestsUntil(t *testing.T) {
+	st := newTestStore(t)
+	t0 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	seedRequest(t, st, func(r *store.Request) { r.StartedAt = t0 })
+	seedRequest(t, st, func(r *store.Request) { r.StartedAt = t0.Add(time.Hour) })
+	handler, _, _, _ := newTestAPI(t, st)
+
+	until := url.QueryEscape(t0.Add(time.Hour).Format(time.RFC3339))
+	since := url.QueryEscape(t0.Format(time.RFC3339))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/requests?since="+since+"&until="+until, nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	got := decodeJSON[[]*store.Request](t, rr.Body)
+	if len(got) != 1 {
+		t.Fatalf("window len = %d, want 1", len(got))
+	}
+	if rr.Header().Get("X-Total-Count") != "1" {
+		t.Fatalf("X-Total-Count = %q, want 1", rr.Header().Get("X-Total-Count"))
+	}
+
+	rr = httptest.NewRecorder()
+	later := url.QueryEscape(t0.Add(2 * time.Hour).Format(time.RFC3339))
+	earlier := url.QueryEscape(t0.Add(3 * time.Hour).Format(time.RFC3339))
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/requests?since="+earlier+"&until="+later, nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("inverted status = %d, want 200", rr.Code)
+	}
+	empty := decodeJSON[[]*store.Request](t, rr.Body)
+	if len(empty) != 0 {
+		t.Fatalf("since > until len = %d, want 0", len(empty))
 	}
 }
 
@@ -638,6 +675,31 @@ func TestStatsInvalidGranularityIs400(t *testing.T) {
 	}
 }
 
+func TestStatsTzOffset(t *testing.T) {
+	st := newTestStore(t)
+	a := time.Date(2026, 1, 1, 20, 0, 0, 0, time.UTC)
+	b := time.Date(2026, 1, 2, 2, 0, 0, 0, time.UTC)
+	seedRequest(t, st, func(r *store.Request) { r.StartedAt = a })
+	seedRequest(t, st, func(r *store.Request) { r.StartedAt = b })
+	handler, _, _, _ := newTestAPI(t, st)
+
+	for _, q := range []string{"?tz_offset=abc", "?tz_offset=900", "?tz_offset=-900"} {
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/stats"+q, nil))
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400", q, rr.Code)
+		}
+	}
+	utc := getStats(t, handler, "")
+	if len(utc.ByPeriod) != 2 {
+		t.Fatalf("default buckets = %d, want 2", len(utc.ByPeriod))
+	}
+	ist := getStats(t, handler, "?tz_offset=330")
+	if len(ist.ByPeriod) != 1 {
+		t.Fatalf("tz_offset=330 buckets = %+v, want 1", ist.ByPeriod)
+	}
+}
+
 func TestStatsMalformedUntilIs400(t *testing.T) {
 	st := newTestStore(t)
 	handler, _, _, _ := newTestAPI(t, st)
@@ -821,6 +883,172 @@ func TestEmbeddedAssets(t *testing.T) {
 	}
 }
 
+func TestPostReload(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".deepseek-lens")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := newTestStore(t)
+	handler, _, _, _ := newTestAPI(t, st)
+	handler.SetRetention(3, st)
+	boot := config.Default()
+	boot.RetentionDays = 3
+	handler.SetReload([]string{"--capture=false"}, boot)
+
+	post := func(remote, origin string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/reload", nil)
+		req.RemoteAddr = remote
+		req.Host = "127.0.0.1"
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		return rr
+	}
+
+	write("RetentionDays = 9\n")
+	rr := post("192.0.2.1:9", "")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("remote status = %d, want 403", rr.Code)
+	}
+	rr = post("127.0.0.1:9", "http://evil.example")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("origin status = %d, want 403", rr.Code)
+	}
+	rr = post("127.0.0.1:9", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("reload status = %d: %s", rr.Code, rr.Body.String())
+	}
+	got := decodeJSON[reloadResponse](t, rr.Body)
+	if len(got.Applied) != 1 || got.Applied[0] != "RetentionDays" || got.Unchanged {
+		t.Fatalf("applied = %+v", got)
+	}
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/retention", nil))
+	ret := decodeJSON[retentionResponse](t, get.Body)
+	if ret.Days != 9 {
+		t.Fatalf("retention days = %d, want 9", ret.Days)
+	}
+
+	write("RetentionDays = -1\n")
+	rr = post("127.0.0.1:9", "")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status = %d, want 400", rr.Code)
+	}
+	get = httptest.NewRecorder()
+	handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/retention", nil))
+	ret = decodeJSON[retentionResponse](t, get.Body)
+	if ret.Days != 9 {
+		t.Fatalf("after invalid reload days = %d, want 9", ret.Days)
+	}
+
+	write("RetentionDays = 9\nProxyAddr = \"127.0.0.1:9\"\nBodyCapBytes = 8388608\nCapture = false\n")
+	rr = post("127.0.0.1:9", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("restart-required status = %d: %s", rr.Code, rr.Body.String())
+	}
+	got = decodeJSON[reloadResponse](t, rr.Body)
+	joined := strings.Join(got.RestartRequired, ",")
+	for _, name := range []string{"ProxyAddr", "BodyCapBytes", "Capture"} {
+		if !strings.Contains(joined, name) {
+			t.Errorf("restart_required %q missing %s", joined, name)
+		}
+	}
+	if len(got.Applied) != 0 {
+		t.Fatalf("applied = %v, want none", got.Applied)
+	}
+
+	write("RetentionDays = 9\nHotDays = 2\n")
+	rr = post("127.0.0.1:9", "")
+	got = decodeJSON[reloadResponse](t, rr.Body)
+	if rr.Code != http.StatusOK || len(got.Applied) != 1 || got.Applied[0] != "HotDays" || got.Unchanged {
+		t.Fatalf("hot days reload = %d %+v", rr.Code, got)
+	}
+	if handler.live.HotDays() != 2 {
+		t.Fatalf("live HotDays = %d, want 2", handler.live.HotDays())
+	}
+
+	write("RetentionDays = 7\nHotDays = 9\n")
+	rr = post("127.0.0.1:9", "")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid hot days status = %d", rr.Code)
+	}
+	if handler.live.HotDays() != 2 || handler.live.RetentionDays() != 9 {
+		t.Fatalf("rolled back live = hot %d retention %d", handler.live.HotDays(), handler.live.RetentionDays())
+	}
+
+	write("RetentionDays = 9\nHotDays = 2\nBodyCapBytes = 1048576\n")
+	rr = post("127.0.0.1:9", "")
+	got = decodeJSON[reloadResponse](t, rr.Body)
+	if !strings.Contains(strings.Join(got.RestartRequired, ","), "BodyCapBytes") || len(got.Applied) != 0 || got.Unchanged {
+		t.Fatalf("body cap reload = %+v", got)
+	}
+	if handler.live.HotDays() != 2 || handler.boot.BodyCapBytes == 1048576 {
+		t.Fatalf("running hot=%d boot cap=%d", handler.live.HotDays(), handler.boot.BodyCapBytes)
+	}
+
+	handler.SetReload([]string{"--no-capture"}, boot)
+	write("RetentionDays = 9\n")
+	rr = post("127.0.0.1:9", "")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("--no-capture status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+	handler.SetReload([]string{"--capture=false"}, boot)
+	rr = post("127.0.0.1:9", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("translated --capture=false status = %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPostShutdown(t *testing.T) {
+	st := newTestStore(t)
+	handler, _, _, _ := newTestAPI(t, st)
+	stopped := false
+	handler.SetStop(func() { stopped = true })
+
+	remote := httptest.NewRequest(http.MethodPost, "/api/shutdown", nil)
+	remote.RemoteAddr = "192.0.2.1:9"
+	remote.Host = "127.0.0.1"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, remote)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("remote caller status = %d, want 403", rr.Code)
+	}
+
+	cross := httptest.NewRequest(http.MethodPost, "/api/shutdown", nil)
+	cross.RemoteAddr = "127.0.0.1:9"
+	cross.Host = "127.0.0.1"
+	cross.Header.Set("Origin", "http://evil.example")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, cross)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin status = %d, want 403", rr.Code)
+	}
+
+	ok := httptest.NewRequest(http.MethodPost, "/api/shutdown", nil)
+	ok.RemoteAddr = "127.0.0.1:9"
+	ok.Host = "127.0.0.1"
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, ok)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("loopback status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	if !stopped {
+		t.Fatal("stop was not called")
+	}
+}
+
 func TestMethodGuard(t *testing.T) {
 	st := newTestStore(t)
 	handler, _, _, _ := newTestAPI(t, st)
@@ -839,6 +1067,7 @@ func TestMalformedQueryParams(t *testing.T) {
 	cases := []string{
 		"/api/requests?limit=abc",
 		"/api/requests?since=notatime",
+		"/api/requests?until=notatime",
 	}
 	for _, path := range cases {
 		rr := httptest.NewRecorder()

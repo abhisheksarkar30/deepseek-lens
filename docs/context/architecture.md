@@ -36,7 +36,7 @@ together at once; every other CLI command opens the store or dashboard API on it
 | Package | Responsibility | Evidence |
 |---|---|---|
 | `internal/config` | Loads `Config` from flags > env (`LENS_*`) > `~/.deepseek-lens/config.toml` > defaults; validates loopback binding | [internal/config/config.go](../../internal/config/config.go) |
-| `internal/proxy` | The hot path: transparent streaming reverse proxy to DeepSeek, tees request/response bytes into the sink, redacts sensitive headers, never buffers | [internal/proxy/proxy.go](../../internal/proxy/proxy.go) |
+| `internal/proxy` | The hot path: transparent streaming reverse proxy to DeepSeek, tees request/response bytes into the sink, keeps a 16 KiB response tail past the body cap, redacts sensitive headers, never buffers the stream | [internal/proxy/proxy.go](../../internal/proxy/proxy.go) |
 | `internal/sink` | Bounded, non-blocking channel handoff between the proxy (producer) and consumer (consumer); drops under load rather than delaying the client | [internal/sink/sink.go](../../internal/sink/sink.go) |
 | `internal/parse` | Pure functions: extracts `Meta` (request shape) and `Usage` (token/response shape) from captured bytes, including incremental SSE parsing | [internal/parse/meta.go](../../internal/parse/meta.go), [internal/parse/sse.go](../../internal/parse/sse.go) |
 | `internal/pricing` | Loads/saves the `~/.deepseek-lens/prices.toml` rate table (hand-rolled flat format, not real TOML), computes per-call cost, and owns the peak `Calendar` — the off-peak/调休 date sets that decide whether a call inside the 01:00–04:00 / 06:00–10:00 UTC window is billed at 2x or at 1x | [internal/pricing/pricing.go](../../internal/pricing/pricing.go), [internal/pricing/table.go](../../internal/pricing/table.go), [internal/pricing/calendar.go](../../internal/pricing/calendar.go) |
@@ -45,15 +45,15 @@ together at once; every other CLI command opens the store or dashboard API on it
 | `internal/consumer` | The cold-path pipeline: drains the sink, runs parse → session → cost → insert (batched) → analyzers → session fold, with full per-call error containment | [internal/consumer/consumer.go](../../internal/consumer/consumer.go) |
 | `internal/store` | SQLite persistence: one writer connection (`SetMaxOpenConns(1)`), up to 4 reader connections, WAL mode | [internal/store/store.go](../../internal/store/store.go), [internal/store/schema.sql](../../internal/store/schema.sql) |
 | `internal/replay` | Pure helpers for `lens replay`: JSON-path body edits, outcome diffing | [internal/replay/edit.go](../../internal/replay/edit.go), [internal/replay/replay.go](../../internal/replay/replay.go) |
-| `internal/api` | Dashboard's mostly-read JSON API + SSE broker + three write routes (`POST /api/requests/{id}/replay`, `POST /api/prices`, `POST /api/purge`) + embedded static asset mount | [internal/api/api.go](../../internal/api/api.go), [internal/api/broker.go](../../internal/api/broker.go) |
+| `internal/api` | Dashboard's mostly-read JSON API + SSE broker + five write routes (replay, prices, purge, shutdown, reload) + embedded static asset mount | [internal/api/api.go](../../internal/api/api.go), [internal/api/broker.go](../../internal/api/broker.go) |
 | `internal/web` | `go:embed`-ed dashboard assets (`index.html`, `app.js`, `style.css`) | [internal/web/embed.go](../../internal/web/embed.go) |
-| `internal/cli` | Twelve subcommand implementations (`doctor`, `serve`, `ls`, `show`, `tail`, `stats`, `sessions`, `warnings`, `export`, `prices`, `replay`, `purge`) | [internal/cli/](../../internal/cli/) |
+| `internal/cli` | Subcommands: `doctor`, `serve`, `ls`, `show`, `tail`, `stats`, `sessions`, `warnings`, `export`, `prices`, `replay`, `purge`, `shutdown`, `restart`, `reload`, `archive`. `serve` writes `serve.state.json` beside the database before `store.Open`, then runs one maintenance goroutine (purge, then archive, then archive GC) after both listeners are up | [internal/cli/](../../internal/cli/) |
 
 ## Cross-cutting concerns
 
 - **Auth**: none. The proxy and dashboard bind loopback-only by default
-  (`config.Validate`'s `validateLoopback`); `--allow-remote` is required to bind elsewhere. The three
-  state-changing routes — replay, prices, and purge — share one Origin/Host allowlist
+  (`config.Validate`'s `validateLoopback`); `--allow-remote` is required to bind elsewhere. The five
+  state-changing routes — replay, prices, purge, shutdown, and reload — share one Origin/Host allowlist
   (`replayOriginReject`, parameterized by action) instead of a credential — see
   [security-and-permissions.md](security-and-permissions.md).
 - **Logging**: stdlib `log` package only, to stderr (`log.Printf` throughout

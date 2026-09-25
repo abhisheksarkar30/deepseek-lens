@@ -15,7 +15,7 @@
   ([internal/session/session.go:12-28](../../internal/session/session.go)), the flat (non-TOML)
   config/price file parser
   ([internal/config/config.go:140-142](../../internal/config/config.go)), and the replay row-poll
-  ([internal/api/api.go:649](../../internal/api/api.go)).
+  ([internal/api/api.go:706](../../internal/api/api.go)).
 
 ## Dashboard (`internal/web`) conventions
 
@@ -67,7 +67,7 @@ rather than by a framework's idiom:
   [internal/consumer/consumer.go:64-70](../../internal/consumer/consumer.go)), `consumer.PriceTable`,
   `consumer.Analyzer`, `consumer.SessionResolver`/`SessionAggregator`
   ([internal/consumer/analyzer.go](../../internal/consumer/analyzer.go)), `api.Store`
-  ([internal/api/api.go:29-39](../../internal/api/api.go)).
+  ([internal/api/api.go:33-52](../../internal/api/api.go)).
 - **Optional capability interfaces**: a store gains batched writes by implementing `batchInserter`
   (`InsertRequests`) — a type assertion (`c.store.(batchInserter)`) is checked at call time rather
   than being part of the required `Store` interface, so a minimal test fake still compiles
@@ -125,6 +125,7 @@ convention and [testing-and-quality.md](testing-and-quality.md) for the CI gates
   secret scan; refuses every commit until that scan is installed).
 - Commit subject format: `GI#<n> <type>: <lowercase summary> (br-GI-<n>-<NN>)`, `<type>` ∈
   `feat`/`fix`/`docs`/`chore`/`plan`/`beads`/`review`.
-- Branches: `GI-<n>-<kebab-slug>` cut from `develop`. PRs into `main` must come from `develop` with a
+- Branches: `GI-<n>-<kebab-slug>` cut from `main`. A story branch PRs directly into `main`; the head
+  must match `GI-<n>-…` and its issue must be one the body closes, with a
   `GI#<n>`-prefixed title and a closing keyword in the body —
   [.github/workflows/branch-guard.yml](../../.github/workflows/branch-guard.yml).

@@ -28,7 +28,13 @@
     <div class="feed-controls">
       <button id="pause-btn" type="button">Pause</button>
       <span id="feed-status" class="feed-status">live</span>
+      <label>From <input type="datetime-local" id="feed-from" step="3600"></label>
+      <label>To <input type="datetime-local" id="feed-to" step="3600"></label>
+      <button id="feed-clear" type="button">Clear</button>
+      <span id="feed-range-msg" class="hint"></span>
     </div>
+    <p id="feed-range-banner" class="hint" hidden>range view — live paused</p>
+    <div id="feed-pager" class="pager" hidden></div>
     <div class="table-wrap">
       <table>
         <thead>
@@ -76,8 +82,15 @@
           <option value="month">Month</option>
         </select>
       </label>
-      <label>From <input type="date" id="stats-from"></label>
-      <label>To <input type="date" id="stats-to"></label>
+      <label>Days in
+        <select id="stats-tz">
+          <option value="local" selected>Local</option>
+          <option value="0">UTC</option>
+          <option value="480">UTC+8</option>
+        </select>
+      </label>
+      <label>From <input type="datetime-local" id="stats-from" step="3600"></label>
+      <label>To <input type="datetime-local" id="stats-to" step="3600"></label>
     </div>
     <!-- The metric buttons carry .metric, not .tab, and deliberately no
          data-view: showView() sweeps every .tab to re-apply active from
@@ -202,6 +215,7 @@
 <div id="detail-modal" class="modal" hidden>
   <div class="modal-content">
     <button id="detail-close" class="modal-close" type="button" aria-label="close">&times;</button>
+    <p id="detail-archive" class="hint" hidden></p>
     <div id="detail-body"></div>
   </div>
 </div>

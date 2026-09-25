@@ -61,7 +61,9 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 	if err != nil {
 		return fmt.Errorf("stats: by model: %w", err)
 	}
-	byDay, err := st.StatsByPeriod(ctx, sinceTime, time.Time{}, "day")
+	// lens stats stays UTC. The dashboard defaults to Local, so the two show
+	// different daily totals for the same data when the zone is not UTC.
+	byDay, err := st.StatsByPeriod(ctx, sinceTime, time.Time{}, "day", 0)
 	if err != nil {
 		return fmt.Errorf("stats: by day: %w", err)
 	}
@@ -81,7 +83,7 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 	// CLI is a single-user dev tool where an approximate mean over an
 	// unusually large window is an acceptable trade. Add a real AVG query
 	// if that precision ever matters.
-	reqs, err := st.ListRequests(ctx, store.Filter{Since: sinceTime, Limit: store.DefaultLimit})
+	reqs, err := st.ListRequests(ctx, store.Filter{Since: sinceTime, Limit: store.DefaultLimit, WithBodies: false})
 	if err != nil {
 		return fmt.Errorf("list requests: %w", err)
 	}

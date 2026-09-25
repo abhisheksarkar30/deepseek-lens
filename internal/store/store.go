@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -61,6 +62,13 @@ const requestColumns = `id, started_at, ttfb_ns, duration_ns, method, path, remo
 	session_header, session_id, cost_usd, cost_source,
 	replay_of, replay_edits, prefix_hash`
 
+const requestColumnsNoBody = `id, started_at, ttfb_ns, duration_ns, method, path, remote_addr, status,
+	req_headers, resp_headers, NULL, NULL,
+	input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+	stop_reason, model_requested, model_resolved, error_text,
+	session_header, session_id, cost_usd, cost_source,
+	replay_of, replay_edits, prefix_hash`
+
 // insertColumns is requestColumns minus id (AUTOINCREMENT). insertRequestSQL
 // is built from it so the column list and the "?" placeholder count can
 // never drift apart.
@@ -85,6 +93,12 @@ var insertRequestSQL = fmt.Sprintf(
 type Store struct {
 	writer *sql.DB
 	reader *sql.DB
+	dbPath string
+	// dayOpens counts archive day-file opens. Tests read it. Atomic because
+	// the read path (hydrateBodies, from API handler goroutines) and the
+	// maintenance path (writeDay/sumDayBytes/execDay/GCArchive) increment it
+	// concurrently in a live serve.
+	dayOpens atomic.Int64
 }
 
 // Open creates dbPath's parent directory (0700 if absent), opens the writer
@@ -134,7 +148,7 @@ func Open(dbPath string) (*Store, error) {
 	_ = os.Chmod(dbPath+"-wal", 0o600)
 	_ = os.Chmod(dbPath+"-shm", 0o600)
 
-	return &Store{writer: writer, reader: reader}, nil
+	return &Store{writer: writer, reader: reader, dbPath: dbPath}, nil
 }
 
 // Close closes both connections.
@@ -305,6 +319,9 @@ func (s *Store) GetRequest(ctx context.Context, id int64) (*Request, error) {
 		}
 		return nil, fmt.Errorf("store: get request: %w", err)
 	}
+	if err := s.hydrateBodies(ctx, []*Request{r}); err != nil {
+		return nil, err
+	}
 	return r, nil
 }
 
@@ -330,6 +347,10 @@ func requestWhere(f Filter) (string, []interface{}) {
 	if !f.Since.IsZero() {
 		where = append(where, "started_at >= ?")
 		args = append(args, f.Since.UnixNano())
+	}
+	if !f.Until.IsZero() {
+		where = append(where, "started_at < ?")
+		args = append(args, f.Until.UnixNano())
 	}
 	if f.SessionID != "" {
 		where = append(where, "session_id = ?")
@@ -399,7 +420,11 @@ func (s *Store) ListRequests(ctx context.Context, f Filter) ([]*Request, error) 
 	// id DESC is the tiebreaker, not decoration: the consumer batch-inserts,
 	// so rows sharing a started_at are normal, and without a total order a
 	// page boundary can serve one row twice or skip it.
-	query := "SELECT " + requestColumns + " FROM requests" + where +
+	cols := requestColumns
+	if !f.WithBodies {
+		cols = requestColumnsNoBody
+	}
+	query := "SELECT " + cols + " FROM requests" + where +
 		" ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, clampOffset(f.Offset))
 
@@ -417,7 +442,15 @@ func (s *Store) ListRequests(ctx context.Context, f Filter) ([]*Request, error) 
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if f.WithBodies {
+		if err := s.hydrateBodies(ctx, out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // CountRequests returns how many requests match f's predicates, ignoring
@@ -568,19 +601,23 @@ func periodFormat(granularity string) (string, error) {
 // bucket — hour, day, week, or month per granularity — for dashboard charts,
 // over requests in [since, until). Buckets with no rows are absent, not
 // zero-filled, so callers must tolerate a non-contiguous series.
-func (s *Store) StatsByPeriod(ctx context.Context, since, until time.Time, granularity string) ([]PeriodStat, error) {
+func (s *Store) StatsByPeriod(ctx context.Context, since, until time.Time, granularity string, tzOffsetMin int) ([]PeriodStat, error) {
 	format, err := periodFormat(granularity)
 	if err != nil {
 		return nil, err
 	}
 	where, args := statsWindow(since, until)
+	// ponytail: fixed offset, DST is an hour off across a change.
+	// The modifier is a bound parameter built from the integer, never spliced SQL.
+	shift := fmt.Sprintf("%d seconds", tzOffsetMin*60)
+	qargs := append([]any{shift}, args...)
 	rows, err := s.reader.QueryContext(ctx, `
-		SELECT strftime('`+format+`', started_at / 1000000000, 'unixepoch'),
+		SELECT strftime('`+format+`', started_at / 1000000000, 'unixepoch', ?),
 			COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0),
 			COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0)
 		FROM requests`+where+`
 		GROUP BY 1
-		ORDER BY 1`, args...)
+		ORDER BY 1`, qargs...)
 	if err != nil {
 		return nil, fmt.Errorf("store: stats by period: %w", err)
 	}
@@ -972,6 +1009,16 @@ func (s *Store) purgeWhere(ctx context.Context, where string, args ...any) (Purg
 	}
 	sessionRows.Close()
 
+	targets, err := archiveTargets(ctx, tx, where, args...)
+	if err != nil {
+		return PurgeResult{}, fmt.Errorf("store: purge: archive targets: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM body_archive WHERE request_id IN (SELECT id FROM requests WHERE "+where+")", args...,
+	); err != nil {
+		return PurgeResult{}, fmt.Errorf("store: purge: archive markers: %w", err)
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM warnings WHERE request_id IN (SELECT id FROM requests WHERE "+where+")", args...,
 	); err != nil {
@@ -995,6 +1042,9 @@ func (s *Store) purgeWhere(ctx context.Context, where string, args ...any) (Purg
 
 	if err := tx.Commit(); err != nil {
 		return PurgeResult{}, fmt.Errorf("store: purge: commit: %w", err)
+	}
+	if err := s.deleteDayRows(ctx, targets); err != nil {
+		return PurgeResult{Deleted: n, SessionsReconciled: len(affected)}, fmt.Errorf("store: purge: day files: %w", err)
 	}
 	return PurgeResult{Deleted: n, SessionsReconciled: len(affected)}, nil
 }
@@ -1061,7 +1111,11 @@ func (s *Store) PurgeableBytes(ctx context.Context, cutoff time.Time) (int64, er
 	if err != nil {
 		return 0, fmt.Errorf("store: purgeable bytes: %w", err)
 	}
-	return n, nil
+	archived, err := s.archivedBytes(ctx, "started_at < ?", cutoff.UnixNano())
+	if err != nil {
+		return 0, err
+	}
+	return n + archived, nil
 }
 
 // CountUnpriced and UnpricedBytes preview PurgeUnpriced's exact predicate
@@ -1088,7 +1142,11 @@ func (s *Store) UnpricedBytes(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("store: unpriced bytes: %w", err)
 	}
-	return n, nil
+	archived, err := s.archivedBytes(ctx, purgeUnpricedWhere)
+	if err != nil {
+		return 0, err
+	}
+	return n + archived, nil
 }
 
 // Vacuum runs VACUUM on the writer connection — the only path to it from

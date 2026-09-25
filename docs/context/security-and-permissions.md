@@ -2,9 +2,10 @@
 
 # Security & Permissions
 
-This is the highest-stakes module in this codebase per [CLAUDE.md](../../CLAUDE.md): "Full bodies
-*are* stored (256KB cap per body, configurable)... the content — every prompt and every file the
-agent read — is the asset this repo is protecting."
+This is the highest-stakes module in this codebase per [CLAUDE.md](../../CLAUDE.md): full bodies
+are stored. The shipped cap is 256 KiB per body and is configurable (8 MiB is the operator opt-in).
+A 16 KiB tail past that cap still carries `usage`. The content — every prompt and every file the
+agent read — is the asset this repo is protecting.
 
 ## AuthN / AuthZ model
 
@@ -28,13 +29,15 @@ three independent controls:
 ## Sensitive permissions & consent
 
 Not applicable in the mobile/platform-permission sense — this is a server proxy, not a client app
-requesting OS-level permissions. The closest analog is the three write routes' authority:
+requesting OS-level permissions. The closest analog is the five write routes' authority:
 
 | Capability | Why needed | Where gated | Evidence |
 |---|---|---|---|
-| Replay (re-send a captured request, billable) | Lets a user or the dashboard UI resend a call against the real upstream | Off by default (`--replay`); Origin/Host allowlist checked before any I/O; `lens replay` gates spend above `ReplayCostThresholdUSD` behind `--yes` | [internal/api/api.go:432-545](../../internal/api/api.go), [internal/cli/replay.go:155-172](../../internal/cli/replay.go) |
+| Replay (re-send a captured request, billable) | Lets a user or the dashboard UI resend a call against the real upstream | Off by default (`--replay`); Origin/Host allowlist checked before any I/O; `lens replay` gates spend above `ReplayCostThresholdUSD` behind `--yes` | [internal/api/api.go:512-625](../../internal/api/api.go), [internal/cli/replay.go:155-172](../../internal/cli/replay.go) |
 | Set/unset a model's price rates | Lets the Settings tab or `lens prices --set` change what future calls cost | Always on; Origin/Host allowlist; invalid rate/model name rejected before write | [internal/api/prices.go](../../internal/api/prices.go) |
 | Purge rows (delete, by age or the unpriced predicate) | Lets the Settings tab or `lens purge` reclaim disk; the one destructive capability in the system | Always on; Origin/Host allowlist; `days > 0` required for the age-based mode; `lens purge` additionally requires `--yes` for a non-dry-run delete | [internal/api/purge.go](../../internal/api/purge.go), [internal/cli/purge.go](../../internal/cli/purge.go) |
+| Shutdown the running serve | Stops the proxy from the CLI without a console Ctrl-C | Origin/Host allowlist plus a loopback-caller check (`POST /api/shutdown`) | [internal/api/api.go](../../internal/api/api.go), [internal/cli/shutdown.go](../../internal/cli/shutdown.go) |
+| Reload config | Applies `RetentionDays` and `HotDays` on a running serve; other changes need a restart | Origin/Host allowlist plus a loopback-caller check (`POST /api/reload`) | [internal/api/api.go](../../internal/api/api.go), [internal/cli/reload.go](../../internal/cli/reload.go) |
 
 ## Role / access model
 
@@ -42,15 +45,16 @@ No roles — any local process that can reach the loopback ports has full read a
 can always set prices and purge data (subject to the Origin/Host guard), and, if `--replay` is on,
 can trigger a replay. This is a documented, deliberate trust boundary: "a local process that could
 forge past this [guard] could already read the SQLite file"
-([internal/api/api.go:710](../../internal/api/api.go)) — and, since GI-17, could already delete
+([internal/api/api.go:767](../../internal/api/api.go)) — and, since GI-17, could already delete
 rows from it via `lens purge` without going through the guard at all, which is why the guard's role
 is to stop a *browser*, not a local process with its own access to the file.
 
-### The Origin/Host allowlist shared by all three write routes
+### The Origin/Host allowlist shared by all five write routes
 
-`replayOriginReject` ([internal/api/api.go:675-733](../../internal/api/api.go)) runs before any store
-or upstream access and rejects on two conditions, for whichever of the three write routes calls it
-(replay, prices, purge — each passes its own `action` string, used only in the rejection message):
+`replayOriginReject` ([internal/api/api.go:885-912](../../internal/api/api.go)) runs before any store
+or upstream access and rejects on two conditions, for whichever of the five write routes calls it
+(replay, prices, purge, shutdown, reload — each passes its own `action` string, used only in the
+rejection message):
 
 - **`Host` must be loopback** — defends against DNS-rebinding pages that resolve their own hostname
   to `127.0.0.1` and then POST with a forged `Host`.

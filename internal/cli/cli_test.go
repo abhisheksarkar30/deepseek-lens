@@ -1486,4 +1486,83 @@ func TestDoctorReportsRetentionDays(t *testing.T) {
 	if !strings.Contains(buf.String(), "17") {
 		t.Errorf("doctor output does not report retention_days=17:\n%s", buf.String())
 	}
+	if !strings.Contains(buf.String(), "hot_days") {
+		t.Errorf("doctor output does not report hot_days:\n%s", buf.String())
+	}
+}
+
+func TestDoctorBodyCapWarn(t *testing.T) {
+	check := func(cap, hot int) doctorCheck {
+		t.Helper()
+		cfg := doctorCfg(t)
+		cfg.BodyCapBytes = cap
+		cfg.HotDays = hot
+		for _, c := range runChecks(cfg) {
+			if c.Name == "body_cap" {
+				return c
+			}
+		}
+		return doctorCheck{}
+	}
+	warn := check(8388608, 0)
+	if warn.Status != statusWarn || !strings.Contains(warn.Detail, "4096") {
+		t.Fatalf("cap warn = %+v", warn)
+	}
+	if got := check(8388608, 7); got.Name != "" {
+		t.Fatalf("hot days set should not warn: %+v", got)
+	}
+	if got := check(262144, 0); got.Name != "" {
+		t.Fatalf("default cap should not warn: %+v", got)
+	}
+}
+
+func TestDoctorHotDaysChecks(t *testing.T) {
+	t.Run("backup note", func(t *testing.T) {
+		cfg := doctorCfg(t)
+		cfg.HotDays = 7
+		found := false
+		for _, c := range runChecks(cfg) {
+			if c.Name == "hot_days_backup" && c.Status == statusWarn && strings.Contains(c.Detail, "lens.db-wal") && strings.Contains(c.Detail, "lens.db-shm") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("missing backup-first warning")
+		}
+	})
+	t.Run("unwritable archive", func(t *testing.T) {
+		cfg := doctorCfg(t)
+		parent := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.DBPath = filepath.Join(parent, "lens.db")
+		found := false
+		for _, c := range runChecks(cfg) {
+			if c.Name == "archive_writable" && c.Status == statusWarn {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("expected archive_writable WARN")
+		}
+	})
+	t.Run("large store suggests archival", func(t *testing.T) {
+		cfg := doctorCfg(t)
+		if err := os.WriteFile(cfg.DBPath, []byte("ab"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		old := archiveSuggestBytes
+		archiveSuggestBytes = 1
+		t.Cleanup(func() { archiveSuggestBytes = old })
+		found := false
+		for _, c := range runChecks(cfg) {
+			if c.Name == "archive_suggested" && c.Status == statusInfo {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("expected INFO archive suggestion")
+		}
+	})
 }

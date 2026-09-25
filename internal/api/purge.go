@@ -38,10 +38,11 @@ func (a *api) getRetention(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := retentionResponse{Days: a.retentionDays}
+	days := a.retentionDaysNow()
+	resp := retentionResponse{Days: days}
 
-	if a.retentionDays > 0 {
-		cutoff := time.Now().Add(-time.Duration(a.retentionDays) * 24 * time.Hour)
+	if days > 0 {
+		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
 		resp.Cutoff = &cutoff
 
 		count, oldest, newest, err := a.purge.CountPurgeable(r.Context(), cutoff)

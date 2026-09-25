@@ -483,3 +483,36 @@ func TestFullSinkDoesNotDelayClient(t *testing.T) {
 		t.Error("dropped = 0, want at least 1 (the sink was already full)")
 	}
 }
+
+func TestBoundedBufferTail(t *testing.T) {
+	b := newBoundedBuffer(8)
+	if _, err := b.Write([]byte("12345678")); err != nil {
+		t.Fatal(err)
+	}
+	if b.Tail() != nil {
+		t.Fatalf("tail before overflow = %q, want nil", b.Tail())
+	}
+	if _, err := b.Write([]byte("abcdef")); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b.Tail()); got != "abcdef" {
+		t.Fatalf("tail at first overflow = %q, want abcdef", got)
+	}
+	if string(b.Bytes()) != "12345678" {
+		t.Fatalf("head = %q", b.Bytes())
+	}
+
+	big := newBoundedBuffer(4)
+	payload := bytes.Repeat([]byte("x"), 4)
+	payload = append(payload, bytes.Repeat([]byte("y"), usageTailBytes+32)...)
+	if _, err := big.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	tail := big.Tail()
+	if len(tail) != usageTailBytes {
+		t.Fatalf("tail len = %d, want %d", len(tail), usageTailBytes)
+	}
+	if !bytes.Equal(tail, payload[len(payload)-usageTailBytes:]) {
+		t.Fatal("tail is not the last bytes")
+	}
+}

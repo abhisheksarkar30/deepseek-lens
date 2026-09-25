@@ -49,7 +49,7 @@ func runLS(args []string, w io.Writer, st *store.Store) error {
 		return err
 	}
 
-	filter := store.Filter{Limit: *limit, SessionID: *session, Model: *model, OnlyWarned: *warn, OnlyErrors: *errorsOnly}
+	filter := store.Filter{Limit: *limit, SessionID: *session, Model: *model, OnlyWarned: *warn, OnlyErrors: *errorsOnly, WithBodies: false}
 	if *since != "" {
 		t, err := parseSince(*since)
 		if err != nil {

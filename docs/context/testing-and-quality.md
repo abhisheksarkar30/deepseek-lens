@@ -98,8 +98,8 @@ CI here enforces process (branch/commit hygiene), not code correctness
 
 | Workflow | Trigger | Enforces | Evidence |
 |---|---|---|---|
-| `branch-guard.yml` | PR opened/synchronized against `main` | PR must come from `develop`; title starts with a real `GI#<n>` issue; body has a closing keyword; every non-merge commit is prefixed with an issue the PR body closes | [.github/workflows/branch-guard.yml](../../.github/workflows/branch-guard.yml) |
-| `main-guard.yml` | push to `main` | Verifies the pushed commit landed via a merged `develop` → `main` PR (checks the commit's associated PRs via the GitHub API); if not, force-resets `main` back to the prior commit and opens an issue tagging whoever pushed it | [.github/workflows/main-guard.yml](../../.github/workflows/main-guard.yml) |
+| `branch-guard.yml` | PR opened/synchronized against `main` | PR must come from a `GI-<n>-<slug>` branch whose issue the body closes; title starts with a real `GI#<n>` issue; body has a closing keyword; every non-merge commit is prefixed with an issue the PR body closes | [.github/workflows/branch-guard.yml](../../.github/workflows/branch-guard.yml) |
+| `main-guard.yml` | push to `main` | Verifies the pushed commit landed via a merged `GI-<n>-…` → `main` PR (checks the commit's associated PRs via the GitHub API); if not, force-resets `main` back to the prior commit and opens an issue tagging whoever pushed it | [.github/workflows/main-guard.yml](../../.github/workflows/main-guard.yml) |
 
 Local, pre-push gates (opt-in via `git config core.hooksPath .githooks`):
 
