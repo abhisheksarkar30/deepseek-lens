@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS requests (
 
 CREATE INDEX IF NOT EXISTS idx_requests_started_at ON requests(started_at);
 CREATE INDEX IF NOT EXISTS idx_requests_session_id ON requests(session_id);
+-- started_at leads so a window query seeks and the covering scan stays
+-- inside the window. The column set covers the five stats aggregates.
+CREATE INDEX IF NOT EXISTS idx_requests_stats ON requests(
+    started_at, duration_ns, error_text, model_resolved, model_requested,
+    cost_source, cost_usd, input_tokens, output_tokens,
+    cache_creation_tokens, cache_read_tokens);
 
 -- prefix_hash is the session's correlation key, and its NULL-ness is
 -- load-bearing (br-GI-1-12): NULL means the session was keyed by an explicit

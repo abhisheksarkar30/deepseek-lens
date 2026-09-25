@@ -1491,3 +1491,155 @@ func TestListRequestsPerformanceAndLimits(t *testing.T) {
 		t.Errorf("StatsSummary took %v over 10,000 rows, want under %v", elapsed, budget)
 	}
 }
+
+func explainPlan(t *testing.T, s *Store, query string, args ...any) string {
+	t.Helper()
+	rows, err := s.reader.Query("EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer rows.Close()
+	var b strings.Builder
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		b.WriteString(detail)
+		b.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+	return b.String()
+}
+
+func assertCoveringStats(t *testing.T, plan string) {
+	t.Helper()
+	if !strings.Contains(plan, "USING COVERING INDEX idx_requests_stats") {
+		t.Fatalf("plan missing USING COVERING INDEX idx_requests_stats:\n%s", plan)
+	}
+}
+
+func TestStatsCoveringIndex(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	since := base.Add(-time.Hour)
+	longErr := strings.Repeat("e", 10*1024)
+
+	for i := 0; i < 8; i++ {
+		r := fullRequest()
+		r.StartedAt = base.Add(time.Duration(i) * time.Hour)
+		r.Duration = time.Duration(i+1) * time.Millisecond
+		if i == 0 {
+			r.ErrorText = &longErr
+		}
+		if _, err := s.InsertRequest(ctx, r); err != nil {
+			t.Fatalf("InsertRequest: %v", err)
+		}
+	}
+
+	// Positive control: a query that also selects req_body cannot be covered
+	// by idx_requests_stats. A helper that reported COVERING for this would
+	// be a broken gate.
+	bodyPlan := explainPlan(t, s,
+		"SELECT req_body, started_at FROM requests WHERE started_at >= ?", since.UnixNano())
+	if strings.Contains(bodyPlan, "USING COVERING INDEX idx_requests_stats") {
+		t.Fatalf("positive control was covered; gate is broken:\n%s", bodyPlan)
+	}
+
+	where := " WHERE started_at >= ?"
+	arg := since.UnixNano()
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"summary", `SELECT COUNT(*),
+			COALESCE(SUM(CASE WHEN error_text IS NOT NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+			COALESCE(SUM(cache_creation_tokens), 0), COALESCE(SUM(cache_read_tokens), 0),
+			COALESCE(SUM(cost_usd), 0),
+			COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0)
+			FROM requests` + where},
+		{"percentiles", "SELECT duration_ns FROM requests" + where + " ORDER BY duration_ns"},
+		{"by_model", `SELECT CASE WHEN model_resolved <> '' THEN model_resolved ELSE model_requested END,
+			COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0),
+			COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0)
+			FROM requests` + where + ` GROUP BY 1 ORDER BY 2 DESC`},
+		{"by_period", `SELECT strftime('%Y-%m-%d', started_at / 1000000000, 'unixepoch'),
+			COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0),
+			COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0)
+			FROM requests` + where + ` GROUP BY 1 ORDER BY 1`},
+		{"by_cost_source", `SELECT COALESCE(cost_source, 'unpriced'),
+			COUNT(*), COALESCE(SUM(cost_usd), 0)
+			FROM requests` + where + ` GROUP BY 1 ORDER BY 2 DESC`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertCoveringStats(t, explainPlan(t, s, tc.query, arg))
+		})
+	}
+
+	warnPlan := explainPlan(t, s,
+		"SELECT COUNT(*) FROM warnings w JOIN requests r ON r.id = w.request_id WHERE r.started_at >= ?", arg)
+	if strings.Contains(warnPlan, "SCAN requests") || strings.Contains(warnPlan, "SCAN r") {
+		t.Fatalf("warnings join scanned requests:\n%s", warnPlan)
+	}
+
+	sum1, err := s.StatsSummary(ctx, since, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	models1, err := s.StatsByModel(ctx, since, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	periods1, err := s.StatsByPeriod(ctx, since, time.Time{}, "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources1, err := s.StatsByCostSource(ctx, since, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p50a, p95a, err := s.durationPercentiles(ctx, since, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.writer.Exec("DROP INDEX idx_requests_stats"); err != nil {
+		t.Fatalf("drop index: %v", err)
+	}
+
+	sum2, err := s.StatsSummary(ctx, since, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	models2, err := s.StatsByModel(ctx, since, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	periods2, err := s.StatsByPeriod(ctx, since, time.Time{}, "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources2, err := s.StatsByCostSource(ctx, since, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p50b, p95b, err := s.durationPercentiles(ctx, since, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *sum1 != *sum2 {
+		t.Fatalf("summary differs with/without index: %+v vs %+v", sum1, sum2)
+	}
+	if p50a != p50b || p95a != p95b {
+		t.Fatalf("percentiles differ: %v/%v vs %v/%v", p50a, p95a, p50b, p95b)
+	}
+	if fmt.Sprint(models1) != fmt.Sprint(models2) || fmt.Sprint(periods1) != fmt.Sprint(periods2) || fmt.Sprint(sources1) != fmt.Sprint(sources2) {
+		t.Fatalf("aggregate rows differ without the index")
+	}
+}
