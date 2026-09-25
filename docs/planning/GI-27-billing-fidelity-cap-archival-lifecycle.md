@@ -1,8 +1,8 @@
 # GI-27 — Match DeepSeek's daily usage page, and port claude-lens's capture-size, archival and lifecycle model
 
-**Ticket**: GI#27 (**issue not yet created**. #24 is the highest issue and #26 the highest PR — #26 is the
-merged `develop`→`main` promotion — so 27 is the next free number; create the issue first and rename this
-file if GitHub assigns another) ·
+**Ticket**: GI#27 — [issue #27](https://github.com/abhisheksarkar30/deepseek-lens/issues/27), created
+2026-09-25. GitHub assigned the predicted number, so this file keeps its name. (#26 was the merged
+`develop`→`main` promotion; #27 was the next free number across issues and PRs, which share a sequence.) ·
 **Branch**: `GI-27-billing-fidelity-cap-archival-lifecycle`, **cut from `main`** (no `develop`, §11) ·
 **Plan version**: v14 · **Status**: v2 converged (2 review rounds); v3–v5 add workstreams B–F and the
 branch-flow change; **v14 is converged through round 13** (round 13 raised no findings). Ready to beadify.
