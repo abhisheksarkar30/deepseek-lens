@@ -712,11 +712,19 @@ plan was requested. It is not committed and not on a branch.
 
 **Required path:** `git stash -u` the prototype before bead 02, then implement bead by bead per the plan as
 reviewed. Adopting it as-is bypasses bead boundaries and carries the pre-review consumer-guard bug (F1.1: it
-tests post-decode headers, `consumer.go:368`) into history. It is a reference only — never `git stash pop`.
-Note the stash also holds this plan file (untracked) unless it is committed first; commit the plan before
-stashing.
+tests post-decode headers, `consumer.go:357-360` — the base tree's decode seam; the prototype's own numbering
+is `:368`) into history. It is a reference only — never `git stash pop`. Note the stash also holds this plan
+file (untracked) unless it is committed first; commit the plan before stashing.
 
-Create GI#27 on GitHub before the first bead and confirm the number matches this filename.
+**All line citations in this plan and in every bead under `.beads/GI-27/` are base-tree coordinates** — but
+they were *verified during cross-review against the dirty working tree*, so they track the prototype, not
+`HEAD`. Every cite was re-derived against `git show HEAD:<path>` at beadify time and corrected where it had
+drifted, but treat any remaining line number as a hypothesis: re-derive it on the stashed tree before acting
+on it. Symbol names are the reliable anchor; line numbers are not. The one citation that had already drifted
+in a way that mattered was bead 06's removal guard (`dayBound` → `utcDayBound`), which would otherwise have
+passed vacuously.
+
+Issue #27 exists (created 2026-09-25) and matches this filename; nothing further is needed there.
 
 ## Change History
 
