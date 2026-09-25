@@ -4,8 +4,8 @@
 merged `develop`→`main` promotion — so 27 is the next free number; create the issue first and rename this
 file if GitHub assigns another) ·
 **Branch**: `GI-27-billing-fidelity-cap-archival-lifecycle`, **cut from `main`** (no `develop`, §11) ·
-**Plan version**: v6 · **Status**: v2 converged (2 review rounds); v3–v5 add workstreams B–F and the
-branch-flow change and are **re-reviewed through round 4** — run plan-conductor again before beadifying.
+**Plan version**: v14 · **Status**: v2 converged (2 review rounds); v3–v5 add workstreams B–F and the
+branch-flow change; **v14 is converged through round 13** (round 13 raised no findings). Ready to beadify.
 
 ## 1. Origin
 
@@ -122,7 +122,8 @@ Stopping it today means Ctrl-C in the right console, and a relaunch is by hand.
 
 ### B.1 Serve runtime state file
 
-`serve` writes `<dir of DBPath>/serve.state.json` once both listeners are up:
+`serve` writes `<dir of DBPath>/serve.state.json` — created early and rewritten with the bound addresses
+after both listeners are up (see the write-timing bullet below):
 `{"pid","exe","args","cwd","started_at","proxy_addr","dashboard_addr","log_path"}`, `0600`, removed on
 graceful exit.
 
@@ -133,20 +134,141 @@ graceful exit.
 - Liveness is decided by dialing `/api/health`, **never** by the file or the pid; a leftover file is a hint.
 - No secret in it (paths and addresses). `log_path` default `<dir of DBPath>/serve.log`.
 - **"Both listeners are up" requires a `net.Listen` split.** Bead 08 refactors both `proxySrv` and `dashSrv`
-  from `ListenAndServe` to `net.Listen` + `Serve` — the state file is written after both `Listen` calls
-  succeed and before the `select`, so the `proxy_addr` and `dashboard_addr` fields are the actual bound
-  addresses.
-- **State file removal is pid-guarded:** the file is removed only if its `pid` field equals `os.Getpid()`.
-  A loser that fails to bind exits through the graceful path but does not delete the winner's file.
-- **State file removal is the very last act of shutdown,** after `st.Close()` (the final `defer`). A restart
-  or shutdown command waiting for the file to disappear can rely on that as proof that the store was closed
-  cleanly. **This guarantee holds only if every goroutine that holds the store's writer connection — the
-  24 h purge ticker goroutine and the archiver goroutine — is joined (via a WaitGroup or done channel, bounded
-  by the drain bound) alongside `<-consumerDone` before `st.Close()` runs, and each checks `ctx.Done()`
-  between operations so it does not hold the writer past context cancellation. Bead 08 must join the existing
-  purge goroutine; bead 12 must join the archiver goroutine the same way.**
+  from `ListenAndServe` to `net.Listen` + `Serve`.
+- **The state file is written twice, and the early write is what closes the boot window.** It is **created
+  early** — right after `Validate`, before `store.Open` and the other pre-listener phases (`checkRedaction`,
+  `purgeOnStartup`, the first-start `CREATE INDEX`, B.3 step 7) — carrying `pid`/`exe`/`args`/`cwd`/
+  `started_at` with the two address fields not yet bound, and is **rewritten** after both `Listen` calls
+  succeed and before the `select`, so `proxy_addr` and `dashboard_addr` end up as the actual bound addresses.
+  **The rewrite is done by the process that won both binds, whether or not it created the file (F10.1):**
+  ownership of the file follows the **successful bind**, not the create — the port winner is the real "serve
+  is running" claim — so a creator that loses its bind leaves the file to the winner and neither rewrites nor
+  removes it (the removal bullet below). Without the early write a booting `serve` is indistinguishable from a
+  dead one for the whole pre-listener window: both ports refuse and only a predecessor's file is on disk
+  (F6.5).
+- **The early create is `O_EXCL`; it never clobbers another process's file (F7.2).** A second `lens serve`
+  must not overwrite a live winner's file with its own `pid` — if it did, the loser's later graceful exit
+  would pass the pid-guard and delete the live winner's file, leaving `restart` unable to act (the pid-guard
+  protects the file's owner, and the loser would have made itself the owner). The create is therefore
+  `OpenFile(..., O_CREATE|O_EXCL|O_WRONLY, 0600)`: on `EEXIST` the process reads the existing file and takes
+  it over **only when it is genuinely stale** (its recorded pid reads **dead** by the pinned `isProcessAlive`
+  contract below — a definite "no such process" alone; an inaccessible or undecidable probe counts as alive);
+  a file owned by a live process is left untouched, and this process just proceeds to bind and, failing the
+  bind, exits without writing or removing. **A process that took over a stale file also registers the shared
+  removal `defer` (F7.4):** it is likewise covered by the pid-guard-plus-bind-gate removal — not a
+  pid-guard-only one — so its lost-bind and early-return paths behave exactly like the creator's.
+  **The bind-failure rule applies to the file's creator too
+  (F10.1):** the `O_EXCL` owner is not necessarily the port winner — a creator slow through the pre-listener
+  phases can lose the bind to a second process that saw its live pid and left the file alone — so a process
+  that fails its `Listen` neither rewrites nor removes the file **whether or not it created it**; file
+  ownership follows the successful bind (see the write-timing and removal bullets). **The ownership check
+  gates the file *write*, not service liveness:** B.1's rule stands — liveness is dialing `/api/health`,
+  never the file or the pid; a stale pid merely permits takeover, and a live pid never asserts a live
+  service.
+- **One shared removal function — BOTH the pid-guard and the negative bind gate — backs every `Serve` return
+  after the create, called by the explicit normal-path teardown AND by a single `defer` (F7.4).**
+  Each `Serve` return after the create — the pre-listener `return`s at
+  [serve.go:49](../../internal/cli/serve.go#L49) (calendar build),
+  [:54](../../internal/cli/serve.go#L54) (`store.Open`), [:119](../../internal/cli/serve.go#L119)
+  (`proxy.NewServer`) and the normal-path return at
+  [:200](../../internal/cli/serve.go#L200) — must leave the right file behind. There is **one** shared removal
+  function applying both the pid-guard and the negative bind gate; the explicit normal-path teardown calls it,
+  and so does a single `defer` registered right after a successful create (or a stale takeover, below). The
+  `defer` covers the early-return paths; it is a no-op when the pid-guard does not match, when the file is
+  already gone, or when the negative bind gate vetoes. **The deferred removal is not "pid-guard-only":** it is
+  the pid-guard plus a bind gate that *trivially passes* for a process that never bound — nothing was bound,
+  so nothing was lost — which is why the effective condition for a pre-`Listen` return reads as the pid-guard
+  alone. **The bind gate only ever vetoes a process that attempted and lost a bind, so it never vetoes an
+  early return;** a process that lost its `Listen` to a live winner *did* attempt and lose a bind, so the same
+  gate vetoes its removal — and because a `defer` in `Serve` runs on *every* return, not just the
+  pre-`Listen` ones, the failed-bind process (which returns via the normal path at
+  [:200](../../internal/cli/serve.go#L200)) is gated by the shared removal too, not a pid-guard-only one. The
+  normal shutdown path does not rely on this `defer` for ordering: it runs the explicit ordered teardown
+  below, whose removal is **conditional** on the join — the one property a bare `defer` cannot express while
+  a writer may be live.
+- **Starting-vs-stale keys off pid-death — the *same* signal the `O_EXCL` takeover uses (F7.1, F8.1).** No age
+  threshold can bound the boot window: the pre-listener phases include `purgeOnStartup`, which is **unbounded
+  when `RetentionDays > 0`** (B.3 step 7), so a live booting `serve` — or a hung-but-alive one — can outlast
+  any fixed grace and would then be misread as stale, its file removed, and a second instance spawned: the very
+  outcome the early write exists to prevent. So the stale branch keys off the file's recorded `pid`, **not**
+  `started_at`: a file is stale only when its pid is **not alive** — via the one `isProcessAlive` helper the
+  `O_EXCL` takeover already needs, above (a small build-tagged helper: Windows
+  `OpenProcess`+`GetExitCodeProcess`, Unix a `kill(pid, 0)`-style probe) — *in addition to* health refusing
+  **and** both ports refusing. **The helper's error contract is pinned, and its failure mode is fail-closed
+  (F9.1):** it reports **dead** only on the definite "no such process" result — Unix `ESRCH`, Windows
+  `ERROR_INVALID_PARAMETER` — and reports **alive** on "exists but inaccessible" (Unix `EPERM`, Windows
+  `ERROR_ACCESS_DENIED`) **and** on every other or indeterminate error. A probe that cannot decide therefore
+  means *alive*, never *dead*: mapping "cannot determine" to "dead" is the one misclassification that errs the
+  dangerous way — it would let this stale branch remove a live (booting or hung) `serve`'s file and spawn a
+  second instance (the F7.1/F8.1 failure), and would let the `O_EXCL` takeover overwrite a live winner's file
+  (the F7.2 clobber). **Both the `O_EXCL` takeover (above) and the B.2/B.3 stale branch read the helper the
+  same way:** only the "no such process" result is dead; "exists but inaccessible" and any undecidable result
+  are alive. This is the `O_EXCL` takeover's own signal, so the two stale tests cannot
+  disagree: the booting `serve` wrote its own live pid into the early file, so it is **starting**, never stale,
+  however long its boot runs. `--timeout` bounds only how long `shutdown`/`restart` *wait*, never this
+  classification. **This is a file-ownership/staleness question, not service liveness** — it extends the
+  `O_EXCL` reconciliation above: a dead pid merely permits removing the file, and a live pid never asserts a
+  live *service* (only health does). Pid reuse only ever errs toward *starting* (treated as not-stale ⇒ falls
+  through to the shutdown POST and the bounded wait, which times out rather than spawning a second instance) —
+  fail-closed; so does an undecidable liveness probe, per the contract just pinned. The port bind still bounds
+  the damage further.
+- **Every client-side dial normalizes a wildcard host to loopback before connecting.** `listener.Addr()` on a
+  wildcard bind (`0.0.0.0:port` / `[::]:port` — a case B.2 names as supported) returns the unspecified host,
+  which is not dialable on Windows while the server is alive. Health (`GET /api/health`), the port-refusal
+  probes, and the stale-file detection all dial through one helper that rewrites an unspecified host to
+  loopback (`127.0.0.1` for IPv4, `::1` for IPv6). Without it the stale-file rule (B.2, B.3 step 3(b)) reads a
+  live wildcard-bound serve as dead, deletes its state file, and lets `restart` spawn a second instance that
+  loses the bind race. Test: a wildcard-bound ephemeral listener is judged live, not stale. **When the file's
+  address fields are empty — the early write, the only file the *starting* branch can see — the dial falls
+  back to the config-resolved `cfg.ProxyAddr`/`cfg.DashboardAddr` (F7.3): there is nothing yet bound in the
+  file to dial, and `shutdown`/`restart` run `config.Load` before this point, so the configured addresses are
+  in hand.**
+- **State file removal is one shared function — the pid-guard plus the bind gate, stated negatively so both
+  paths read as one contract (F10.1).** The file is removed only if its `pid` field equals `os.Getpid()`, **and no process that
+  lost a bind to a live winner may remove it.** That single negative form covers both paths without
+  collision: a process that lost its `Listen` to a live winner never removes — it *did* lose a bind — while a
+  process that never bound at all (the early-return paths, the `defer` bullet above) did not lose a bind, so
+  it is gated by the pid-guard alone and removes its own file when the recorded `pid` is still its own.
+  **A process that fails its `Listen` — the file's creator as much as a second starter — therefore exits
+  through the graceful path but neither rewrites nor removes the file.** The pid-guard alone does not save
+  the winner here: until the winner's post-`Listen` rewrite lands, the file still carries the creator's
+  early-write `pid`, so a creator that lost the bind would otherwise pass the guard and delete it. The process
+  that won the bind rewrote the file with its own `pid`, so its exit is the one that removes it, and `restart`
+  always finds a file naming the serving process.
+- **State file removal is the very last act of shutdown,** after `st.Close()` returns. **On the normal-path
+  teardown it is not a `defer`, because the removal is conditional on two things a bare `defer` cannot
+  express:** the fail-closed join check below forbids it while a writer may still be live, and the bind gate
+  (F10.1) forbids it for a process that lost its bind to a live winner. (The early-return paths, which never
+  bound and have no live writer to join, use the shared, gated removal `defer` above — see the F7.4/O_EXCL
+  bullets.) The shutdown path is instead an
+  explicit ordered teardown at the end of `Serve`: join the maintenance goroutine, call `st.Close()` explicitly
+  — the `defer` at :57 is **kept** (F6.2: `sql.DB.Close` is idempotent, so the explicit call does the closing
+  and the deferred second call is a no-op after removal; keeping it means the early `return` at
+  [serve.go:117-120](../../internal/cli/serve.go#L117), where `proxy.NewServer` fails before any teardown runs,
+  still releases the handle) — then run the shared, gated removal as the final statement. A restart or shutdown
+  command waiting for the file to disappear can rely on the explicit close as proof that the store was closed
+  cleanly.
+- **There is exactly one 24 h maintenance goroutine, and the join covers it — alongside `<-consumerDone`,
+  bounded by the drain bound; it checks `ctx.Done()` between operations so it does not hold the writer past
+  context cancellation. Bead 08 joins this goroutine (turning the existing purge ticker's loop into a
+  `WaitGroup`-tracked one); bead 12 folds the archiver into the same loop's body — purge, then archive, then
+  `GCArchive` — rather than starting a second goroutine.** A second reader of `purgeTicker.C` would steal
+  alternate ticks from the first (`time.Ticker.C` delivers each tick to exactly one receiver,
+  [serve.go:166-177](../../internal/cli/serve.go#L166)), silently halving both jobs; one ticker, one goroutine,
+  one join (F6.1).
+- **Join-bound expiry is fail-closed.** If the drain bound expires with the purge/archiver goroutine still
+  running, log it and **do not remove the state file** — the "file gone ⇒ drained and store closed" proof must
+  never be claimed while a writer may still be live; `shutdown`/`restart` then time out (their documented
+  behaviour) rather than proceed on a false proof. Iterations pass `ctx` into the store call so cancellation
+  interrupts a long statement: `PurgeOlderThan` → `purgeWhere` already does
+  ([store.go:955](../../internal/store/store.go#L955), `BeginTx(ctx)`); the archiver must do the same.
 
-### B.2 `lens shutdown`
+### B.2 `lens shutdown [--timeout 30s]`
+
+`lens shutdown` strips its own `--timeout` **before** `config.Load`, exactly as B.3 step 1 does for `restart`:
+`config.Load`'s flag set is closed (`config.go:270-290`, `ContinueOnError`) and `main.go:43` hands the whole
+`os.Args[2:]` to the command, so an un-stripped `--timeout` would fail with "flag provided but not defined"
+(F8.2). `--timeout` bounds only the bounded wait below.
 
 `POST /api/shutdown` drives `serve`'s existing `stop` (the `signal.NotifyContext` cancel), so it reuses the
 current bounded drain (`shutdownGrace` + the consumer's `shutdownBound`) — no second shutdown path.
@@ -158,10 +280,18 @@ credentialless-guard reasoning in the GI-1 security self-review must be re-read 
 disruptive rather than billable, and the loopback-caller check is what carries it. Both new routes are
 listed in `docs/context/api-surface.md` and `security-and-permissions.md`.
 
-`lens shutdown` first reads the state file (if present) and dials `GET /api/health`. If health already
-refuses **and** both the proxy and dashboard ports refuse a connection (the process is gone — crashed, killed,
-or power-lost before its `defer` ran): log "stale state file, removing", remove the file, and exit 0. The
-process was not running; no `POST /api/shutdown` is needed and no timeout is burned.
+`lens shutdown` first reads the state file and dials `GET /api/health`. **No file:** skip the stale-file branch
+and dial health directly — if it answers, `POST /api/shutdown`; if it refuses, there is nothing to shut down,
+so log and exit 0. (F6.5: B.2 previously left the no-file case implicit.) **With a file:** if health already
+refuses **and** both the proxy and dashboard ports refuse a connection (dialed from the file, or from
+`cfg.ProxyAddr`/`cfg.DashboardAddr` when the file is the early write with empty addresses — F7.3) **and** the
+file's recorded `pid` is **not alive** (the `isProcessAlive` helper the `O_EXCL` takeover uses — B.1; the same
+signal, so the two stale tests agree — F8.1) — the process is gone, crashed, killed, or
+power-lost before its removal ran — log "stale state file, removing", remove the file, and exit 0. The process
+was not running; no `POST /api/shutdown` is needed and no timeout is burned. **If both ports refuse but the
+file's pid is still alive,** `serve` is still in its pre-listener phases (or hung) (F6.5): treat it as
+starting, do **not** remove the file, and fall through to the shutdown POST and bounded wait below (which
+fails closed on `--timeout`).
 
 When the process is running: `POST /api/shutdown`, then wait until both ports refuse a connection **and** the
 state file no longer exists (bounded by `--timeout`). The state file disappearing is the proof that the
@@ -176,11 +306,18 @@ consumer drain finished and `st.Close()` returned — not merely that the ports 
    spawn (the file is deleted by the graceful exit in step 3).
 3. `GET /api/health`. Two sub-cases:
    - **(a) Running (200 OK):** proceed to step 4.
-   - **(b) Health refuses:** also dial the proxy and dashboard addresses from the retained state file. If both
-     ports also refuse: **stale file** — the serve process crashed or was killed before its `defer` ran; log
-     "stale state file, removing", remove the file (the pid-guard's purpose is to protect a concurrent winner,
-     not block stale-file cleanup by a separate command), and skip directly to step 5. If a port still
-     responds (e.g. serve is starting but health is not ready): treat as running and proceed to step 4.
+   - **(b) Health refuses:** also dial the proxy and dashboard addresses from the retained state file —
+     or, when the file is the early write whose address fields are still empty, from `cfg.ProxyAddr` /
+     `cfg.DashboardAddr` (F7.3; `restart` already ran `config.Load` after stripping its own flags) — through
+     the loopback-normalizing dial helper (B.1). If a port still responds (e.g. serve is starting but
+     health is not ready): treat as running and proceed to step 4. If **both** ports refuse **and** the file's
+     recorded `pid` is **not alive** (`isProcessAlive`, B.1 — the same signal the `O_EXCL` takeover uses):
+     **stale file** — the serve process crashed or was killed before its removal ran; log "stale state file,
+     removing", remove the file (the pid-guard's purpose is to protect a concurrent winner, not block
+     stale-file cleanup by a separate command), and skip directly to step 5. If **both** ports refuse but the
+     file's pid is still alive (F6.5): `serve` is still in its pre-listener phases (or hung) — treat it as
+     starting and proceed to step 4, where the shutdown POST and wait fail closed on `--timeout` rather than
+     spawning a second instance.
 4. `POST /api/shutdown`, wait until both ports refuse a dial **and** the state file is gone (bounded by
    `--timeout`) — this proves the drain finished and the store is closed.
 5. Spawn `exe <args…>` **detached**, `cmd.Dir` set to the retained `cwd`, stdout+stderr appended to
@@ -205,9 +342,14 @@ consumer drain finished and `st.Close()` returned — not merely that the ports 
 ### B.4 `lens reload`
 
 `POST /api/reload` (same two guards as shutdown). The handler re-runs `config.Load(bootArgs)` where
-`bootArgs` is the **post-subcommand** slice `serve` received (`os.Args[2:]`, **not** the state file's `args`
-— `flag.Parse` stops at the first non-flag, so `["serve","--x"]` would drop every flag and reload would
-diff against defaults), validates it, and diffs against the boot config.
+`bootArgs` is the **translated** post-subcommand slice `serve` received — the exact slice passed to
+`config.Load` at [serve.go:35](../../internal/cli/serve.go#L35), i.e. `translateNoCapture(os.Args[2:])`, **not**
+the raw `os.Args[2:]` and **not** the state file's `args`. Raw args would break a running instance started
+with `lens serve --no-capture`: `translateNoCapture` rewrites that alias to `--capture=false`
+([serve.go:271](../../internal/cli/serve.go#L271)) and `config.Load`'s closed flag set rejects the unknown
+`--no-capture` with a 400, making a valid instance unreloadable (F6.3). The state file's `args` are out too:
+`flag.Parse` stops at the first non-flag, so `["serve","--x"]` would drop every flag and reload would diff
+against defaults. The handler validates the reloaded config and diffs it against the boot config.
 
 - **Live-apply set, exactly:** `RetentionDays`, `HotDays` — both held in one small `atomic`-guarded struct
   that the purge/archive ticker reads. **Implemented in two beads:** bead 10 creates the struct and wires
@@ -229,12 +371,14 @@ diff against defaults), validates it, and diffs against the boot config.
 |---|---|
 | Testing restart against the live proxy kills the operator's session | Every test uses ephemeral ports and a temp DB; no test touches the configured live proxy/dashboard ports; live verification is the user's, with rollback as the net. |
 | Child inherits the console and dies with it | Detach flags + a helper-process test that the child survives its parent. |
-| Two restarts race | The loser fails to bind and exits non-zero — fail-closed on the port, never two proxies. The loser's pid-guarded exit does not delete the winner's state file. |
+| Two restarts race | The loser fails to bind and exits without deleting the winner's state file — fail-closed on the port bind, never two proxies. (The exit code is not part of the guarantee: `Serve` today logs the listener error and returns `nil` ([serve.go:179-200](../../internal/cli/serve.go#L179)), so the loser may exit 0; no bead changes `Serve`'s return, and the port bind is what actually prevents two proxies — F6.4.) |
 | `reload` half-applies | Validate, then apply both fields under one lock; test all-or-nothing on a bad file. |
 | Wildcard dashboard bind exposes the routes to the LAN | Loopback-caller check (B.2). |
 | Consumer still draining when ports refuse | `shutdown`/`restart` wait for state file gone (not just port refusal) — state file removal is deferred after `st.Close()`, which follows `<-consumerDone`. |
-| Stale state file (serve crashed/killed, defer never ran) blocks restart/shutdown | If `GET /api/health` refuses **and** both ports refuse: treat file as stale, log, remove it, skip the shutdown POST/wait, proceed. No timeout burned; no deadlock. |
-| Purge or archiver goroutine still holds writer when `st.Close()` runs | Both goroutines joined via WaitGroup alongside `<-consumerDone` (bead 08 + 12); each checks `ctx.Done()` between batches. Required for the state-file guarantee in B.1. |
+| Stale state file (serve crashed/killed, removal never ran) blocks restart/shutdown | If `GET /api/health` refuses **and** both ports refuse **and** the file's recorded pid is not alive (`isProcessAlive`, B.1): treat file as stale, log, remove it, skip the shutdown POST/wait, proceed. No timeout burned; no deadlock. |
+| A booting (or hung) `serve` (pre-listener phases, both ports refusing) mistaken for dead | The file is written early (B.1) carrying the booting `serve`'s own **live** pid, and the stale rule (B.2, B.3 step 3(b)) removes a file **only when** its recorded pid is **not alive** — the *same* `isProcessAlive` signal the `O_EXCL` takeover uses. A live pid is never stale, so a booting (or hung) `serve` is treated as starting and **not** removed *regardless of how long it runs*; the classification depends on neither the (unbounded, `purgeOnStartup`) boot length nor any caller's `--timeout`, so no boot duration can weaken it. A misclassification — e.g. a reused pid — errs toward *starting* (falls through to the shutdown POST and the bounded wait, which times out): at most one *proxy* survives the bind race, and a spawned second instance fails to bind and exits without deleting the winner's file. |
+| Two concurrent `serve` race for the state file | The early create is `O_EXCL` (B.1), and file ownership follows the **successful bind**, not the create (F10.1). A second process cannot overwrite a live file, takes over only a genuinely stale one, and — failing its bind — rewrites and removes nothing. The process that wins both binds rewrites the file with its own `pid` **whether or not it created it**, so its exit is the one that removes it: a **creator that loses the bind** leaves the winner's file (now carrying the winner's `pid`) in place, and `restart` acts on the serving process. |
+| The maintenance goroutine (purge + archiver) still holds the writer when `st.Close()` runs | Joined via WaitGroup alongside `<-consumerDone` (bead 08 creates the join; bead 12 adds the archiver to the same goroutine's loop); checks `ctx.Done()` between batches. Required for the state-file guarantee in B.1. |
 | Restart times out on first start after E index build | `--timeout 180s`; with no `--exe`, a timeout does not kill the child — it may still be starting. |
 
 ## 6. Workstream C — body archival
@@ -260,13 +404,13 @@ table for one bit); background `VACUUM` (holds the only writer for minutes — a
 
 | Area | Change |
 |---|---|
-| `internal/store` schema | New `body_archive` table — **a schema migration**: back up `lens.db` (and `-wal`/`-shm`) to a separate path first and state it (global rule), applied by the store's existing schema/migration mechanism (verify at bead time — bead 09 of GI-17 is the precedent). |
+| `internal/store` schema | New `body_archive` table — **a schema migration**: back up `lens.db` (and `-wal`/`-shm`) to a separate path first and state it (global rule), applied by the store's existing mechanism — `Open` runs `schema.sql`'s `CREATE TABLE IF NOT EXISTS` on every start ([store.go:121](../../internal/store/store.go#L121)); there is no migration framework ([schema.sql:1-8](../../internal/store/schema.sql#L1-L8)), so the table is simply added to that file (F6.6). |
 | `internal/store/archiver.go` (new) | Batches: per UTC day older than the hot window, per row, **one hot transaction** writes the marker and NULLs the two bodies, **after** the day-file insert commits. Holds the single writer connection (`SetMaxOpenConns(1)`) in **short batches only** — claude-lens's GI-13 hang was a long hold of it. Crash between the two steps leaves a duplicate, never a loss (archive copy first, hot NULL last). |
 | Compression | `github.com/klauspost/compress/zstd` — **already a dependency**, no new module. |
 | Reads | **Read model decision:** `ListRequests` returns rows **without bodies by default** via a `Filter.WithBodies bool` flag; when false (the default for all `GET /api/requests` callers and every list-style CLI command), the query selects `NULL AS req_body, NULL AS resp_body` from `requestColumns`. `GetRequest`, `lens export`, `lens show`, and replay lookups set `WithBodies: true` to hydrate. **The real reader class (`WithBodies: true`)** (enumerate at bead time): `GetRequest` (`api.go:398, 493`), replay row lookup (`cli/replay.go:184`), `lens export` (`cli/export.go:45` — encodes the whole struct via `json.NewEncoder`; list-hydration must batch by archive day: group IDs per day file and open one day file per day, not one per row), `lens show` (`cli/show.go:68`). **Not body readers and not in scope:** the redaction self-test (reads `req_headers`/`resp_headers` only), the in-flight analyzers (act on the `CapturedCall`, not a stored row), and `store.go:1063, 1091` (`PurgeableBytes`/`UnpricedBytes` — SQL `LENGTH()` aggregates that run inline; archived byte counts for the Purge dry-run estimate are handled separately, not via `WithBodies` hydration). `ListRequests` callers (`api.go:367, 647, 672, 998` (session-detail handler — `ListRequests(... SessionID: id)`, returns no bodies), `cli/ls.go:62`, `cli/tail.go:51`, `cli/stats.go:84`) do **not** need bodies and must pass `WithBodies: false`. Hydration for each `WithBodies: true` caller comes from one store helper that tries the hot DB first, then the archive day file. Writers that read bodies skip archived rows and name `archive restore`. |
 | Purge | `PurgeOlderThan` / `--unpriced` also delete the archived bodies (marker cascade + day-file row) and `GCArchive` collects orphaned day rows; the dry-run byte estimate counts archived bytes. |
 | Config | `HotDays int` — `--hot-days`, `LENS_HOT_DAYS`, key `HotDays`, **default 0 (archival disabled until operator opts in; a typical value is 7)**, negative rejected. **Validation:** `HotDays > RetentionDays` is rejected only when `HotDays` was explicitly set above zero **and** `RetentionDays > 0`. A defaulted `HotDays = 0` is always valid regardless of `RetentionDays`. Test: `RetentionDays=3`, no `HotDays` set → `Validate` passes; `HotDays=9`, `RetentionDays=7` → `Validate` fails. `lens doctor` prints `HotDays`, WARNs when `archive/` is unwritable, and shows an INFO suggestion to enable archival when the store exceeds a size threshold and `HotDays == 0`. |
-| `serve` | One goroutine started **after** the listeners are up (never on the boot path), runs the archiver at boot and on the existing 24 h ticker after `purgeOnStartup`, then `GCArchive`. Fail-open: an error is logged, never fatal. **Joined before `st.Close()`:** the archiver goroutine checks `ctx.Done()` between batches and is waited on via a WaitGroup alongside `<-consumerDone` (bead 12; bead 08 must do the same for the existing purge ticker goroutine) — required for the B.1 state-file-removal guarantee. **First `serve` with `HotDays > 0` set will run the archiver's first pass and move/NULL bodies older than the hot window — a bulk data migration by the CLAUDE.md rule. Back up `lens.db` (+ `-wal`, `-shm`) to a separate path before enabling `HotDays` and state the backup path; bead 12's acceptance criteria include this requirement in the `doctor` output and the bead's completion note.** |
+| `serve` | **One** goroutine, started **after** the listeners are up (never on the boot path). It runs the archiver once at boot, then on each tick of the existing 24 h timer runs `purgeOnStartup`, then the archiver, then `GCArchive` — one ticker, one receiver, so neither job steals the other's ticks (F6.1). Fail-open: an error is logged, never fatal. **Joined before `st.Close()`:** the goroutine checks `ctx.Done()` between batches and is waited on via a WaitGroup alongside `<-consumerDone` (bead 08 turns the existing purge-ticker loop into that join; bead 12 adds the archive/GC steps to the same loop's body — no second goroutine) — required for the B.1 state-file-removal guarantee. **First `serve` with `HotDays > 0` set will run the archiver's first pass and move/NULL bodies older than the hot window — a bulk data migration by the CLAUDE.md rule. Back up `lens.db` (+ `-wal`, `-shm`) to a separate path before enabling `HotDays` and state the backup path; bead 12's acceptance criteria include this requirement in the `doctor` output and the bead's completion note.** |
 | CLI | `lens archive status` (hot boundary, archived/unarchived counts, archive size/files, missing markers, restore duplicates), `archive run [--dry-run] [--yes]`, `archive restore --since --until [--dry-run] [--yes]` (inverse: one hot transaction per row, never drop a marker for a body not restored, delete the day-file row only *after* the hot commit). Same `--yes` gate as `purge`. |
 | Dashboard | Request detail shows "bodies loaded from the archive (YYYY-MM-DD)" when applicable. |
 
@@ -287,15 +431,33 @@ table for one bit); background `VACUUM` (holds the only writer for minutes — a
   capped head + tail priced with the tail's output tokens, and a call whose `call.RespHeaders` carries
   `Content-Encoding` ignores the tail (set the pre-decode headers directly); `store_test` 20:00Z and 02:00Z
   in two UTC days but one IST day (`330` → 1 bucket); `api_test` `tz_offset` invalid → 400, valid → 200.
-- **B:** state file written/removed; `/api/shutdown` and `/api/reload` reject a non-loopback caller and a
+- **B:** state file written/removed; the file is written early (before the pre-listener phases) so a booting
+  `serve` owns it; **a pre-listener `Serve` return leaves no state file** — drive it both ways, a `store.Open`
+  failure (a bad DB path) and an injected `proxy.NewServer` failure, and assert the file the early create made
+  is gone (the shared, gated early-return `defer` — pid-guard plus bind gate, F7.4/F11.1); `/api/shutdown` and `/api/reload` reject a non-loopback caller and a
   cross-origin `Origin` (403), accept loopback; reload applies the two live fields including the API's
   `retentionDays` copy (`GET /api/retention` reflects the new value after reload), reports the rest under
-  `restart_required`, and applies **nothing** on an invalid file; restart against ephemeral ports with a
-  helper-process child surviving its parent; rollback path with a deliberately unhealthy `--exe`; consumer
-  drain slow: restart waits for state file gone, not just port refusal; pid-guard: a second process that
-  fails to bind exits without deleting the winner's state file; stale state file: `restart` (and
-  `shutdown`) with a pre-seeded state file and nothing listening proceeds to spawn without burning
-  `--timeout`.
+  `restart_required`, and applies **nothing** on an invalid file; a `--no-capture` instance reloads (the
+  translated `--capture=false` alias round-trips) rather than 400-ing (F6.3); restart against ephemeral ports
+  with a helper-process child surviving its parent; rollback path with a deliberately unhealthy `--exe`;
+  consumer drain slow: restart waits for state file gone, not just port refusal; pid-guard: a second process
+  that fails to bind exits without deleting, **and without overwriting**, the winner's state file — the
+  `O_EXCL` create leaves the winner's `pid` intact and the loser removes nothing (assert file survival *and*
+  that the file's `pid` is still the winner's, not the exit code — F6.4, F7.2); **the CREATOR loses the bind
+  while the second process holds the port ⇒ the file carries the SERVING process's `pid`, not the creator's
+  (the winner's post-`Listen` rewrite, F10.1) and `restart` acts on it** — the creator's exit removes nothing
+  (drive both orders: winner rewrites before the creator's `Listen` fails, and after); stale state file (dead pid):
+  `restart` with a pre-seeded state file whose recorded `pid` is **not alive** (spawn-and-reap a helper to
+  obtain a definitely-dead pid) and nothing listening removes the file and proceeds to **spawn** (step 5)
+  without burning `--timeout`, while `shutdown` on the same file removes it and **exits 0 without spawning**,
+  also without burning `--timeout` (F8.3); a state file whose pid **is** alive (a live helper process) with
+  both ports refusing is treated as *starting*, not stale — not removed (F6.5); **pid-liveness boundary
+  (F7.1/F8.1): a pre-seeded file whose pid is alive but whose `started_at` is far in the past, with both ports
+  refusing and nothing listening, is treated as *starting* — not removed — the case the old
+  age-and-`--timeout`-keyed rule got wrong**;
+  `shutdown` with no state file dials health directly and exits 0 when it refuses; state-file removal happens
+  **after** `st.Close()` (a store wrapper whose `Close` asserts the file still exists); a wildcard-bound
+  ephemeral listener is judged live, not stale; join-bound expiry leaves the state file in place (fail-closed).
 - **C:** archiver round trip (archive → hydrate → identical bytes); every crash point of archiver and
   restore; purge deletes archived bodies and the dry-run counts them; `HotDays` validation (no `HotDays`
   set + `RetentionDays=3` passes; explicit `HotDays=9` + `RetentionDays=7` fails); hydration for each
@@ -362,7 +524,8 @@ cold and a warm run. The 2026-09-25 numbers came from a throwaway script, not a 
 - `docs/context/api-surface.md` — `/api/requests` gains `until`; `/api/stats` gains `tz_offset`; new `POST /api/shutdown`, `POST /api/reload`
   (write-route table grows).
 - `docs/context/architecture.md` / `workflows.md` — capture path keeps a response tail; serve lifecycle and
-  archiver goroutine (verify wording against source).
+  the single purge+archive maintenance goroutine; the `serve.state.json` early write (verify wording against
+  source).
 - `docs/context/data-model.md` (or the schema doc) — `body_archive` table; bodies may live in day files.
 - `docs/context/cli.md`/build-and-run — `shutdown`, `restart`, `reload`, `archive`, `serve.state.json`.
 - `docs/context/security-and-permissions.md:6` and `README.md:274` — body-cap note (usage survives the cap;
@@ -392,13 +555,23 @@ Match claude-lens: a feature branch `GI-<n>-<slug>` is cut from `main` and its P
   guard change is **self-applying**: a PR from `GI-27-…` that carries the updated `branch-guard.yml`
   governs its own check. No separate pre-PR is needed; the first PR that carries the updated guard is the
   guard change itself.
-- **Bead 01 is grep-driven.** After the change, `git grep -n develop` outside `docs/planning/`,
-  `planning/`, `.beads/`, and historical spec/design files (`docs/superpowers/specs/`) must return no
-  matches. The positive control is the pre-change grep (confirms the pattern matches known files before
-  the change). Known files requiring a change: `CLAUDE.md`, `.github/workflows/branch-guard.yml`,
-  `.github/workflows/main-guard.yml`, `README.md`, `docs/context/conventions.md`,
-  `docs/context/architecture.md`, `docs/context/build-and-run.md`, `docs/context/testing-and-quality.md`,
-  `docs/context/INDEX.md` (2 occurrences). The design spec (`docs/superpowers/specs/2026-09-14-deepseek-lens-design.md`)
+- **Bead 01 is grep-driven, word-bounded.** After the change, `git grep -nw develop` (equivalently
+  `git grep -nE '\bdevelop\b'`) outside `docs/planning/`, `planning/`, `.beads/`, and historical
+  spec/design files (`docs/superpowers/specs/`) must return no matches. **The pattern must be
+  word-bounded:** the bare substring `develop` also matches the English word "developer"
+  (`README.md:12`, `docs/context/architecture.md:11`, `docs/context/build-and-run.md:19`,
+  `docs/context/testing-and-quality.md:113`, `docs/context/INDEX.md:7`), which must not be edited — so the
+  unbounded form can never reach zero matches outside the exclusions and the gate would be unsatisfiable
+  (F9.2). The positive control is the pre-change **word-bounded** grep (confirms the pattern matches the
+  known branch references before the change). **Known files carrying a real branch reference, and so
+  requiring a change:** `CLAUDE.md` (:50, :57, :63), `.github/workflows/branch-guard.yml` (:18),
+  `.github/workflows/main-guard.yml` (:33), `docs/context/conventions.md` (:128),
+  `docs/context/testing-and-quality.md` (:101-102), and `docs/context/INDEX.md` (:122 — **one**
+  occurrence). `README.md`, `docs/context/architecture.md` and `docs/context/build-and-run.md` carry
+  **no** branch reference — their only `develop` match is the English word "developer" — so they are **not**
+  part of workstream D and do not appear on the change list; they are still refreshed by bead 16 for their
+  own reasons (§10: body-cap note, serve lifecycle, new CLI), not for the `develop` drop. The design spec
+  (`docs/superpowers/specs/2026-09-14-deepseek-lens-design.md`)
   is historical and stays unchanged — the grep scope excludes it.
 
 ## 11A. Workstream E — covering index for the stats aggregates
@@ -479,7 +652,7 @@ selections inclusive of the hour picked (`since` = start of the from-hour, `unti
 through **one** `timeWindow` helper that constructs the `±hh:mm` offset by hand — never `toISOString()`, never
 `new Date("YYYY-MM-DD…")`. Its backend already took `since` **and** `until`. deepseek-lens differs:
 
-- **Backend gap:** `Filter` and `requestWhere` carry `Since` only (`store.go:327-356`); `listRequests` reads
+- **Backend gap:** `Filter` (`types.go:126`) and `requestWhere` (`store.go:327`) carry `Since` only; `listRequests` reads
   only `?since` (`api.go:341`). Add `Filter.Until` → `started_at < ?` in `requestWhere` (shared with
   `CountRequests`, so `X-Total-Count` stays consistent — the reason it is shared) and read `?until` with the
   existing `parseTimeBoundParam`. `since >= until` is not rejected (matches `/api/stats`' documented
@@ -522,13 +695,13 @@ the toolchain — `node --check` only).
 | 05 | `Filter.Until` + `/api/requests?until` + tests (F backend) | — |
 | 06 | Shared `hourBound` helper; Stats tab hour-precision From/To + "Days in" selector (A.2 frontend, F) | 04 |
 | 07 | Feed Range control: pager, live-paused banner, Clear (F) | 05, 06 |
-| 08 | `net.Listen` split; serve state file + `POST /api/shutdown` + `lens shutdown` (B.1, B.2) | — |
+| 08 | `net.Listen` split; join the existing purge goroutine via WaitGroup (ctx-checked); serve state file + `POST /api/shutdown` + `lens shutdown` (B.1, B.2) | — |
 | 09 | `lens restart` with detach + rollback (B.3) | 08 |
 | 10 | `POST /api/reload` + `lens reload`, `RetentionDays` arm via atomic struct (B.4; struct designed to take `HotDays` as a second field in bead 14; includes routing `api.go:99`/`SetRetention` through the struct) | 08 |
 | 11 | `body_archive` schema (**backup first**) + archiver + `Filter.WithBodies` + hydrating reads for every `WithBodies: true` reader (C.2) | 02 |
-| 12 | `HotDays` config + Validate + `serve` archive goroutine + purge/`GCArchive`; **backup-first requirement in doctor output** (C.2) | 11 |
+| 12 | `HotDays` config + Validate + archiver steps folded into the **single** serve maintenance goroutine bead 08 joins (no second goroutine) + purge/`GCArchive`; **backup-first requirement in doctor output** (C.2) | 08, 11 |
 | 13 | `lens archive status\|run\|restore` + dashboard archive line (C.2) | 11, 12 |
-| 14 | `reload` gains the `HotDays` arm; archiver ticker reads it from the shared struct; acceptance: reload diff test covers `HotDays` as live-applied and the non-live set (`BodyCapBytes`, etc.) under `restart_required` (B.4) | 10, 12 |
+| 14 | `reload` gains the `HotDays` arm; the maintenance ticker reads it from the shared struct; acceptance: reload diff test covers `HotDays` as live-applied and the non-live set (`BodyCapBytes`, etc.) under `restart_required` (B.4) | 10, 12 |
 | 15 | 8 MiB cap in config + doctor WARN + README (A.3) | 02, 12 |
 | 16 | Refresh `docs/context/*` (§10) | all |
 
@@ -546,6 +719,203 @@ stashing.
 Create GI#27 on GitHub before the first bead and confirm the number matches this filename.
 
 ## Change History
+
+### v14 — round 12 triage (2026-09-25)
+
+- **F12.1 (MAJOR, JUSTIFIED):** the round-11 wording made the F7.4 early-return `defer` "pid-guard-only" and
+  said the bind-winner gate "applies **only** to the normal-path teardown" — but a `defer` inside `Serve` runs
+  on *every* return from `Serve`, and a process whose `Listen` failed returns through the **normal path**
+  (`serve.go:181-184` `errCh` → `stop()` → the sole normal `return` at `serve.go:200`), not an early return
+  (verified: `Serve` is one function, `serve.go:34-201`). For that lost-bind process the file still carries its
+  own `pid` until the winner's post-`Listen` rewrite lands, so a pid-guard-only defer would match the guard and
+  delete the winner's live file — the F10.1 clobber the removal bullet forbids and that §7 B's creator-loses-bind
+  test asserts cannot happen — and the removal bullet (universal negative gate) and the F7.4 bullet (gate
+  excluded from the defer) defined the same case two ways. **Fixed (adopting the reviewer's fix exactly):** there
+  is now **one shared removal function applying both the pid-guard and the negative bind gate**, called by the
+  explicit normal-path teardown AND by the early-return `defer`. The `defer` is no longer described as
+  "pid-guard-only": it is the pid-guard plus a bind gate that *trivially passes* for a process that never bound
+  (nothing was bound, so nothing was lost), so the effective condition for a pre-`Listen` return reads as the
+  pid-guard alone; and "the bind gate only ever vetoes a process that attempted and lost a bind, so it never
+  vetoes an early return". The "pid-guard-only" phrase is dropped at the F7.4 bullet (heading and body), the
+  teardown bullet, and the §7 B F7.4/F11.1 cross-reference, which now names the shared, gated removal. The
+  stale-takeover bullet states that a process taking over a stale file registers the same shared, gated `defer`
+  (so its lost-bind and early-return paths match the creator's). §7 B's "creator's exit removes nothing (winner
+  rewrites after)" assertion is **kept** — deleting it would reintroduce the F10.1 file-clobber.
+
+### v13 — round 11 triage (2026-09-25)
+
+- **F11.1 (MAJOR, JUSTIFIED):** round 10 added "and this process won both binds" to the removal bullet, which
+  made "won the bind" a **necessary** condition of *any* removal and so contradicted the F7.4 early-return
+  `defer`, leaving the never-bound case undefined: a `Serve` return at `serve.go:49/54/119` executes before
+  either `Listen` (verified: those three returns are all pre-listener), so under the removal bullet's literal
+  reading every failed boot (a bad DB path failing `store.Open`, a bad calendar, a failed `proxy.NewServer`)
+  would leave a `serve.state.json` behind — the exact leftover F6.5/F7.4 exist to eliminate. Self-healing (a
+  later `restart`/`shutdown` reclassifies the dead-pid file as stale) so bounded, not fatal — but the model was
+  not readable one way and F7.4's guarantee was defeated by its own sibling bullet. **Fixed (conductor's
+  directive):** the removal bullet now states the gate **negatively** — "the file is removed only if its `pid`
+  equals `os.Getpid()`, and **no process that lost a bind to a live winner may remove it**" — so the two paths
+  read as one contract without collision: a process that lost its `Listen` *did* lose a bind and never removes,
+  while a process that never bound did not lose a bind and is gated by the pid-guard alone. The F7.4 bullet now
+  says the early-return `defer` is **pid-guard-only** and that the bind gate applies **only** to the normal-path
+  teardown; the teardown bullet's gate was reworded to the same negative form ("for a process that lost its
+  bind to a live winner"). §7 B gains the test: a pre-listener `Serve` return (a `store.Open` failure, or an
+  injected `proxy.NewServer` failure) leaves no state file. F7.2 (only the bind winner ever writes) and F10.1
+  (ownership follows the successful bind) are unchanged.
+
+### v12 — round 10 triage (2026-09-25)
+
+- **F10.1 (MAJOR, JUSTIFIED):** the round-7/8 concurrent-`serve` model equated the file **owner** (winner of
+  the early `O_EXCL` create) with the **bind winner**, but the create is decided before `store.Open` and the
+  other pre-listener phases, while the port is decided at `Listen`. A creator slow through those phases can
+  lose the bind to a second process that saw its live pid and (correctly) left the file alone; that second
+  process serves, while the creator's failed `Listen` routes through `serve.go:183`'s `stop()` into the
+  **normal** teardown, whose pid-guarded removal matches (the file still carried the creator's pid) and
+  deletes the serving process's file — leaving `restart` to hit B.3 step 2's "no state file" branch. **Fixed
+  (conductor's directive):** file ownership now follows the **successful bind**, not the create. The
+  post-`Listen` rewrite is done by whichever process won both binds **whether or not it created the file**;
+  only that process's exit runs the pid-guarded removal; a process whose `Listen` fails — **creator
+  included** — neither rewrites nor removes (the existing "failing the bind exits without writing or
+  removing" rule, extended to the creator). F7.2 is kept intact: only the bind winner ever writes, so a live
+  winner's file is never clobbered. Updated B.1 (write-timing, `O_EXCL`, removal, teardown bullets), the B.5
+  concurrent-`serve` row, and §7 B, which gains the CREATOR-loses-the-bind case (the file carries the
+  **serving** process's pid; `restart` acts on it).
+- **F10.2 (NIT, JUSTIFIED):** B.1's `O_EXCL` bullet still read "a file owned by a live **or recent**
+  process is left untouched" — a vestige of the round-8 `bootGrace` age rule that round 8 removed and round 9
+  replaced with pid-death. With staleness defined purely as "the recorded pid is not alive", there is no
+  "recent" category. **Fixed:** deleted "or recent" — the clause now reads "a file owned by a live process is
+  left untouched".
+
+### v11 — round 9 triage (2026-09-25)
+
+- **F9.1 (MAJOR, JUSTIFIED):** the round-8 fix introduced the `isProcessAlive` helper as the sole stale signal
+  but never pinned its *failure* semantics, and the natural `err != nil ⇒ not alive` reading maps an
+  undecidable probe to **dead** — the one misclassification that errs the dangerous way. An `EPERM`
+  (`kill(pid,0)`, Unix) or `ERROR_ACCESS_DENIED` (`OpenProcess`, Windows) means the process **exists** but is
+  inaccessible; treating it as dead would let B.3 step 3(b) remove a live (booting or hung) `serve`'s file and
+  spawn a second instance (the F7.1/F8.1 failure) and let the `O_EXCL` takeover overwrite a live winner's file
+  (the F7.2 clobber). "Fail-closed" held for pid reuse only; a probe failure was fail-**open**. **Fixed:** B.1
+  now pins the error contract — **dead** only on the definite "no such process" result (Unix `ESRCH`; Windows
+  `ERROR_INVALID_PARAMETER`), **alive** on "exists but inaccessible" (Unix `EPERM`; Windows
+  `ERROR_ACCESS_DENIED`) and on every other/indeterminate error, so an undecidable probe is fail-closed — and
+  states that both the `O_EXCL` takeover and the B.2/B.3 stale branch read it this way. The `O_EXCL` takeover
+  bullet (B.1) was updated to cite the pinned contract.
+- **F9.2 (MINOR, JUSTIFIED):** the §11 D gate `git grep -n develop` is a substring match, so it also hits the
+  English word "developer" (`README.md:12`, `architecture.md:11`, `build-and-run.md:19`,
+  `testing-and-quality.md:113`, `INDEX.md:7`) — the gate could never reach zero matches, and `README.md`,
+  `docs/context/architecture.md` and `docs/context/build-and-run.md` carry **no** branch reference at all and
+  were wrongly listed as requiring a change. **Fixed:** the gate is now word-bounded (`git grep -nw develop` /
+  `git grep -nE '\bdevelop\b'`), the pre-change positive control is kept word-bounded, the three files were
+  dropped from the D change list (with a note that bead 16 still refreshes architecture/build-and-run for their
+  own reasons, not for the `develop` drop), and the change list is now the true branch-reference set
+  (`CLAUDE.md:50,57,63`, `branch-guard.yml:18`, `main-guard.yml:33`, `conventions.md:128`,
+  `testing-and-quality.md:101-102`) with `INDEX.md:122` corrected from "2 occurrences" to **one**.
+- **F9.3 (NIT, JUSTIFIED):** §11B cited `` `Filter` and `requestWhere` … (`store.go:327-356`) `` but that range
+  is only `requestWhere` (`store.go:327`); the `Filter` struct lives at `types.go:126` and is where bead 05
+  must add `Until`. **Fixed:** split the cite to `Filter` (`types.go:126`) and `requestWhere` (`store.go:327`).
+
+### v10 — round 8 triage (2026-09-25)
+
+- **F8.1 (MAJOR, JUSTIFIED):** v9's `bootGrace = 5 min` age threshold was false on two counts. (i) It claimed
+  to be "≥ the worst-case pre-listener time", but the same phase includes `purgeOnStartup`, **unbounded when
+  `RetentionDays > 0`** (B.3 step 7) — so a live booting `serve` could age past `bootGrace` and be classified
+  stale, the F6.5/F7.1 failure at a larger threshold. (ii) For a boot outlasting `bootGrace`, B.3 step 3(b)
+  removed the file and skipped to step 5 (spawn) — contradicting "never a second instance". **Fix (conductor's
+  unification):** dropped `bootGrace` entirely and keyed the stale rule on the **same signal the `O_EXCL`
+  takeover already uses** — a file is stale only when its recorded pid is **not alive** (the one
+  `isProcessAlive` helper), *in addition to* health refusing and both ports refusing. A live pid (booting or
+  hung) is now un-staleable **regardless of age**, so no boot length can weaken it and the
+  `bootGrace`-vs-unbounded-`purgeOnStartup` tension is gone. Extended the existing `O_EXCL` reconciliation: the
+  pid check answers a file-ownership/staleness question, not the service-liveness question health answers. Kept
+  the early write (it puts the booting serve's own live pid on disk). Updated B.1, B.2, B.3 step 3(b), both B.5
+  rows, and §7 B. Corrected B.5's honest bound: at most one *proxy* survives the bind race; a misclassified
+  boot (e.g. reused pid) errs toward *starting* and its spawned instance fails to bind and exits without
+  deleting the winner's file.
+- **F8.2 (MINOR, JUSTIFIED):** `lens shutdown` was documented to use `--timeout`, but the
+  flag-stripping-before-`config.Load` requirement was stated for `restart` only. `config.Load`'s flag set is
+  closed (`config.go:270-290`) and `main.go:43` passes `os.Args[2:]` straight through, so `lens shutdown
+  --timeout 30s` would fail "flag provided but not defined". Gave B.2 the same treatment as B.3 step 1 —
+  retitled `### B.2 lens shutdown [--timeout 30s]` and added the strip-before-`config.Load` sentence.
+- **F8.3 (NIT, JUSTIFIED):** §7 B's stale-file bullet bundled `shutdown` into "proceeds to **spawn**", but
+  `shutdown` never spawns (B.2: remove + exit 0). Split the bullet: `restart` removes the file and proceeds to
+  spawn (step 5) without burning `--timeout`; `shutdown` removes it and exits 0 without spawning, also without
+  burning `--timeout`.
+
+### v9 — round 7 triage (2026-09-25)
+
+- **F7.1 (JUSTIFIED):** the boot-window rule keyed starting-vs-stale off `--timeout` (default 30 s), but the
+  plan's own worst-case pre-listener phase is 20–60 s (`CREATE INDEX`, B.3 step 7): a live booting `serve`
+  older than 30 s was therefore classified stale, its file removed, and a second instance spawned — exactly
+  what F6.5 set out to prevent. Decoupled the threshold: a fixed `bootGrace = 5 * time.Minute` constant (B.1),
+  documented as ≥ the worst-case pre-listener time; `--timeout` now bounds only how long callers *wait*.
+  Restated B.5's row conditionally ("removes it **only when** `started_at` is older than `bootGrace`",
+  independent of any caller's `--timeout`) and added the §7 B boundary test (file older than `--timeout` but
+  younger than `bootGrace` ⇒ *starting*, not removed).
+- **F7.2 (JUSTIFIED):** the early write was unconditional on the one shared path, so two concurrent `serve`
+  processes each overwrote the single file; the loser's early write landing after the winner's post-`Listen`
+  rewrite gave the file the loser's `pid`, and the pid-guard then let the loser delete a live winner's file.
+  Specified an `O_EXCL` create (B.1): on `EEXIST`, take over only a genuinely stale file (dead pid) and never
+  overwrite a live/recent one; the loser binds-and-exits without writing or removing. Kept B.1's
+  "liveness is health, never file/pid" rule coherent — the ownership check gates the file *write*, not service
+  liveness. Added a B.5 risk row and strengthened the §7 B pid-guard test (assert the winner's `pid` survives).
+- **F7.3 (MINOR, JUSTIFIED):** the stale/boot dial read the two addresses from the state file, but during the
+  boot window the file is the early write with those fields empty — nothing to dial. Added the explicit
+  fallback (B.1 dial helper, B.2, B.3 step 3(b)): dial `cfg.ProxyAddr`/`cfg.DashboardAddr` when the file's
+  addresses are empty (`shutdown`/`restart` run `config.Load` first).
+- **F7.4 (MINOR, JUSTIFIED):** the removal was required on three early-return paths (`serve.go:49,54,119`) but
+  the plan only excluded a `defer` without naming the replacement, and its ordering rationale was backwards (a
+  removal `defer` registered before `st.Close()`'s runs *after* it under LIFO — the wanted order). Named the
+  mechanism: one idempotent, pid-guarded `defer` registered right after the create covers the early returns,
+  alongside the explicit ordered teardown for the normal path; kept only the conditionality argument for why
+  the normal-path removal is not a bare `defer`.
+
+### v8 — round 6 triage (2026-09-25)
+
+- **F6.1 (JUSTIFIED):** the archiver was modelled as a *second* goroutine yet told to run "on the existing
+  24 h ticker" — C.2 contradicted B.1 and bead 14. `time.Ticker.C` delivers each tick to one receiver, so a
+  second reader would steal alternate ticks from the purge. Adopted the conductor's option (a): **one**
+  maintenance goroutine (bead 08's join), with bead 12 folding purge → archive → `GCArchive` into the same
+  loop body, no second goroutine. Fixed B.1's join paragraph, C.2's serve row, bead 12's title and bead 14.
+- **F6.2 (JUSTIFIED):** B.1 dropped `defer st.Close()`, leaving the store unclosed on `Serve`'s early return
+  at serve.go:117-120. Kept the defer (idempotent no-op after the explicit close) and rely on the explicit
+  `st.Close()` before the pid-guarded removal for ordering.
+- **F6.3 (JUSTIFIED):** B.4 fed `config.Load` the raw `os.Args[2:]`; `serve` actually passes
+  `translateNoCapture(args)` (serve.go:35). Raw args make a `--no-capture` instance unreloadable (unknown
+  flag → 400). Specified the translated slice and added the `--no-capture` reload test.
+- **F6.4 (JUSTIFIED):** B.5 claimed the bind-race loser "exits non-zero"; `Serve` logs the listener error and
+  returns `nil` (serve.go:179-200), so it exits 0. Per the conductor, fixed B.5's wording to "fails to bind and
+  exits without deleting the winner's file" and dropped the exit-code claim (no bead changes `Serve`'s return).
+- **F6.5 (JUSTIFIED):** the stale rule ("health refuses **and** both ports refuse ⇒ stale") misfires during the
+  pre-listener window (`store.Open`/`CREATE INDEX`, `checkRedaction`, `purgeOnStartup`) where a live *booting*
+  `serve` also refuses both ports. Closed the window: the state file is created **early** (before
+  `store.Open`) and the stale rule now also requires the file's `started_at` to be older than the boot window
+  (`--timeout`); a younger file is treated as *starting*. Defined B.2's previously implicit no-file case. Added
+  the fail-closed boot-window test and B.5 risk row. (The early write also made B.1's "written far later, so a
+  removal `defer` would run before `st.Close()`" rationale stale; it now rests on the removal being
+  *conditional* on the join, which a `defer` cannot express.)
+- **F6.6 (NIT, JUSTIFIED):** the "bead 09 of GI-17" migration precedent does not exist (`br-GI-17-09` is the
+  Settings price table; GI-17 has no schema migration). Dropped the citation; the mechanism is `Open` running
+  `schema.sql`'s `CREATE TABLE IF NOT EXISTS` on every start (store.go:121), no migration framework
+  (schema.sql:1-8).
+
+### v7 — round 5 triage (2026-09-25)
+
+- **F5.1 (JUSTIFIED):** Fixed the shutdown-teardown mechanism in B.1. `st.Close()` is `defer`red at
+  serve.go:57 (before the state file exists), so a removal `defer` registered later runs *before* it (LIFO) —
+  the guarantee was unimplementable as written. Specified an explicit ordered teardown (join goroutines,
+  `st.Close()` called explicitly, pid-guarded removal as the final statement). Added the store-wrapper test to
+  §7 B that asserts the file still exists inside `Close`.
+- **F5.2 (JUSTIFIED):** Bead 12 now depends on **08** (the archiver goroutine needs bead 08's WaitGroup join
+  mechanism and the `net.Listen` split's "after listeners are up" point). Bead 08's title names joining the
+  existing purge goroutine via a ctx-checked WaitGroup. (Bead 14 → 08 is transitive via 10 — left as is.)
+- **F5.3 (JUSTIFIED):** Wildcard binds (`0.0.0.0:port` / `[::]:port`) return an unspecified `Addr()`, which
+  is not dialable on Windows while live — the round-4 stale-file rule would then delete a live serve's state
+  file and let `restart` lose the bind race. B.1 now requires every client-side dial (health, port-refusal,
+  stale detection) to normalize an unspecified host to loopback; B.3 step 3(b) points at that helper. Added a
+  wildcard-bound ephemeral-listener test to §7 B.
+- **F5.4 (MINOR, JUSTIFIED):** Chose the join-bound-expiry behaviour: fail-closed — on bound expiry with a
+  writer goroutine still running, log and **do not** remove the state file, so the "file gone ⇒ drained"
+  proof is never false. Added the fail-closed test to §7 B; noted the purge path already passes `ctx` into the
+  store call (`store.go:955` `BeginTx(ctx)`) and the archiver must too.
 
 ### v6 — round 4 triage (2026-09-25)
 
