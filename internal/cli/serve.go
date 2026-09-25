@@ -155,7 +155,7 @@ func Serve(args []string) error {
 	// cfg.ReplayEnabled is the endpoint's opt-in control — the dashboard route
 	// exists but answers 403 until `lens serve --replay` is passed.
 	dashAPI := api.New(st, sk, cons, broker, web.Files, proxySrv.Handler, cfg.ReplayEnabled)
-	live := api.NewLiveConfig(cfg.RetentionDays)
+	live := api.NewLiveConfig(cfg.RetentionDays, cfg.HotDays)
 	dashAPI.SetLive(live)
 	dashAPI.SetPricing(pricing.DefaultPath())
 	dashAPI.SetRetention(cfg.RetentionDays, st)
@@ -215,7 +215,7 @@ func Serve(args []string) error {
 	maint.Add(1)
 	go func() {
 		defer maint.Done()
-		runMaintenance(ctx, st, live.RetentionDays, func() int { return cfg.HotDays })
+		runMaintenance(ctx, st, live.RetentionDays, live.HotDays)
 	}()
 
 	select {

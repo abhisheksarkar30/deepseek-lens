@@ -969,6 +969,35 @@ func TestPostReload(t *testing.T) {
 		t.Fatalf("applied = %v, want none", got.Applied)
 	}
 
+	write("RetentionDays = 9\nHotDays = 2\n")
+	rr = post("127.0.0.1:9", "")
+	got = decodeJSON[reloadResponse](t, rr.Body)
+	if rr.Code != http.StatusOK || len(got.Applied) != 1 || got.Applied[0] != "HotDays" || got.Unchanged {
+		t.Fatalf("hot days reload = %d %+v", rr.Code, got)
+	}
+	if handler.live.HotDays() != 2 {
+		t.Fatalf("live HotDays = %d, want 2", handler.live.HotDays())
+	}
+
+	write("RetentionDays = 7\nHotDays = 9\n")
+	rr = post("127.0.0.1:9", "")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid hot days status = %d", rr.Code)
+	}
+	if handler.live.HotDays() != 2 || handler.live.RetentionDays() != 9 {
+		t.Fatalf("rolled back live = hot %d retention %d", handler.live.HotDays(), handler.live.RetentionDays())
+	}
+
+	write("RetentionDays = 9\nHotDays = 2\nBodyCapBytes = 1048576\n")
+	rr = post("127.0.0.1:9", "")
+	got = decodeJSON[reloadResponse](t, rr.Body)
+	if !strings.Contains(strings.Join(got.RestartRequired, ","), "BodyCapBytes") || len(got.Applied) != 0 || got.Unchanged {
+		t.Fatalf("body cap reload = %+v", got)
+	}
+	if handler.live.HotDays() != 2 || handler.boot.BodyCapBytes == 1048576 {
+		t.Fatalf("running hot=%d boot cap=%d", handler.live.HotDays(), handler.boot.BodyCapBytes)
+	}
+
 	handler.SetReload([]string{"--no-capture"}, boot)
 	write("RetentionDays = 9\n")
 	rr = post("127.0.0.1:9", "")

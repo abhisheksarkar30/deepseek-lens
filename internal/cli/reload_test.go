@@ -20,3 +20,10 @@ func TestReloadStripsUnknownFlag(t *testing.T) {
 		t.Fatalf("err = %v, want no state file", err)
 	}
 }
+
+func TestStripKeepsHotDays(t *testing.T) {
+	got := strings.Join(stripOwnFlags([]string{"--hot-days", "7", "--not-real"}), " ")
+	if got != "--hot-days 7" {
+		t.Fatalf("stripped = %q", got)
+	}
+}

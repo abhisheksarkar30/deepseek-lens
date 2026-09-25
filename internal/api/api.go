@@ -125,7 +125,7 @@ func (a *api) SetPricing(path string) { a.pricePath = path }
 // 503 rather than panicking on a nil purge.
 func (a *api) SetRetention(days int, purge RetentionPurger) {
 	if a.live == nil {
-		a.live = NewLiveConfig(days)
+		a.live = NewLiveConfig(days, 0)
 	} else {
 		a.live.SetRetentionDays(days)
 	}
@@ -820,14 +820,15 @@ func (a *api) postReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := diffReload(a.boot, next)
-	if contains(resp.Applied, "RetentionDays") {
+	if contains(resp.Applied, "RetentionDays") || contains(resp.Applied, "HotDays") {
 		if a.live == nil {
-			a.live = NewLiveConfig(next.RetentionDays)
+			a.live = NewLiveConfig(next.RetentionDays, next.HotDays)
 		} else {
-			a.live.SetRetentionDays(next.RetentionDays)
+			a.live.Apply(next.RetentionDays, next.HotDays)
 		}
 		a.retentionDays = a.live.RetentionDays()
 		a.boot.RetentionDays = next.RetentionDays
+		a.boot.HotDays = next.HotDays
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -865,7 +866,7 @@ func diffReload(boot, next *config.Config) reloadResponse {
 		{"OffPeakDates", false, boot.OffPeakDates != next.OffPeakDates},
 		{"WorkDates", false, boot.WorkDates != next.WorkDates},
 		{"RetentionDays", true, boot.RetentionDays != next.RetentionDays},
-		{"HotDays", false, boot.HotDays != next.HotDays},
+		{"HotDays", true, boot.HotDays != next.HotDays},
 	}
 	for _, f := range fields {
 		if !f.diff {
