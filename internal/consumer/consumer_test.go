@@ -1177,7 +1177,7 @@ func TestBodyDecodingRecoversCompressedUsage(t *testing.T) {
 
 	runClosed(t, c, sk, []*sink.CapturedCall{call})
 
-	rows, err := st.ListRequests(context.Background(), store.Filter{Limit: 10})
+	rows, err := st.ListRequests(context.Background(), store.Filter{Limit: 10, WithBodies: true})
 	if err != nil {
 		t.Fatalf("ListRequests: %v", err)
 	}
@@ -1221,7 +1221,7 @@ func TestBodyDecodingIsOptIn(t *testing.T) {
 
 	runClosed(t, c, sk, []*sink.CapturedCall{call})
 
-	rows, err := st.ListRequests(context.Background(), store.Filter{Limit: 10})
+	rows, err := st.ListRequests(context.Background(), store.Filter{Limit: 10, WithBodies: true})
 	if err != nil {
 		t.Fatalf("ListRequests: %v", err)
 	}
