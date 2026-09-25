@@ -32,7 +32,8 @@ client itself sends.
 | `LENS_UPSTREAM_URL` | DeepSeek upstream base URL | optional |
 | `LENS_DB_PATH` | SQLite database file path | optional |
 | `LENS_BODY_POLICY` | `full` \| `truncated` \| `off` | optional |
-| `LENS_BODY_CAP_BYTES` | Max bytes captured per body | optional |
+| `LENS_BODY_CAP_BYTES` | Max bytes captured per body. The shipped default is 262144; 8388608 is an operator opt-in | optional |
+| `LENS_HOT_DAYS` | Days of bodies kept in the hot database. `0` leaves archival off | optional |
 | `LENS_ALLOW_REMOTE` | Allow non-loopback bind addresses | optional |
 | `LENS_CAPTURE` | Enable/disable capture entirely | optional |
 | `LENS_SESSION_GAP_MINUTES` | Inactivity gap before a new session | optional |
@@ -66,7 +67,9 @@ editable via `lens prices --set` / `--edit`.
    secret-scan hooks — see [conventions.md](conventions.md)'s governance section).
 2. `go build ./...` to verify the module builds (pulls `modernc.org/sqlite`, pure Go, no cgo/system
    SQLite required).
-3. `go run ./cmd/lens serve` starts both listeners; it prints the `ANTHROPIC_BASE_URL` export line
+3. `go run ./cmd/lens serve` starts both listeners; it prints the `ANTHROPIC_BASE_URL` export line.
+   It writes `serve.state.json` beside the database before opening the store. `lens shutdown`,
+   `lens restart`, and `lens reload` talk to that running process. `lens archive` moves or restores bodies.
    and the dashboard URL to copy-paste ([internal/cli/serve.go:139](../../internal/cli/serve.go)).
 4. `go run ./cmd/lens doctor` at any time to check effective config and (if `serve` is running) live
    sink/consumer stats via `GET /api/health`.

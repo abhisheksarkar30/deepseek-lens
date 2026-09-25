@@ -105,9 +105,9 @@ CI gate.
   row so they run *before* insert; warning analyzers attach by row id so they run *after*. Feature
   beads plug into these seams at fixed points rather than reordering them.
 - **Fail open.** The proxy never makes the user's coding session depend on the observer. The
-  dashboard listener carries write routes — `POST /api/requests/{id}/replay`, `POST
-  /api/prices`, and `POST /api/purge` (destructive); plan §B.2 and §B.4 add `POST /api/shutdown`
-  and `POST /api/reload` — each behind `replayOriginReject`'s
+  dashboard listener carries five write routes — `POST /api/requests/{id}/replay`, `POST
+  /api/prices`, `POST /api/purge` (destructive), `POST /api/shutdown`, and `POST /api/reload` —
+  each behind `replayOriginReject`'s
   `Origin`/`Host` allowlist, parameterized by action, with no shared secret. Replay is the only
   billable one and is off by default (`--replay`) on top of that guard — see the plan's security
   self-review for why the credentialless guard is sufficient and what the upgrade path is.

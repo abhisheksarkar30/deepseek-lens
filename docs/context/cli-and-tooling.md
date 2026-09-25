@@ -20,6 +20,9 @@
 | `replay` | `<id>` (positional), `--set path=value` (repeatable), `--dump`, `--no-capture`, `--diff id`, `--yes`, `--server` | Re-sends a captured request's body (optionally edited) via the dashboard's replay API and prints the outcome diff | [internal/cli/replay.go](../../internal/cli/replay.go) |
 | `purge` | `--older-than <days>`, `--unpriced`, `--dry-run`, `--yes`, `--vacuum` | One-shot purge for when `lens serve` isn't running: opens the store directly (the one CLI subcommand that does), guarded against an unconfigured/whole-table delete before it ever opens the store | [internal/cli/purge.go](../../internal/cli/purge.go) |
 | `archive` | `status`; `run [--dry-run] [--yes]`; `restore --since --until [--dry-run] [--yes]` | Prints archive health, moves bodies older than HotDays, or copies them back. A real run or restore requires `--yes`, the same gate as `purge` | [internal/cli/archive.go](../../internal/cli/archive.go) |
+| `shutdown` | — | Asks the running serve to stop via `POST /api/shutdown`, using `serve.state.json` | [internal/cli/shutdown.go](../../internal/cli/shutdown.go) |
+| `restart` | `--exe` | Stops the running serve and starts a detached replacement; a failed health check can roll back to the previous binary | [internal/cli/restart.go](../../internal/cli/restart.go) |
+| `reload` | config flags | Asks the running serve to re-read config. `RetentionDays` and `HotDays` apply live | [internal/cli/reload.go](../../internal/cli/reload.go) |
 
 `replay` needs `--yes` to proceed when the original call's cost is above
 `ReplayCostThresholdUSD` (default $0.25) or unknown — enforced by `costGate`

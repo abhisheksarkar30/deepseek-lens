@@ -57,7 +57,17 @@ ADR).
 
 ## Last generated / refreshed
 
-2026-09-19, REFRESH mode, scoped to the GI-24 holiday-aware peak pricing story
+2026-09-25, REFRESH mode, scoped to the GI-27 billing-fidelity, cap, archival and lifecycle story
+(`GI-27-billing-fidelity-cap-archival-lifecycle` branch) — `StatsByPeriod` takes `tzOffsetMin`;
+`GET /api/requests` takes `until`; `GET /api/stats` takes `tz_offset`; the response tee keeps a
+16 KiB usage tail past the body cap; `idx_requests_stats` covers the stats aggregates; bodies older
+than `HotDays` move to per-UTC-day archive files with a `body_archive` marker; one maintenance
+goroutine purges, archives, then collects orphans; `serve.state.json` is written before the store
+opens; `lens shutdown`, `restart`, `reload`, and `archive` are the new commands; `POST /api/shutdown`
+and `POST /api/reload` bring the guarded write routes to five. `RetentionDays` and `HotDays` apply
+live. The shipped body cap stays 256 KiB.
+
+Previously: 2026-09-19, REFRESH mode, scoped to the GI-24 holiday-aware peak pricing story
 (`GI-24-holiday-aware-peak-pricing` branch) — a new `pricing.Calendar` (a date grammar over an
 off-peak set and a 调休 make-up work-date set) replaced the package-level `pricing.IsPeak`, which was
 **deleted**; `pricing.Compute` and `analyze.NewRules` each gained a `Calendar`, so peak pricing is

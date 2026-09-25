@@ -5,32 +5,34 @@
 Two HTTP surfaces run in one process (`lens serve`): the **proxy listener** (no routes — a
 transparent reverse proxy, see [workflows.md](workflows.md)) and the **dashboard listener**, whose
 JSON API is documented here. Registered in the `mux.Handle*` block at
-[internal/api/api.go:153-171](../../internal/api/api.go).
+[internal/api/api.go:189-208](../../internal/api/api.go).
 
 ## REST / RPC
 
 | Method | Path | Auth | Summary | Response | Evidence |
 |---|---|---|---|---|---|
-| GET | `/api/requests` | none (loopback-only) | List captured requests; query params `limit`, `offset`, `since` (duration or RFC3339), `session`, `model`, `warn`, `errors` | `[]store.Request` + page headers | [internal/api/api.go:314-366](../../internal/api/api.go) |
-| GET | `/api/requests/{id}` | none | One request + its attached warnings | `requestDetail{*store.Request, Warnings}` | [internal/api/api.go:375-400](../../internal/api/api.go) |
-| POST | `/api/requests/{id}/replay` | **Origin/Host allowlist + opt-in flag** (see below) | Re-sends a captured request's body (optionally edited) through the live proxy | `replay.Result{ID, Captured, Status, Outcome}` | [internal/api/api.go:432-545](../../internal/api/api.go) |
-| GET | `/api/stats` | none | Aggregate stats: summary, by-model, by-period, by-cost-source; query params `since`, `until`, and `granularity` (`hour`, `day`, `week`, or `month`; default `day`) — the two bounds are half-open `[since, until)`, and an unrecognized `granularity` is a 400 rather than a silent fallback | `statsResponse` | [internal/api/api.go:767-820](../../internal/api/api.go) |
-| GET | `/api/warnings/summary` | none | Warning counts grouped by `(kind, severity)` over the **whole** table; query params `since`, `kind`, `severity`. **No `limit`/`offset`** | `[]store.WarningGroup` | [internal/api/api.go:822-854](../../internal/api/api.go) |
-| GET | `/api/warnings` | none | List warnings; query params `limit`, `offset`, `since`, `kind`, `severity` | `[]store.Warning` + page headers | [internal/api/api.go:855-890](../../internal/api/api.go) |
-| GET | `/api/sessions` | none | List sessions with running totals; query params `limit`, `offset` | `[]store.Session` + page headers | [internal/api/api.go:891-921](../../internal/api/api.go) |
-| GET | `/api/sessions/{id}` | none | One session + its calls (chronological) + union of its warnings + a peak-priced rollup | `sessionDetail{*store.Session, Calls, Warnings, Peak}` — `Peak` is `{calls, cost_usd}`, computed **at read time** over the calls, so it uses the calendar installed **now**, not the one in force when each row was ingested; cost and warnings are frozen at ingest, so an old row's badge can disagree with this header (deliberately — see [workflows.md](workflows.md)) | [internal/api/api.go:960-1023](../../internal/api/api.go) |
-| GET | `/api/stream` | none | Server-Sent Events feed of `{type:"request", id}` / `{type:"warnings", id, warnings}` events | SSE `text/event-stream` | [internal/api/api.go:1025-1062](../../internal/api/api.go) |
-| GET | `/api/health` | none | Sink accepted/dropped counts, consumer processed/failed/flushes, last-write age, `replay_enabled` | `healthResponse` | [internal/api/api.go:1079-1099](../../internal/api/api.go) |
+| GET | `/api/requests` | none (loopback-only) | List captured requests; query params `limit`, `offset`, `since` and `until` (duration or RFC3339, half-open `[since, until)`), `session`, `model`, `warn`, `errors` | `[]store.Request` + page headers | [internal/api/api.go:366-432](../../internal/api/api.go) |
+| GET | `/api/requests/{id}` | none | One request + its attached warnings. `ArchiveDay` is set when the bodies were loaded from a day file | `requestDetail{*store.Request, Warnings}` | [internal/api/api.go:433-463](../../internal/api/api.go) |
+| POST | `/api/requests/{id}/replay` | **Origin/Host allowlist + opt-in flag** (see below) | Re-sends a captured request's body (optionally edited) through the live proxy | `replay.Result{ID, Captured, Status, Outcome}` | [internal/api/api.go:512-625](../../internal/api/api.go) |
+| GET | `/api/stats` | none | Aggregate stats: summary, by-model, by-period, by-cost-source; query params `since`, `until`, `tz_offset` (minutes, −720..840), and `granularity` (`hour`, `day`, `week`, or `month`; default `day`) — the two bounds are half-open `[since, until)`, and an unrecognized `granularity` is a 400 rather than a silent fallback | `statsResponse` | [internal/api/api.go:952-1016](../../internal/api/api.go) |
+| GET | `/api/warnings/summary` | none | Warning counts grouped by `(kind, severity)` over the **whole** table; query params `since`, `kind`, `severity`. **No `limit`/`offset`** | `[]store.WarningGroup` | [internal/api/api.go:1017-1034](../../internal/api/api.go) |
+| GET | `/api/warnings` | none | List warnings; query params `limit`, `offset`, `since`, `kind`, `severity` | `[]store.Warning` + page headers | [internal/api/api.go:1035-1070](../../internal/api/api.go) |
+| GET | `/api/sessions` | none | List sessions with running totals; query params `limit`, `offset` | `[]store.Session` + page headers | [internal/api/api.go:1071-1139](../../internal/api/api.go) |
+| GET | `/api/sessions/{id}` | none | One session + its calls (chronological) + union of its warnings + a peak-priced rollup | `sessionDetail{*store.Session, Calls, Warnings, Peak}` — `Peak` is `{calls, cost_usd}`, computed **at read time** over the calls, so it uses the calendar installed **now**, not the one in force when each row was ingested; cost and warnings are frozen at ingest, so an old row's badge can disagree with this header (deliberately — see [workflows.md](workflows.md)) | [internal/api/api.go:1140-1206](../../internal/api/api.go) |
+| GET | `/api/stream` | none | Server-Sent Events feed of `{type:"request", id}` / `{type:"warnings", id, warnings}` events | SSE `text/event-stream` | [internal/api/api.go:1207-1258](../../internal/api/api.go) |
+| GET | `/api/health` | none | Sink accepted/dropped counts, consumer processed/failed/flushes, last-write age, `replay_enabled` | `healthResponse` | [internal/api/api.go:1259](../../internal/api/api.go) |
 | GET | `/api/prices` | none | Effective price table, resolved fresh from `~/.deepseek-lens/prices.toml` on every call (no cache), plus the effective peak calendar's date sets echoed verbatim (`""`/`""` when no calendar is wired) | `pricesResponse{Path, PeakMultiplier, Models, OffPeakDates, WorkDates}` | [internal/api/prices.go:41-58](../../internal/api/prices.go) |
 | POST | `/api/prices` | **Origin/Host allowlist** (`replayOriginReject`, action `"prices"`) | Replaces one model's rates wholesale (whole-row write, D3); an omitted field and an explicit `null` both unset it | `pricesResponse` (the post-write table, same shape — including the two calendar fields) | [internal/api/prices.go:80-126](../../internal/api/prices.go) |
 | GET | `/api/retention` | none | Retention config plus both purge previews (age-based and unpriced) in one round trip, so a confirm dialog shows a real count | `retentionResponse` | [internal/api/purge.go:19-81](../../internal/api/purge.go) |
 | POST | `/api/purge` | **Origin/Host allowlist** (`replayOriginReject`, action `"purge"`) | Deletes rows by `mode`: `older_than` (requires `days > 0`) or `unpriced` — the destructive route | `purgeResponse{Mode, Deleted, SessionsReconciled}` | [internal/api/purge.go:104-152](../../internal/api/purge.go) |
+| POST | `/api/shutdown` | **Origin/Host allowlist + loopback caller** | Stops the running serve | empty JSON | [internal/api/api.go:777-799](../../internal/api/api.go) |
+| POST | `/api/reload` | **Origin/Host allowlist + loopback caller** | Re-reads config. `RetentionDays` and `HotDays` apply live; other diffs are `restart_required` | `reloadResponse{applied, restart_required, unchanged}` | [internal/api/api.go:800-833](../../internal/api/api.go) |
 | GET/* | `/` (catch-all) | none | Serves the embedded dashboard static assets (`internal/web`) | HTML/CSS/JS | [internal/api/api.go:171](../../internal/api/api.go) |
 
 Every GET route but the catch-all is wrapped by `methodGet`, which rejects non-GET methods with a
-JSON 405 ([internal/api/api.go:176-189](../../internal/api/api.go)). All routes **except the three
-POST write routes** (replay, prices, purge) are read-only and rely on loopback binding for their "no
-auth needed" rationale ([internal/api/api.go:176-180](../../internal/api/api.go), and see
+JSON 405 ([internal/api/api.go:218-226](../../internal/api/api.go)). All routes **except the five
+POST write routes** (replay, prices, purge, shutdown, reload) are read-only and rely on loopback binding for their "no
+auth needed" rationale ([internal/api/api.go:218-226](../../internal/api/api.go), and see
 [security-and-permissions.md](security-and-permissions.md)).
 
 ### Pagination contract (the three list routes)
@@ -53,15 +55,15 @@ and `/api/warnings` — the handler passes the *same* `store.Filter` to its list
 call, so the total and the page can never describe two different sets. `/api/sessions` has no
 filterable column: its list call takes the window, but `CountSessions` takes no filter at all and
 returns the whole table, so there is no filter for the total and the page to disagree on
-([internal/api/api.go:352-359](../../internal/api/api.go),
-[internal/api/api.go:878-883](../../internal/api/api.go),
-[internal/api/api.go:912-914](../../internal/api/api.go)).
+([internal/api/api.go:416](../../internal/api/api.go),
+[internal/api/api.go:1062](../../internal/api/api.go),
+[internal/api/api.go:1071](../../internal/api/api.go)).
 
 > **`X-Limit` is the applied page size, not the requested one.** When `?limit` is absent the request
 > carries `0` but the store applies `DefaultLimit`, so the header reports `1000`, not `0`. A
 > header-driven consumer computing `nextOffset = offset + X-Limit` depends on this: the raw `0` would
 > leave it stuck on page 1 forever with no error to explain why
-> ([internal/api/api.go:230-248](../../internal/api/api.go), and the regression test
+> ([internal/api/api.go:272](../../internal/api/api.go), and the regression test
 > `TestPageHeaderLimitIsEffective` in [internal/api/pagination_test.go](../../internal/api/pagination_test.go)).
 
 `/api/warnings/summary` is **deliberately unpaginated** and carries none of these headers. A
@@ -71,16 +73,16 @@ problem the summary exists to fix. Its *query* is unbounded (counting correctly 
 warning); the covering index `idx_warnings_kind_severity_created_at` keeps that cheap — see
 [data-model.md](data-model.md).
 
-### The three write routes' shared guard
+### The five write routes' shared guard
 
-`replayOriginReject` ([internal/api/api.go:675-733](../../internal/api/api.go)) is one Origin/Host
+`replayOriginReject` ([internal/api/api.go:885](../../internal/api/api.go)) is one Origin/Host
 allowlist, parameterized by an `action` string for its error message, applied before any bytes are
 sent or any row is touched. The write routes call it — nothing here is replay-specific
 anymore:
 
 1. `POST /api/requests/{id}/replay` — the project's **only billable** route, and the only one gated
    by an additional opt-in flag (`replayEnabled`, off by default; `lens serve --replay` turns it on,
-   [internal/api/api.go:455-461](../../internal/api/api.go)). Query params: `?set=<jsonpath>=<value>`
+   [internal/api/api.go:512](../../internal/api/api.go)). Query params: `?set=<jsonpath>=<value>`
    (repeatable, body edits) and `?no_capture=true` (send without recording).
 2. `POST /api/prices` — always on; rejects malformed/unknown-field bodies and invalid rates before
    writing (see [internal/api/prices.go](../../internal/api/prices.go)).
@@ -89,8 +91,8 @@ anymore:
    [internal/api/purge.go](../../internal/api/purge.go).
 4. `POST /api/shutdown` — drives the running serve's stop. Same Origin/Host allowlist, plus a
    loopback-caller check because the route is disruptive. `lens shutdown` is the client.
-5. `POST /api/reload` — re-reads config on the translated boot args. `RetentionDays` applies live;
-   every other difference is reported as `restart_required`. Same two guards as shutdown.
+5. `POST /api/reload` — re-reads config on the translated boot args. `RetentionDays` and `HotDays`
+   apply live; every other difference is reported as `restart_required`. Same two guards as shutdown.
 
 Full guard rationale in [security-and-permissions.md](security-and-permissions.md).
 
@@ -116,7 +118,7 @@ and CLAUDE.md's two-writers invariant.
 
 ## Representative payloads
 
-`healthResponse` (from `/api/health`, [internal/api/api.go:1079-1099](../../internal/api/api.go)):
+`healthResponse` (from `/api/health`, [internal/api/api.go:1259](../../internal/api/api.go)):
 
 ```json
 {

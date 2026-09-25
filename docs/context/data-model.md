@@ -11,9 +11,12 @@ feature will ever need already exists in the schema, even columns only a later f
 
 | Table | Purpose | Key fields | Constraints/Indexes | Evidence |
 |---|---|---|---|---|
-| `requests` | One row per proxied (or replayed) call | `id` PK, `started_at`, `method`/`path`/`status`, `req_body`/`resp_body` (BLOB, redacted+capped), `input_tokens`/`output_tokens`, `model_requested`/`model_resolved`, `session_id`, `cost_usd`/`cost_source`, `replay_of`/`replay_edits`, `prefix_hash` | Index on `started_at`, index on `session_id` | [internal/store/schema.sql:10-41](../../internal/store/schema.sql) |
+| `requests` | One row per proxied (or replayed) call | `id` PK, `started_at`, `method`/`path`/`status`, `req_body`/`resp_body` (BLOB, redacted+capped; NULL once archived), `input_tokens`/`output_tokens`, `model_requested`/`model_resolved`, `session_id`, `cost_usd`/`cost_source`, `replay_of`/`replay_edits`, `prefix_hash` | `idx_requests_started_at`; `idx_requests_session_id`; `idx_requests_stats` covers the stats aggregates and leads with `started_at` | [internal/store/schema.sql:10-41](../../internal/store/schema.sql) |
 | `sessions` | Agentic-run grouping with incrementally maintained totals | `id` PK (format `s_<unix-ms>_<8hex>`), `prefix_hash` (nullable, see below), `first_seen`/`last_seen`, `request_count`, `total_input_tokens`/`total_output_tokens`/`total_cost_usd`, `priced_count`/`unpriced_count`, `model_set`, `warning_count` | Index on `prefix_hash` | [internal/store/schema.sql:50-65](../../internal/store/schema.sql) |
 | `warnings` | One row per analyzer finding attached to a request | `id` PK, `request_id` FK → `requests(id)` (`ON DELETE CASCADE`), `kind`, `severity`, `detail`, `path`, `created_at` | Index on `request_id`; covering index on `(kind, severity, created_at)` for `WarningSummary`'s `GROUP BY` | [internal/store/schema.sql:72-89](../../internal/store/schema.sql) |
+| `body_archive` | Marker for a body moved out of the hot database | `request_id`, `day` (UTC `YYYY-MM-DD`), `archived_at`, `body_mask` | Index on `request_id`; index on `day` | [internal/store/schema.sql:97-104](../../internal/store/schema.sql) |
+
+Archived bodies are not in `requests`. They live in `<dbdir>/archive/bodies-YYYY-MM-DD.db`, table `bodies(request_id, req_body, resp_body)`, zstd-compressed. The day-file row is written before the hot marker. `GetRequest` hydrates from the day file; `ListRequests` does not, unless `Filter.WithBodies` is set.
 
 The `warnings` FK **is** enforced: the DSN sets `_pragma=foreign_keys(ON)`
 ([internal/store/store.go:43](../../internal/store/store.go)). `PurgeOlderThan` does not lean on the
