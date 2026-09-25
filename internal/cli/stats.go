@@ -61,7 +61,9 @@ func runStats(args []string, w io.Writer, st *store.Store) error {
 	if err != nil {
 		return fmt.Errorf("stats: by model: %w", err)
 	}
-	byDay, err := st.StatsByPeriod(ctx, sinceTime, time.Time{}, "day")
+	// lens stats stays UTC. The dashboard defaults to Local, so the two show
+	// different daily totals for the same data when the zone is not UTC.
+	byDay, err := st.StatsByPeriod(ctx, sinceTime, time.Time{}, "day", 0)
 	if err != nil {
 		return fmt.Errorf("stats: by day: %w", err)
 	}

@@ -34,7 +34,7 @@ type Store interface {
 	ListRequests(ctx context.Context, f store.Filter) ([]*store.Request, error)
 	StatsSummary(ctx context.Context, since, until time.Time) (*store.Summary, error)
 	StatsByModel(ctx context.Context, since, until time.Time) ([]store.ModelStat, error)
-	StatsByPeriod(ctx context.Context, since, until time.Time, granularity string) ([]store.PeriodStat, error)
+	StatsByPeriod(ctx context.Context, since, until time.Time, granularity string, tzOffsetMin int) ([]store.PeriodStat, error)
 	StatsByCostSource(ctx context.Context, since, until time.Time) ([]store.CostSourceStat, error)
 	ListSessions(ctx context.Context, f store.Filter) ([]*store.Session, error)
 	GetSession(ctx context.Context, id string) (*store.Session, error)
@@ -284,6 +284,20 @@ func parseTimeBoundParam(r *http.Request, key string) (time.Time, error) {
 // read only that one.
 func parseSinceParam(r *http.Request) (time.Time, error) {
 	return parseTimeBoundParam(r, "since")
+}
+
+// parseTzOffsetParam reads ?tz_offset as minutes east of UTC. Absent is 0.
+// Values outside −720..840 are rejected. The integer is bound, never spliced into SQL.
+func parseTzOffsetParam(r *http.Request) (int, error) {
+	s := r.URL.Query().Get("tz_offset")
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < -720 || n > 840 {
+		return 0, fmt.Errorf("invalid tz_offset %q: want minutes east of UTC in [-720,840]", s)
+	}
+	return n, nil
 }
 
 // parseGranularityParam reads ?granularity, defaulting to "day" when absent.
@@ -791,6 +805,11 @@ func (a *api) stats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	tzOffset, err := parseTzOffsetParam(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	summary, err := a.store.StatsSummary(r.Context(), since, until)
 	if err != nil {
@@ -802,7 +821,7 @@ func (a *api) stats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	byPeriod, err := a.store.StatsByPeriod(r.Context(), since, until, granularity)
+	byPeriod, err := a.store.StatsByPeriod(r.Context(), since, until, granularity, tzOffset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

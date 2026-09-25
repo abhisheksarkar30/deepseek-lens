@@ -638,6 +638,31 @@ func TestStatsInvalidGranularityIs400(t *testing.T) {
 	}
 }
 
+func TestStatsTzOffset(t *testing.T) {
+	st := newTestStore(t)
+	a := time.Date(2026, 1, 1, 20, 0, 0, 0, time.UTC)
+	b := time.Date(2026, 1, 2, 2, 0, 0, 0, time.UTC)
+	seedRequest(t, st, func(r *store.Request) { r.StartedAt = a })
+	seedRequest(t, st, func(r *store.Request) { r.StartedAt = b })
+	handler, _, _, _ := newTestAPI(t, st)
+
+	for _, q := range []string{"?tz_offset=abc", "?tz_offset=900", "?tz_offset=-900"} {
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/stats"+q, nil))
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400", q, rr.Code)
+		}
+	}
+	utc := getStats(t, handler, "")
+	if len(utc.ByPeriod) != 2 {
+		t.Fatalf("default buckets = %d, want 2", len(utc.ByPeriod))
+	}
+	ist := getStats(t, handler, "?tz_offset=330")
+	if len(ist.ByPeriod) != 1 {
+		t.Fatalf("tz_offset=330 buckets = %+v, want 1", ist.ByPeriod)
+	}
+}
+
 func TestStatsMalformedUntilIs400(t *testing.T) {
 	st := newTestStore(t)
 	handler, _, _, _ := newTestAPI(t, st)

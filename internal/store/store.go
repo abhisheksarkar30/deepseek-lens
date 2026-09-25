@@ -568,19 +568,23 @@ func periodFormat(granularity string) (string, error) {
 // bucket — hour, day, week, or month per granularity — for dashboard charts,
 // over requests in [since, until). Buckets with no rows are absent, not
 // zero-filled, so callers must tolerate a non-contiguous series.
-func (s *Store) StatsByPeriod(ctx context.Context, since, until time.Time, granularity string) ([]PeriodStat, error) {
+func (s *Store) StatsByPeriod(ctx context.Context, since, until time.Time, granularity string, tzOffsetMin int) ([]PeriodStat, error) {
 	format, err := periodFormat(granularity)
 	if err != nil {
 		return nil, err
 	}
 	where, args := statsWindow(since, until)
+	// ponytail: fixed offset, DST is an hour off across a change.
+	// The modifier is a bound parameter built from the integer, never spliced SQL.
+	shift := fmt.Sprintf("%d seconds", tzOffsetMin*60)
+	qargs := append([]any{shift}, args...)
 	rows, err := s.reader.QueryContext(ctx, `
-		SELECT strftime('`+format+`', started_at / 1000000000, 'unixepoch'),
+		SELECT strftime('`+format+`', started_at / 1000000000, 'unixepoch', ?),
 			COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0),
 			COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0)
 		FROM requests`+where+`
 		GROUP BY 1
-		ORDER BY 1`, args...)
+		ORDER BY 1`, qargs...)
 	if err != nil {
 		return nil, fmt.Errorf("store: stats by period: %w", err)
 	}

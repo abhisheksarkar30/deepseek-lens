@@ -499,7 +499,7 @@ func TestStatsByPeriod(t *testing.T) {
 	// buckets runs StatsByPeriod and returns the period labels in order.
 	buckets := func(t *testing.T, s *Store, since, until time.Time, gran string) []string {
 		t.Helper()
-		stats, err := s.StatsByPeriod(ctx, since, until, gran)
+		stats, err := s.StatsByPeriod(ctx, since, until, gran, 0)
 		if err != nil {
 			t.Fatalf("StatsByPeriod(%s): %v", gran, err)
 		}
@@ -516,7 +516,7 @@ func TestStatsByPeriod(t *testing.T) {
 		day3 := time.Date(2026, 1, 3, 10, 0, 0, 0, time.UTC)
 		s := seed(t, day1, day1, day2, day3, day3, day3)
 
-		stats, err := s.StatsByPeriod(ctx, day1.Add(-time.Hour), time.Time{}, "day")
+		stats, err := s.StatsByPeriod(ctx, day1.Add(-time.Hour), time.Time{}, "day", 0)
 		if err != nil {
 			t.Fatalf("StatsByPeriod: %v", err)
 		}
@@ -578,7 +578,7 @@ func TestStatsByPeriod(t *testing.T) {
 
 	t.Run("invalid granularity", func(t *testing.T) {
 		s := seed(t, time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC))
-		stats, err := s.StatsByPeriod(ctx, time.Time{}, time.Time{}, "fortnight")
+		stats, err := s.StatsByPeriod(ctx, time.Time{}, time.Time{}, "fortnight", 0)
 		if err == nil {
 			t.Fatal("StatsByPeriod(fortnight): got nil error, want non-nil")
 		}
@@ -1596,7 +1596,7 @@ func TestStatsCoveringIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	periods1, err := s.StatsByPeriod(ctx, since, time.Time{}, "day")
+	periods1, err := s.StatsByPeriod(ctx, since, time.Time{}, "day", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1621,7 +1621,7 @@ func TestStatsCoveringIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	periods2, err := s.StatsByPeriod(ctx, since, time.Time{}, "day")
+	periods2, err := s.StatsByPeriod(ctx, since, time.Time{}, "day", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1641,5 +1641,34 @@ func TestStatsCoveringIndex(t *testing.T) {
 	}
 	if fmt.Sprint(models1) != fmt.Sprint(models2) || fmt.Sprint(periods1) != fmt.Sprint(periods2) || fmt.Sprint(sources1) != fmt.Sprint(sources2) {
 		t.Fatalf("aggregate rows differ without the index")
+	}
+}
+
+func TestStatsByPeriodTZOffset(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	// 20:00Z and 02:00Z the next calendar day are the same IST day (UTC+5:30).
+	a := time.Date(2026, 1, 1, 20, 0, 0, 0, time.UTC)
+	b := time.Date(2026, 1, 2, 2, 0, 0, 0, time.UTC)
+	for _, when := range []time.Time{a, b} {
+		r := fullRequest()
+		r.StartedAt = when
+		if _, err := s.InsertRequest(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	utc, err := s.StatsByPeriod(ctx, time.Time{}, time.Time{}, "day", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(utc) != 2 {
+		t.Fatalf("UTC buckets = %d, want 2 (%+v)", len(utc), utc)
+	}
+	ist, err := s.StatsByPeriod(ctx, time.Time{}, time.Time{}, "day", 330)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ist) != 1 || ist[0].RequestCount != 2 {
+		t.Fatalf("IST buckets = %+v, want one period of 2", ist)
 	}
 }
