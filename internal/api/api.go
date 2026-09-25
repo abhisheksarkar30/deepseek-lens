@@ -342,6 +342,11 @@ func (a *api) listRequests(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	until, err := parseTimeBoundParam(r, "until")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	warn, err := parseBoolParam(r, "warn")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -357,6 +362,7 @@ func (a *api) listRequests(w http.ResponseWriter, r *http.Request) {
 		Limit:      limit,
 		Offset:     offset,
 		Since:      since,
+		Until:      until,
 		SessionID:  q.Get("session"),
 		Model:      q.Get("model"),
 		OnlyWarned: warn,

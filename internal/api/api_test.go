@@ -115,6 +115,41 @@ func TestListRequests(t *testing.T) {
 	}
 }
 
+func TestListRequestsUntil(t *testing.T) {
+	st := newTestStore(t)
+	t0 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	seedRequest(t, st, func(r *store.Request) { r.StartedAt = t0 })
+	seedRequest(t, st, func(r *store.Request) { r.StartedAt = t0.Add(time.Hour) })
+	handler, _, _, _ := newTestAPI(t, st)
+
+	until := url.QueryEscape(t0.Add(time.Hour).Format(time.RFC3339))
+	since := url.QueryEscape(t0.Format(time.RFC3339))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/requests?since="+since+"&until="+until, nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	got := decodeJSON[[]*store.Request](t, rr.Body)
+	if len(got) != 1 {
+		t.Fatalf("window len = %d, want 1", len(got))
+	}
+	if rr.Header().Get("X-Total-Count") != "1" {
+		t.Fatalf("X-Total-Count = %q, want 1", rr.Header().Get("X-Total-Count"))
+	}
+
+	rr = httptest.NewRecorder()
+	later := url.QueryEscape(t0.Add(2 * time.Hour).Format(time.RFC3339))
+	earlier := url.QueryEscape(t0.Add(3 * time.Hour).Format(time.RFC3339))
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/requests?since="+earlier+"&until="+later, nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("inverted status = %d, want 200", rr.Code)
+	}
+	empty := decodeJSON[[]*store.Request](t, rr.Body)
+	if len(empty) != 0 {
+		t.Fatalf("since > until len = %d, want 0", len(empty))
+	}
+}
+
 func TestListRequestsLimit(t *testing.T) {
 	st := newTestStore(t)
 	for i := 0; i < 5; i++ {
@@ -864,6 +899,7 @@ func TestMalformedQueryParams(t *testing.T) {
 	cases := []string{
 		"/api/requests?limit=abc",
 		"/api/requests?since=notatime",
+		"/api/requests?until=notatime",
 	}
 	for _, path := range cases {
 		rr := httptest.NewRecorder()

@@ -1672,3 +1672,40 @@ func TestStatsByPeriodTZOffset(t *testing.T) {
 		t.Fatalf("IST buckets = %+v, want one period of 2", ist)
 	}
 }
+
+func TestFilterUntilHalfOpen(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	before := at.Add(-time.Nanosecond)
+	for _, when := range []time.Time{before, at} {
+		r := fullRequest()
+		r.StartedAt = when
+		if _, err := s.InsertRequest(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := Filter{Until: at}
+	got, err := s.ListRequests(ctx, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !got[0].StartedAt.Equal(before) {
+		t.Fatalf("until half-open got %d rows", len(got))
+	}
+	n, err := s.CountRequests(ctx, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(got) {
+		t.Fatalf("CountRequests = %d, list = %d", n, len(got))
+	}
+	both := Filter{Since: before, Until: at}
+	got, err = s.ListRequests(ctx, both)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("since+until len = %d, want 1", len(got))
+	}
+}

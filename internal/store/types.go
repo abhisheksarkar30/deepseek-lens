@@ -127,6 +127,7 @@ type Filter struct {
 	Limit      int // 0 means DefaultLimit, never unbounded
 	Offset     int // 0 means start at the top; a negative offset is clamped to 0
 	Since      time.Time
+	Until      time.Time // zero means unbounded; applied as started_at < ? (half-open)
 	SessionID  string
 	Model      string
 	OnlyWarned bool

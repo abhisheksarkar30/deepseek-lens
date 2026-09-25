@@ -331,6 +331,10 @@ func requestWhere(f Filter) (string, []interface{}) {
 		where = append(where, "started_at >= ?")
 		args = append(args, f.Since.UnixNano())
 	}
+	if !f.Until.IsZero() {
+		where = append(where, "started_at < ?")
+		args = append(args, f.Until.UnixNano())
+	}
 	if f.SessionID != "" {
 		where = append(where, "session_id = ?")
 		args = append(args, f.SessionID)
