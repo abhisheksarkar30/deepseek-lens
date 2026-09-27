@@ -55,8 +55,14 @@ These are copied from `family-monitor` and are enforced, not advisory.
 - **PR** — title is the same `GI#<n> <type>: <summary>` as the branch's headline commit. Body is
   `## Summary`, `## Verification`, `## Beads`, then `Closes #<n>`. A story branch PRs directly into
   `main`.
-- **Commits end with** `Co-Authored-By: Claude Code <noreply@anthropic.com>`; PR bodies end with
-  `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+- **AI attribution — the format is fixed here, the identity comes from the session.** Every commit
+  ends with a `Co-Authored-By: <agentic tool> (<model>) <noreply@vendor>` trailer naming both the
+  tool that produced the change and the model behind it; every PR body ends with a
+  `🤖 Generated with [<agentic tool>](<tool url>) using <model>` footer. The *values* — the tool
+  name (Claude Code / Cursor / GitHub Copilot / Cline / …) and the model name — are whatever the
+  **active session's own instructions** specify; read them from the session every time. Never
+  hardcode either in this file, and never copy one in from another repo; if the session names
+  neither, omit the trailer and say so.
 
 ### Enforcement
 
