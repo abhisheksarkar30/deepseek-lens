@@ -55,8 +55,10 @@ These are copied from `family-monitor` and are enforced, not advisory.
 - **PR** — title is the same `GI#<n> <type>: <summary>` as the branch's headline commit. Body is
   `## Summary`, `## Verification`, `## Beads`, then `Closes #<n>`. A story branch PRs directly into
   `main`.
-- **Commits end with** `Co-Authored-By: Claude Code <noreply@anthropic.com>`; PR bodies end with
-  `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+- **AI attribution comes from the session, not from this file.** Append whatever commit trailer and
+  PR footer the *active session's own instructions* specify — the harness states them, and they
+  change over time. Never hardcode a tool name, model or email here, and never copy one in from
+  another repo. If the session states none, add none and say so rather than inventing one.
 
 ### Enforcement
 
